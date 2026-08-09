@@ -6,6 +6,19 @@
 
 ---
 
+## 문서
+
+| 문서 | 내용 |
+|---|---|
+| **[USAGE.md](USAGE.md)** | 사용 설명서 — 설치부터 채널 등록·추출·질의·대시보드·문제 해결까지 단계별 안내 |
+| [COOKIES_GUIDE.md](COOKIES_GUIDE.md) | 쿠키 인증 설정 — 429 차단 해결, 멤버십 영상 추출 조건 |
+| [REQUIREMENTS.md](REQUIREMENTS.md) | PRD — 기능 요구사항(FR) 정의 |
+| [DESIGN.md](DESIGN.md) | 설계서 — 아키텍처·모듈 설계·검증 게이트 |
+
+처음 사용한다면 **USAGE.md**부터 읽으세요. 아래 빠른 시작은 요약본입니다.
+
+---
+
 ## 빠른 시작
 
 ```bash

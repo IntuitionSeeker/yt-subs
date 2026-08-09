@@ -1,0 +1,24 @@
+# 민감 정보 — 절대 커밋 금지
+cookies.txt
+firefox_profile/
+*.sqlite
+*.sqlite-*
+.env
+.claude/settings.local.json
+
+# 개인 채널 목록 (실행 시 yt.sh가 빈 파일로 자동 생성)
+channels.yaml
+
+# 추출 결과물 (용량 크고 사용자별로 다름)
+output/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# 개발 중 임시 산출물
+_workspace/
+
+# OS
+.DS_Store

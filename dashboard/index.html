@@ -1,0 +1,985 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>YouTube KL · 자막 지식층</title>
+<style>
+  :root {
+    --bg: #0d1117;
+    --panel: #161b22;
+    --border: #30363d;
+    --text: #e6edf3;
+    --muted: #8b949e;
+    --accent: #2f81f7;
+    --accent-dim: #1f6feb33;
+    --green: #3fb950;
+    --warn: #d29922;
+    --red: #f85149;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Consolas, monospace;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Pretendard", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans); height: 100vh; overflow: hidden;
+    display: flex; flex-direction: column;
+  }
+
+  /* ── 상단 헤더: 탭 + 상태 pill ── */
+  .topbar {
+    display: flex; align-items: center; gap: 6px;
+    padding: 10px 16px; background: var(--panel);
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .logo { font-family: var(--mono); font-size: 13px; color: var(--accent);
+    letter-spacing: 0.5px; margin-right: 14px; }
+  .tab-btn {
+    background: none; border: none; color: var(--muted); cursor: pointer;
+    font-size: 13px; font-family: var(--sans); padding: 6px 12px; border-radius: 6px;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--text); background: var(--accent-dim); font-weight: 600; }
+  .topbar-right { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+  .pill {
+    font-family: var(--mono); font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 999px; padding: 3px 10px;
+    display: inline-flex; align-items: center; gap: 6px; cursor: default;
+  }
+  .pill.ok    { color: var(--green); border-color: #2ea04366; }
+  .pill.warn  { color: var(--warn); border-color: #d2992266; }
+  .pill.job   { color: var(--accent); border-color: #2f81f766; cursor: pointer; }
+
+  .view { flex: 1; overflow: hidden; }
+  .hidden { display: none !important; }
+
+  select, input {
+    background: var(--bg); color: var(--text);
+    border: 1px solid var(--border); border-radius: 6px;
+    padding: 8px 10px; font-size: 13px; font-family: var(--sans);
+  }
+  select:focus, input:focus { outline: none; border-color: var(--accent); }
+  button.primary {
+    background: var(--accent); color: #fff; border: none; border-radius: 6px;
+    padding: 8px 20px; font-size: 14px; font-weight: 600; cursor: pointer;
+  }
+  button.primary:disabled { opacity: 0.5; cursor: not-allowed; }
+  button.ghost {
+    background: none; border: 1px solid var(--border); color: var(--muted);
+    border-radius: 6px; padding: 6px 14px; font-size: 13px; cursor: pointer;
+  }
+  button.ghost:hover { color: var(--text); border-color: var(--muted); }
+  .spinner { display: inline-block; width: 13px; height: 13px;
+    border: 2px solid var(--muted); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin 0.7s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .notice { font-size: 12px; color: var(--warn); font-family: var(--mono);
+    padding: 8px 12px; border: 1px dashed #d2992266; border-radius: 6px; }
+
+  /* ═══ [질의] 뷰 (기존 채팅 UI) ═══ */
+  .app { display: grid; grid-template-columns: 320px 1fr; height: 100%; }
+  .sidebar {
+    background: var(--panel); border-right: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow: hidden;
+  }
+  .sidebar-head { padding: 16px; border-bottom: 1px solid var(--border); }
+  .sidebar-head select { width: 100%; }
+  .sidebar-head select + select { margin-top: 8px; }
+  .video-list { flex: 1; overflow-y: auto; padding: 8px; }
+  .video-item {
+    padding: 10px 12px; border-radius: 6px; cursor: pointer;
+    border: 1px solid transparent; margin-bottom: 4px;
+  }
+  .video-item:hover { background: var(--accent-dim); border-color: var(--border); }
+  .video-title { font-size: 13px; line-height: 1.4; margin-bottom: 4px; }
+  .video-meta { font-family: var(--mono); font-size: 11px; color: var(--muted);
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .ticker { color: var(--green); }
+  .playlist { color: var(--accent); background: var(--accent-dim);
+    border-radius: 4px; padding: 0 5px; }
+  .live { color: var(--warn); border: 1px solid var(--warn);
+    border-radius: 4px; padding: 0 4px; }
+  .subtype { color: var(--muted); }
+
+  .main { display: flex; flex-direction: column; overflow: hidden; }
+  .main-head {
+    padding: 14px 20px; border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .main-head h1 { font-size: 15px; font-weight: 600; }
+  .badge { font-family: var(--mono); font-size: 11px; color: var(--muted);
+    border: 1px solid var(--border); border-radius: 4px; padding: 2px 8px; }
+  .chat { flex: 1; overflow-y: auto; padding: 20px; display: flex;
+    flex-direction: column; gap: 16px; }
+  .msg { max-width: 85%; padding: 12px 16px; border-radius: 10px; line-height: 1.6;
+    font-size: 14px; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: #fff; }
+  .msg.bot { align-self: flex-start; background: var(--panel);
+    border: 1px solid var(--border); }
+  .msg.bot table { border-collapse: collapse; margin: 8px 0; width: 100%; }
+  .msg.bot th, .msg.bot td { border: 1px solid var(--border); padding: 6px 10px;
+    font-size: 13px; text-align: left; }
+  .msg.bot th { background: var(--bg); }
+  .msg.bot a { color: var(--accent); }
+  .trace { font-family: var(--mono); font-size: 11px; color: var(--muted);
+    border-left: 2px solid var(--border); padding-left: 10px; margin-top: 8px; }
+  .empty { color: var(--muted); text-align: center; margin-top: 80px; font-size: 14px; }
+  .empty code { font-family: var(--mono); color: var(--accent); }
+  .input-bar { padding: 16px 20px; border-top: 1px solid var(--border);
+    display: flex; gap: 10px; }
+  .input-bar input { flex: 1; }
+  .disclaimer { font-size: 11px; color: var(--muted); padding: 0 20px 10px;
+    font-family: var(--mono); }
+
+  /* ═══ [라이브러리] 뷰 ═══ */
+  .lib { height: 100%; display: flex; flex-direction: column; gap: 12px;
+    padding: 16px; max-width: 1200px; margin: 0 auto; width: 100%; }
+  .chan-cards { display: flex; gap: 10px; flex-wrap: wrap; flex-shrink: 0; }
+  .chan-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 14px; cursor: pointer; min-width: 220px;
+  }
+  .chan-card.active { border-color: var(--accent); background: var(--accent-dim); }
+  .chan-card { position: relative; }
+  .chan-name { font-size: 14px; font-weight: 600; margin-bottom: 4px; padding-right: 20px; }
+  .chan-stats { font-family: var(--mono); font-size: 11px; color: var(--muted); }
+  .icon-btn { background: none; border: none; cursor: pointer; color: var(--muted);
+    font-size: 13px; line-height: 1; padding: 2px 4px; border-radius: 4px; }
+  .icon-btn:hover { color: var(--red); background: var(--accent-dim); }
+  .chan-del { position: absolute; top: 8px; right: 8px; }
+  .lib-row { position: relative; }
+  .video-del { margin-left: auto; }
+  .lib-detail-actions { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+  .copy-btn { background: var(--accent-dim); border: 1px solid var(--border);
+    color: var(--text); font-size: 12px; padding: 4px 10px; border-radius: 6px;
+    cursor: pointer; font-family: var(--mono); }
+  .copy-btn:hover { border-color: var(--accent); }
+  .lib-filters { display: flex; gap: 8px; flex-shrink: 0; }
+  .lib-filters input[type=text] { flex: 1; }
+  .lib-body { flex: 1; display: grid; grid-template-columns: minmax(340px, 1fr) 1fr;
+    gap: 12px; overflow: hidden; }
+  .lib-list { overflow-y: auto; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel); padding: 6px; }
+  .lib-row { padding: 9px 10px; border-radius: 6px; cursor: pointer;
+    border: 1px solid transparent; }
+  .lib-row:hover { background: var(--accent-dim); }
+  .lib-row.sel { border-color: var(--accent); }
+  .lib-row .video-meta { margin-top: 3px; }
+  .ext-link { color: var(--muted); text-decoration: none; }
+  .ext-link:hover { color: var(--accent); }
+  .lib-detail { overflow-y: auto; border: 1px solid var(--border); border-radius: 8px;
+    background: var(--panel); padding: 14px; }
+  .lib-detail h3 { font-size: 13px; margin-bottom: 10px; color: var(--accent);
+    font-family: var(--mono); font-weight: 600; }
+  .lib-detail pre { white-space: pre-wrap; word-break: break-word; font-size: 13px;
+    line-height: 1.7; font-family: var(--sans); color: var(--text); }
+  .hit { border: 1px solid var(--border); border-radius: 6px; padding: 10px;
+    margin-bottom: 8px; }
+  .hit .score { font-family: var(--mono); font-size: 11px; color: var(--green); }
+  .hit .txt { font-size: 13px; line-height: 1.6; margin: 6px 0; }
+  .hit a { color: var(--accent); font-size: 12px; font-family: var(--mono); }
+
+  /* ═══ [추출] 뷰 ═══ */
+  .ext { height: 100%; overflow-y: auto; padding: 20px; }
+  .ext-inner { max-width: 780px; margin: 0 auto; display: flex;
+    flex-direction: column; gap: 14px; }
+  .card { background: var(--panel); border: 1px solid var(--border);
+    border-radius: 10px; padding: 16px; }
+  .card h2 { font-size: 14px; margin-bottom: 12px; }
+  .url-row { display: flex; gap: 10px; }
+  .url-row input { flex: 1; }
+  .opt-row { display: flex; align-items: center; gap: 8px; margin-top: 10px;
+    font-size: 13px; color: var(--muted); }
+  .cond-grid { display: grid; grid-template-columns: 130px 1fr; gap: 10px 14px;
+    align-items: center; font-size: 13px; }
+  .cond-grid label.k { color: var(--muted); }
+  .cond-grid .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .cond-grid input[type=number] { width: 90px; }
+  .cond-grid input[type=date] { color-scheme: dark; }
+  .chip { font-size: 12px; border: 1px solid var(--border); border-radius: 999px;
+    padding: 3px 10px; cursor: pointer; color: var(--muted); user-select: none; }
+  .chip.on { color: var(--accent); border-color: var(--accent);
+    background: var(--accent-dim); }
+  .preview-bar { display: flex; align-items: center; gap: 10px; margin-top: 14px;
+    padding-top: 12px; border-top: 1px solid var(--border); }
+  .preview-count { font-family: var(--mono); font-size: 13px; color: var(--green); }
+  .preview-list { max-height: 220px; overflow-y: auto; margin-top: 10px;
+    border: 1px solid var(--border); border-radius: 6px; padding: 4px; }
+  .preview-item { font-size: 12px; padding: 5px 8px; color: var(--muted);
+    display: flex; gap: 8px; align-items: center; }
+  .preview-item .t { color: var(--text); flex: 1; white-space: nowrap;
+    overflow: hidden; text-overflow: ellipsis; }
+  .mem { color: var(--red); border: 1px solid var(--red); border-radius: 4px;
+    padding: 0 4px; font-size: 11px; }
+  .done-tag { color: var(--green); font-size: 11px; }
+  .progress-outer { background: var(--bg); border: 1px solid var(--border);
+    border-radius: 999px; height: 12px; overflow: hidden; margin: 10px 0; }
+  .progress-inner { background: var(--accent); height: 100%; width: 0%;
+    transition: width .5s; }
+  .job-meta { font-family: var(--mono); font-size: 12px; color: var(--muted);
+    display: flex; gap: 14px; flex-wrap: wrap; }
+  .job-stats { margin-top: 8px; font-size: 13px; }
+  .cookie-detail { font-family: var(--mono); font-size: 12px; color: var(--muted);
+    line-height: 1.8; }
+  .cookie-detail .w { color: var(--warn); }
+</style>
+</head>
+<body>
+
+<!-- ═══ 헤더: 탭 + 상태 ═══ -->
+<header class="topbar">
+  <span class="logo">▢ YOUTUBE-KL</span>
+  <button class="tab-btn active" data-tab="query" onclick="switchTab('query')">질의</button>
+  <button class="tab-btn" data-tab="library" onclick="switchTab('library')">라이브러리</button>
+  <button class="tab-btn" data-tab="extract" onclick="switchTab('extract')">추출</button>
+  <div class="topbar-right">
+    <span class="pill job hidden" id="jobPill" onclick="switchTab('extract')"></span>
+    <span class="pill" id="cookiePill">🍪 확인 중…</span>
+  </div>
+</header>
+
+<!-- ═══ [질의] 뷰 ═══ -->
+<div class="view" id="view-query">
+<div class="app">
+  <aside class="sidebar">
+    <div class="sidebar-head">
+      <select id="channelSel" onchange="loadVideos()"></select>
+      <select id="categorySel" onchange="renderVideos()">
+        <option value="">전체 카테고리</option>
+      </select>
+    </div>
+    <div class="video-list" id="videoList"></div>
+  </aside>
+  <section class="main">
+    <div class="main-head">
+      <h1>자막 지식층 질의</h1>
+      <span class="badge" id="videoCount">— 영상</span>
+    </div>
+    <div class="chat" id="chat">
+      <div class="empty">
+        영상 내용에 대해 질문해보세요.<br><br>
+        <code>최근 영상에서 언급된 종목 정리해줘</code><br>
+        <code>삼성전자 전망을 시간순으로 비교해줘</code>
+      </div>
+    </div>
+    <div class="disclaimer">
+      ※ 영상 내용은 제작자 의견이며, 투자 자문이 아닙니다. 판단의 책임은 본인에게 있습니다.
+    </div>
+    <div class="input-bar">
+      <input id="q" placeholder="질문 입력 후 Enter…"
+             onkeydown="if(event.key==='Enter')send()">
+      <button class="primary" id="sendBtn" onclick="send()">전송</button>
+    </div>
+  </section>
+</div>
+</div>
+
+<!-- ═══ [라이브러리] 뷰 ═══ -->
+<div class="view hidden" id="view-library">
+<div class="lib">
+  <div class="chan-cards" id="chanCards"></div>
+  <div class="lib-filters">
+    <input type="text" id="libTitleFilter" placeholder="제목 필터 (즉시 적용)…"
+           oninput="renderLibList()">
+    <select id="libCategorySel" onchange="renderLibList()">
+      <option value="">전체 카테고리</option>
+    </select>
+    <input type="text" id="libSearchQ" placeholder="🔍 자막 내용 검색 (Enter)…"
+           style="flex:1" onkeydown="if(event.key==='Enter')libSearch()">
+  </div>
+  <div class="lib-body">
+    <div class="lib-list" id="libList"></div>
+    <div class="lib-detail" id="libDetail">
+      <div class="empty" style="margin-top:40px">영상을 클릭하면 자막 전문,<br>
+        내용 검색 시 관련 구간이 표시됩니다.</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<!-- ═══ [추출] 뷰 ═══ -->
+<div class="view hidden" id="view-extract">
+<div class="ext"><div class="ext-inner">
+
+  <div class="card">
+    <h2>⛏ 자막 추출</h2>
+    <div class="url-row">
+      <input id="extUrl"
+             placeholder="유튜브 채널 URL (@채널) 또는 영상 URL (watch?v=…) 입력"
+             onkeydown="if(event.key==='Enter')extStart()">
+      <button class="primary" id="extBtn" onclick="extStart()">스캔 / 추출</button>
+    </div>
+    <div class="opt-row">
+      <input type="checkbox" id="extIndex" checked>
+      <label for="extIndex">완료 후 자동 인덱싱 (검색에 즉시 반영)</label>
+    </div>
+    <div id="extNotice" class="notice hidden" style="margin-top:10px"></div>
+  </div>
+
+  <!-- 등록된 채널 + 추출 현황 (FR22) — 클릭하면 그 채널의 추출 조건으로 이동 -->
+  <div class="card">
+    <h2>📋 등록된 채널 <span style="color:var(--muted);font-weight:400;font-size:12px">클릭하면 추출 조건이 열립니다</span></h2>
+    <div class="chan-cards" id="extChanCards">
+      <span class="spinner"></span>
+    </div>
+  </div>
+
+  <!-- 채널 스캔 결과 → 조건 선택 (FR17.3~17.6) -->
+  <div class="card hidden" id="condCard">
+    <h2>🎛 추출 조건 <span id="condChannel" style="color:var(--muted);font-weight:400"></span></h2>
+    <div class="cond-grid">
+      <label class="k">최신 업로드</label>
+      <div class="row">
+        <input type="checkbox" id="fLatestOn" checked onchange="renderPreview()">
+        <input type="number" id="fLatestN" value="10" min="1" onchange="renderPreview()" oninput="renderPreview()">
+        <span style="color:var(--muted)">개</span>
+      </div>
+      <label class="k">업로드 기간</label>
+      <div class="row">
+        <input type="date" id="fSince" onchange="renderPreview()"> ~
+        <input type="date" id="fUntil" onchange="renderPreview()">
+        <span style="color:var(--muted);font-size:12px">(채널 스캔은 날짜 미제공 → 처리 시 확정)</span>
+      </div>
+      <label class="k">카테고리</label>
+      <div class="row" id="fCats"></div>
+      <label class="k">멤버십 전용</label>
+      <div class="row">
+        <input type="checkbox" id="fMembers" onchange="renderPreview()">
+        <label for="fMembers" style="color:var(--muted)">포함
+          <span style="font-size:12px">(유효한 멤버십 계정 쿠키 필요)</span></label>
+      </div>
+      <label class="k">제목 검색어</label>
+      <div class="row"><input type="text" id="fKeyword" style="flex:1"
+        placeholder="제목 부분일치…" oninput="renderPreview()"></div>
+    </div>
+    <div class="preview-bar">
+      <span class="preview-count" id="previewCount">대상 0개</span>
+      <span style="flex:1"></span>
+      <button class="ghost" onclick="condReset()">조건 초기화</button>
+      <button class="primary" id="condGo" onclick="extRun()">선택 대상 추출 시작</button>
+    </div>
+    <div class="preview-list" id="previewList"></div>
+  </div>
+
+  <!-- 진행 카드 (FR18) -->
+  <div class="card hidden" id="jobCard">
+    <h2>📡 작업 진행</h2>
+    <div class="job-meta" id="jobMeta"></div>
+    <div class="progress-outer"><div class="progress-inner" id="jobBar"></div></div>
+    <div class="job-meta" id="jobCurrent"></div>
+    <div class="job-stats" id="jobStats"></div>
+    <div class="preview-bar" style="border:0;padding-top:6px">
+      <span style="flex:1"></span>
+      <button class="ghost" id="jobCancelBtn" onclick="extCancel()">취소</button>
+    </div>
+  </div>
+
+  <!-- 쿠키 상태 (FR19) -->
+  <div class="card">
+    <h2>🍪 쿠키 상태</h2>
+    <div class="cookie-detail" id="cookieDetail">확인 중…</div>
+  </div>
+
+</div></div>
+</div>
+
+<script>
+const API = "";  // 동일 출처
+let currentChannel = null;
+let allVideos = [];
+
+/* ═══ 탭 ═══ */
+function switchTab(name) {
+  document.querySelectorAll(".tab-btn").forEach(b =>
+    b.classList.toggle("active", b.dataset.tab === name));
+  ["query", "library", "extract"].forEach(t =>
+    document.getElementById("view-" + t).classList.toggle("hidden", t !== name));
+  if (name === "library" && !libLoaded) loadLibrary();
+  if (name === "extract") loadExtChannels();   // 매번 새로 조회 — 방금 끝난 작업 반영 (FR22)
+}
+
+/* ═══ [질의] 뷰 (기존) ═══ */
+async function loadChannels() {
+  const r = await fetch(`${API}/channels`);
+  const { channels } = await r.json();
+  const sel = document.getElementById("channelSel");
+  sel.innerHTML = channels.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  if (channels.length) { currentChannel = channels[0]; loadVideos(); }
+}
+
+async function loadVideos() {
+  currentChannel = document.getElementById("channelSel").value;
+  const r = await fetch(`${API}/videos?channel=${encodeURIComponent(currentChannel)}`);
+  const { videos } = await r.json();
+  allVideos = videos;
+  populateCategories(videos);
+  renderVideos();
+}
+
+function populateCategories(videos) {
+  const sel = document.getElementById("categorySel");
+  const prev = sel.value;
+  const cats = [...new Set(videos.flatMap(v => v.playlists || []))].sort();
+  sel.innerHTML = `<option value="">전체 카테고리</option>` +
+    cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  if ([...sel.options].some(o => o.value === prev)) sel.value = prev;
+}
+
+function renderVideos() {
+  const cat = document.getElementById("categorySel").value;
+  const videos = cat
+    ? allVideos.filter(v => (v.playlists || []).includes(cat))
+    : allVideos;
+  document.getElementById("videoCount").textContent = `${videos.length} 영상`;
+  document.getElementById("videoList").innerHTML = videos.map(v => `
+    <div class="video-item" data-vid="${esc(v.video_id)}">
+      <div class="video-title">${esc(v.title || "(제목없음)")}</div>
+      <div class="video-meta">
+        <span>${fmtDate(v.upload_date)}</span>
+        ${v.content_type === "live" ? `<span class="live">LIVE</span>` : ""}
+        ${(v.playlists||[]).map(p=>`<span class="playlist">${esc(p)}</span>`).join("")}
+        ${(v.tickers||[]).map(t=>`<span class="ticker">${t}</span>`).join("")}
+      </div>
+    </div>`).join("");
+}
+
+async function summarize(vid, el) {
+  switchTab("query");
+  addMsg("user", `📄 영상 요약 요청: ${el.querySelector('.video-title')?.textContent || vid}`);
+  const bot = addMsg("bot", "");
+  spin(bot);
+  try {
+    const r = await fetch(`${API}/summary`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ channel: currentChannel, video_id: vid })
+    });
+    const { summary } = await r.json();
+    bot.innerHTML = render(summary);
+  } catch(e) { bot.textContent = "오류: " + e; }
+}
+
+async function send() {
+  const input = document.getElementById("q");
+  const q = input.value.trim();
+  if (!q || !currentChannel) return;
+  input.value = "";
+  setLoading(true);
+  addMsg("user", q);
+  const bot = addMsg("bot", "");
+  spin(bot);
+  try {
+    const r = await fetch(`${API}/ask`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ channel: currentChannel, question: q })
+    });
+    const data = await r.json();
+    let html = render(data.answer || "(응답 없음)");
+    if (data.trace && data.trace.length) {
+      html += `<div class="trace">🔧 ${data.steps}단계 · 도구 ${data.trace.length}회 호출</div>`;
+    }
+    bot.innerHTML = html;
+  } catch(e) { bot.textContent = "오류: " + e; }
+  setLoading(false);
+}
+
+/* ═══ [라이브러리] 뷰 (FR20) ═══ */
+let libLoaded = false;
+let libChannel = null;
+let libVideos = [];
+
+async function loadLibrary() {
+  libLoaded = true;
+  let stats = null;
+  try {
+    const r = await fetch(`${API}/channels/stats`);
+    if (r.ok) stats = (await r.json()).channels;
+  } catch (e) {}
+  if (!stats) {
+    document.getElementById("chanCards").innerHTML =
+      `<div class="empty">채널 목록을 불러오지 못했습니다 (/channels/stats 응답 오류). 서버 상태를 확인하세요.</div>`;
+    return;
+  }
+  document.getElementById("chanCards").innerHTML = stats.map(c => `
+    <div class="chan-card" data-name="${esc(c.name)}">
+      <button class="icon-btn chan-del" title="채널 삭제">🗑</button>
+      <div class="chan-name">${esc(c.name)}</div>
+      <div class="chan-stats">추출 ${c.extracted} · 🔒 ${c.members_only}
+        · 무자막 ${c.no_sub} · 최근 ${fmtDate(String(c.last_extracted||"").replaceAll("-","").slice(0,8))}</div>
+    </div>`).join("");
+  if (stats.length) libSelect(stats[0].name);
+}
+
+async function libSelect(name) {
+  libChannel = name;
+  document.querySelectorAll(".chan-card").forEach(c =>
+    c.classList.toggle("active", c.dataset.name === name));
+  const { videos } = await (await fetch(
+    `${API}/videos?channel=${encodeURIComponent(name)}`)).json();
+  libVideos = videos;
+  const cats = [...new Set(videos.flatMap(v => v.playlists || []))].sort();
+  document.getElementById("libCategorySel").innerHTML =
+    `<option value="">전체 카테고리</option>` +
+    cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  renderLibList();
+}
+
+function renderLibList() {
+  const kw = document.getElementById("libTitleFilter").value.trim().toLowerCase();
+  const cat = document.getElementById("libCategorySel").value;
+  const vids = libVideos.filter(v =>
+    (!kw || (v.title || "").toLowerCase().includes(kw)) &&
+    (!cat || (v.playlists || []).includes(cat)));
+  document.getElementById("libList").innerHTML = vids.map(v => `
+    <div class="lib-row" data-basename="${esc(v.basename)}">
+      <div class="video-title">${esc(v.title || "(제목없음)")}</div>
+      <div class="video-meta">
+        <span>${fmtDate(v.upload_date)}</span>
+        ${v.content_type === "live" ? `<span class="live">LIVE</span>` : ""}
+        ${v.sub_type ? `<span class="subtype">${v.sub_type === "manual" ? "📝수동" : "🤖자동"}</span>` : ""}
+        ${(v.playlists||[]).map(p=>`<span class="playlist">${esc(p)}</span>`).join("")}
+        <a class="ext-link" href="${esc(v.url || '#')}" target="_blank">↗ 원본</a>
+        <button class="icon-btn video-del" title="영상 삭제">🗑</button>
+      </div>
+    </div>`).join("") ||
+    `<div class="empty" style="margin-top:30px">조건에 맞는 영상이 없습니다</div>`;
+}
+
+let libDetailText = null;
+let libDetailBasename = null;
+
+async function showSubtitle(basename, el) {
+  document.querySelectorAll(".lib-row").forEach(r => r.classList.remove("sel"));
+  if (el) el.classList.add("sel");
+  const panel = document.getElementById("libDetail");
+  panel.innerHTML = `<span class="spinner"></span>`;
+  libDetailText = null;
+  libDetailBasename = basename;
+  try {
+    const r = await fetch(`${API}/subtitle?channel=${encodeURIComponent(libChannel)}` +
+                          `&basename=${encodeURIComponent(basename)}`);
+    if (!r.ok) throw new Error(r.status);
+    const { text } = await r.json();
+    libDetailText = text;
+    panel.innerHTML = `<div class="lib-detail-actions">
+        <button class="copy-btn" id="copySubBtn" onclick="copySubtitle()">📋 복사</button>
+      </div>
+      <h3>📄 ${esc(basename)}</h3><pre>${esc(text)}</pre>`;
+  } catch (e) {
+    panel.innerHTML = `<div class="notice">자막을 불러오지 못했습니다 — ${esc(basename)}.
+      서버 상태를 확인한 뒤 다시 시도하세요.</div>`;
+  }
+}
+
+async function copySubtitle() {
+  if (libDetailText == null) return;
+  try {
+    await navigator.clipboard.writeText(libDetailText);
+  } catch (e) {
+    const ta = document.createElement("textarea");
+    ta.value = libDetailText;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  }
+  const btn = document.getElementById("copySubBtn");
+  if (!btn) return;
+  const orig = btn.textContent;
+  btn.textContent = "✅ 복사됨";
+  setTimeout(() => { if (document.getElementById("copySubBtn") === btn) btn.textContent = orig; }, 1500);
+}
+
+/* ═══ 삭제 (FR21) ═══ */
+async function deleteChannel(name) {
+  if (!confirm(`채널 '${name}'의 등록을 해제할까요?`)) return;
+  const purge = confirm(
+    `output 폴더의 자막·메타데이터·검색 인덱스까지 완전히 삭제할까요?\n` +
+    `되돌릴 수 없습니다. [취소]하면 파일은 보존한 채 등록만 해제합니다.`);
+  try {
+    const r = await fetch(`${API}/channels/delete`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel: name, purge }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+    if (libChannel === name) { libChannel = null; libVideos = []; }
+    loadLibrary();
+  } catch (e) { alert("삭제 실패: " + e.message); }
+}
+
+async function deleteVideo(basename) {
+  if (!confirm("이 영상을 삭제할까요?\n자막·메타데이터·검색 인덱스가 모두 제거됩니다.")) return;
+  try {
+    const r = await fetch(`${API}/videos/delete`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ channel: libChannel, basename }),
+    });
+    if (!r.ok) throw new Error((await r.json().catch(() => ({}))).detail || r.status);
+    libVideos = libVideos.filter(v => v.basename !== basename);
+    renderLibList();
+    if (libDetailBasename === basename) {
+      libDetailText = null; libDetailBasename = null;
+      document.getElementById("libDetail").innerHTML =
+        `<div class="empty" style="margin-top:40px">영상을 클릭하면 자막 전문,<br>
+          내용 검색 시 관련 구간이 표시됩니다.</div>`;
+    }
+  } catch (e) { alert("삭제 실패: " + e.message); }
+}
+
+async function libSearch() {
+  const q = document.getElementById("libSearchQ").value.trim();
+  if (!q || !libChannel) return;
+  const cat = document.getElementById("libCategorySel").value || null;
+  const panel = document.getElementById("libDetail");
+  panel.innerHTML = `<span class="spinner"></span>`;
+  try {
+    const r = await fetch(`${API}/search`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ channel: libChannel, query: q, top_k: 8, category: cat })
+    });
+    const { results } = await r.json();
+    panel.innerHTML = `<h3>🔍 "${esc(q)}" 검색 결과 ${results.length}건</h3>` +
+      (results.map(h => `
+        <div class="hit">
+          <span class="score">${h.score}</span>
+          <span style="font-size:12px;color:var(--muted)"> ${esc(h.title)} · ${fmtDate(h.upload_date)}</span>
+          <div class="txt">${esc(h.text)}</div>
+          <a href="${esc(h.source_url || '#')}" target="_blank">▶ 해당 구간 열기</a>
+        </div>`).join("") ||
+      `<div class="empty">결과 없음</div>`);
+  } catch (e) { panel.innerHTML = `<div class="notice">검색 오류: ${esc(String(e))}</div>`; }
+}
+
+/* ═══ [추출] 뷰 — 등록 채널 현황 (FR22) ═══ */
+async function loadExtChannels() {
+  let stats = [];
+  try {
+    const r = await fetch(`${API}/channels/stats`);
+    if (r.ok) stats = (await r.json()).channels;
+  } catch (e) {}
+  document.getElementById("extChanCards").innerHTML = stats.length
+    ? stats.map(c => `
+      <div class="chan-card" data-name="${esc(c.name)}" data-url="${esc(c.url)}">
+        <div class="chan-name">${esc(c.name)}</div>
+        <div class="chan-stats">추출 ${c.extracted} · 🔒 ${c.members_only}
+          · 무자막 ${c.no_sub} · 최근 ${fmtDate(String(c.last_extracted||"").replaceAll("-","").slice(0,8))}</div>
+      </div>`).join("")
+    : `<div class="empty" style="margin:6px 0 0;font-size:13px;text-align:left">
+         등록된 채널이 없습니다. 위에 채널 URL을 입력해 추가하세요.</div>`;
+}
+
+async function extSelectChannel(name, url) {
+  document.querySelectorAll("#extChanCards .chan-card").forEach(c =>
+    c.classList.toggle("active", c.dataset.name === name));
+  document.getElementById("extUrl").value = url;
+  await extStart();
+}
+
+/* ═══ [추출] 뷰 (FR17·FR18) ═══ */
+let scanData = null;   // {scan_id, channel, videos:[...], playlists:[...]}
+
+const VIDEO_URL_RE = /(?:watch\?v=|youtu\.be\/|\/shorts\/|\/live\/)([\w-]{11})/;
+
+function extNotice(msg, show = true) {
+  const el = document.getElementById("extNotice");
+  el.classList.toggle("hidden", !show);
+  el.textContent = msg || "";
+}
+
+async function extStart() {
+  const url = document.getElementById("extUrl").value.trim();
+  if (!url) return;
+  extNotice("", false);
+  document.getElementById("condCard").classList.add("hidden");
+
+  if (VIDEO_URL_RE.test(url)) {          // 단일 영상 → 즉시 추출 (FR17.2)
+    await extRequest({ url, index: document.getElementById("extIndex").checked });
+    return;
+  }
+  // 채널 URL → 사전 스캔 (FR17.3)
+  const btn = document.getElementById("extBtn");
+  btn.disabled = true; btn.innerHTML = `<span class="spinner"></span>`;
+  try {
+    const r = await fetch(`${API}/extract/scan`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({ url })
+    });
+    if (!r.ok) throw new Error(r.status);
+    scanData = await r.json();
+  } catch (e) {
+    extNotice("채널 스캔에 실패했습니다 (/extract/scan). 서버 상태를 확인한 뒤 다시 시도하세요.");
+    btn.disabled = false; btn.textContent = "스캔 / 추출";
+    return;
+  }
+  btn.disabled = false; btn.textContent = "스캔 / 추출";
+  openCondCard();
+}
+
+function openCondCard() {
+  document.getElementById("condCard").classList.remove("hidden");
+  document.getElementById("condChannel").textContent =
+    `— ${scanData.channel} · 후보 ${scanData.videos.length}개`;
+  document.getElementById("fCats").innerHTML = scanData.playlists.map(p =>
+    `<span class="chip" data-cat="${esc(p)}">${esc(p)}</span>`).join("") ||
+    `<span style="color:var(--muted);font-size:12px">재생목록 없음</span>`;
+  renderPreview();
+}
+
+function condFilters() {
+  return {
+    latest: document.getElementById("fLatestOn").checked
+      ? parseInt(document.getElementById("fLatestN").value) || null : null,
+    since: document.getElementById("fSince").value.replaceAll("-", "") || null,
+    until: document.getElementById("fUntil").value.replaceAll("-", "") || null,
+    categories: [...document.querySelectorAll("#fCats .chip.on")].map(c => c.dataset.cat),
+    include_members: document.getElementById("fMembers").checked,
+    keyword: document.getElementById("fKeyword").value.trim() || null,
+  };
+}
+
+function condReset() {
+  document.getElementById("fLatestOn").checked = true;
+  document.getElementById("fLatestN").value = 10;
+  document.getElementById("fSince").value = "";
+  document.getElementById("fUntil").value = "";
+  document.getElementById("fMembers").checked = false;
+  document.getElementById("fKeyword").value = "";
+  document.querySelectorAll("#fCats .chip.on").forEach(c => c.classList.remove("on"));
+  renderPreview();
+}
+
+function applyFilters(videos, f) {
+  let out = videos.filter(v =>
+    (f.include_members || !v.members_only) &&
+    (!f.keyword || (v.title || "").toLowerCase().includes(f.keyword.toLowerCase())) &&
+    (!f.categories.length ||
+      (v.playlists || []).some(p => f.categories.includes(p))));
+  if (f.latest) out = out.slice(0, f.latest);   // 채널 탭 정렬 = 최신순
+  return out;
+}
+
+function renderPreview() {
+  if (!scanData) return;
+  const f = condFilters();
+  const vids = applyFilters(scanData.videos, f);
+  const dateNote = (f.since || f.until)
+    ? ` <span style="color:var(--warn)">(+기간 조건은 처리 시 확정)</span>` : "";
+  document.getElementById("previewCount").innerHTML =
+    `대상 ${vids.length}개${dateNote}`;
+  document.getElementById("previewList").innerHTML = vids.map(v => `
+    <div class="preview-item">
+      <span class="t">${esc(v.title || v.id)}</span>
+      ${v.content_type === "live" ? `<span class="live">LIVE</span>` : ""}
+      ${v.members_only ? `<span class="mem">멤버십</span>` : ""}
+      ${v.extracted ? `<span class="done-tag">✓ 추출됨</span>` : ""}
+    </div>`).join("");
+}
+
+async function extRun() {
+  if (!scanData) return;
+  await extRequest({
+    scan_id: scanData.scan_id,
+    filters: condFilters(),
+    index: document.getElementById("extIndex").checked,
+  });
+}
+
+async function extRequest(body) {
+  try {
+    const r = await fetch(`${API}/extract`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(body)
+    });
+    if (r.status === 409) {
+      extNotice("이미 실행 중인 작업이 있습니다. 완료 후 다시 시도하세요.");
+      return;
+    }
+    if (r.status === 400) {          // 서버가 준 사유를 그대로 노출 (scan_id 만료 등)
+      let detail = "";
+      try { detail = (await r.json()).detail || ""; } catch (e) {}
+      extNotice(detail || "요청이 올바르지 않습니다. 다시 스캔한 뒤 시도하세요.");
+      return;
+    }
+    if (!r.ok) throw new Error(r.status);
+    startPolling();
+  } catch (e) {
+    extNotice("추출 요청에 실패했습니다 (/extract). 서버 상태를 확인한 뒤 다시 시도하세요.");
+  }
+}
+
+/* ── 진행 폴링 (FR18.3) ── */
+let pollTimer = null;
+
+function startPolling() {
+  if (pollTimer) return;
+  pollTimer = setInterval(pollJob, 2000);
+  pollJob();
+}
+
+async function pollJob() {
+  let job = null;
+  try {
+    const r = await fetch(`${API}/extract/status`);
+    if (r.ok) job = (await r.json()).job;
+  } catch (e) {}
+  const pill = document.getElementById("jobPill");
+  const card = document.getElementById("jobCard");
+  if (!job || job.status === "idle") {
+    pill.classList.add("hidden");
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+    return;
+  }
+  card.classList.remove("hidden");
+  const running = job.status === "running";
+  pill.classList.toggle("hidden", !running);
+  if (running) pill.innerHTML =
+    `<span class="spinner"></span> ${job.done ?? 0}/${job.total ?? "?"} 추출 중`;
+
+  document.getElementById("jobMeta").innerHTML =
+    `<span>${esc(job.channel || "")}</span><span>${esc(job.kind || "")}</span>` +
+    `<span>phase: ${esc(job.phase || "")}</span><span>status: ${esc(job.status)}</span>`;
+  const pct = job.total ? Math.round((job.done || 0) / job.total * 100) : 0;
+  document.getElementById("jobBar").style.width = pct + "%";
+  document.getElementById("jobCurrent").innerHTML = job.current_title
+    ? `현재: ${esc(job.current_title)}` : "";
+  const s = job.stats || {};
+  document.getElementById("jobStats").textContent =
+    `신규 ${s.new ?? 0} · 수정 ${s.updated ?? 0} · 스킵 ${s.skip ?? 0} · ` +
+    `무자막 ${s.no_sub ?? 0} · 멤버십 ${s.members_only ?? 0} · 오류 ${s.error ?? 0}` +
+    (s.date_skip ? ` · 기간외 ${s.date_skip}` : "") +
+    (s.live_wait ? ` · 📡라이브 대기 ${s.live_wait}` : "");
+  document.getElementById("jobCancelBtn").disabled = !running;
+  if (!running && pollTimer) {
+    clearInterval(pollTimer); pollTimer = null;
+    libLoaded = false;              // 라이브러리 캐시 무효화
+    loadExtChannels();              // 추출 탭 채널 현황 갱신 (FR22)
+    loadVideos();                   // 질의 사이드바 갱신
+  }
+}
+
+async function extCancel() {
+  document.getElementById("jobCancelBtn").disabled = true;
+  try {
+    await fetch(`${API}/extract/cancel`, { method: "POST" });
+    extNotice("취소 요청됨 — 현재 영상 완료 후 중단됩니다.");
+  } catch (e) {}
+}
+
+/* ── 쿠키 상태 (FR19.3) ── */
+async function loadCookieStatus() {
+  const pill = document.getElementById("cookiePill");
+  const detail = document.getElementById("cookieDetail");
+  try {
+    const r = await fetch(`${API}/cookies`);
+    if (!r.ok) throw new Error(r.status);
+    const c = await r.json();
+    if (!c.present) {
+      pill.className = "pill"; pill.textContent = "🍪 쿠키 없음";
+      detail.innerHTML = `cookies.txt: <span class="w">없음</span> — 비로그인 모드로 동작.
+        멤버십 영상 추출 불가. COOKIES_GUIDE.md 참고.`;
+    } else if (c.warning) {
+      pill.className = "pill warn"; pill.textContent = "🍪 만료 의심";
+      detail.innerHTML = `cookies.txt: 있음 · 수정 ${esc(c.mtime || "?")}<br>
+        <span class="w">⚠ 최근 실행에서 만료 경고 감지 (${esc(c.detected_at || "?")})</span><br>
+        브라우저에서 쿠키를 재추출한 뒤 serve를 재시작하세요 (COOKIES_GUIDE.md).`;
+    } else {
+      pill.className = "pill ok";
+      pill.textContent = `🍪 쿠키 · ${(c.mtime || "").slice(5, 10)}`;
+      detail.innerHTML = `cookies.txt: 있음 · 수정 ${esc(c.mtime || "?")} · 경고 없음`;
+    }
+  } catch (e) {
+    pill.className = "pill"; pill.textContent = "🍪 상태 미확인";
+    pill.title = "쿠키 상태 API(/cookies) 응답 오류";
+    detail.innerHTML = `<div class="notice">쿠키 상태를 불러오지 못했습니다 (/cookies).
+      서버 상태를 확인한 뒤 다시 시도하세요.</div>`;
+  }
+}
+
+/* ═══ 공용 헬퍼 ═══ */
+function addMsg(role, text) {
+  const chat = document.getElementById("chat");
+  const empty = chat.querySelector(".empty");
+  if (empty) empty.remove();
+  const div = document.createElement("div");
+  div.className = "msg " + role;
+  div.textContent = text;
+  chat.appendChild(div);
+  chat.scrollTop = chat.scrollHeight;
+  return div;
+}
+function spin(el) { el.innerHTML = '<span class="spinner"></span>'; }
+function setLoading(on) {
+  const btn = document.getElementById("sendBtn");
+  btn.disabled = on;
+  btn.innerHTML = on ? '<span class="spinner"></span>' : '전송';
+}
+// HTML 이스케이프 — 텍스트·속성값 양쪽에서 안전하도록 따옴표까지 처리 (F-1)
+function esc(s) {
+  return String(s ?? "")
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+function fmtDate(d) {
+  if (!d || d.length !== 8) return d || "";
+  return `${d.slice(0,4)}.${d.slice(4,6)}.${d.slice(6,8)}`;
+}
+function render(md) {
+  let html = esc(md);
+  html = html.replace(/(https?:\/\/[^\s)]+)/g, '<a href="$1" target="_blank">$1</a>');
+  const lines = html.split("\n");
+  let out = [], inTable = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (/^\s*\|.*\|\s*$/.test(line)) {
+      if (!inTable) { out.push("<table>"); inTable = true; }
+      if (/^\s*\|[\s:|-]+\|\s*$/.test(line)) continue;
+      const cells = line.split("|").slice(1, -1);
+      const tag = (i+1 < lines.length && /^\s*\|[\s:|-]+\|\s*$/.test(lines[i+1])) ? "th" : "td";
+      out.push("<tr>" + cells.map(c=>`<${tag}>${c.trim()}</${tag}>`).join("") + "</tr>");
+    } else {
+      if (inTable) { out.push("</table>"); inTable = false; }
+      out.push(line);
+    }
+  }
+  if (inTable) out.push("</table>");
+  return out.join("\n");
+}
+
+/* ═══ 이벤트 위임 (F-1) ═══
+   동적 목록은 인라인 onclick에 문자열을 박지 않고 data-* + 위임으로 처리한다.
+   basename·채널명에 작은따옴표가 있어도 핸들러가 깨지지 않는다. */
+function delegate(containerId, selector, handler) {
+  const box = document.getElementById(containerId);
+  if (!box) return;
+  box.addEventListener("click", (ev) => {
+    const el = ev.target.closest(selector);
+    if (!el || !box.contains(el)) return;
+    // 목록 안의 링크(↗ 원본 등)는 자체 동작만 수행
+    if (ev.target.closest("a")) return;
+    handler(el, ev);
+  });
+}
+
+delegate("videoList", ".video-item", el => summarize(el.dataset.vid, el));
+delegate("chanCards", ".chan-del", (el, ev) => {
+  ev.stopImmediatePropagation();
+  deleteChannel(el.closest(".chan-card").dataset.name);
+});
+delegate("chanCards", ".chan-card", el => libSelect(el.dataset.name));
+delegate("extChanCards", ".chan-card", el => extSelectChannel(el.dataset.name, el.dataset.url));
+delegate("libList", ".video-del", (el, ev) => {
+  ev.stopImmediatePropagation();
+  deleteVideo(el.closest(".lib-row").dataset.basename);
+});
+delegate("libList", ".lib-row", el => showSubtitle(el.dataset.basename, el));
+delegate("fCats", ".chip", el => { el.classList.toggle("on"); renderPreview(); });
+
+loadChannels();
+loadCookieStatus();
+pollJob();          // 새로고침 시 진행 중 작업 이어 표시
+</script>
+</body>
+</html>

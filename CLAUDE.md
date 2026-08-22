@@ -14,3 +14,4 @@
 | 2026-08-02 | 초기 구성 (에이전트 3 · 스킬 5) | 전체 | DESIGN v4.0 정합화와 함께 하네스 신규 구축 |
 | 2026-08-02 | FR17~20 백엔드 구현(대시보드 추출·진행율·쿠키상태·라이브러리) + 문서 v4.1 동기화 | REQUIREMENTS.md · DESIGN.md · qa-verifier.md | 구현 확정 사항(조건 적용 순서·취소 시 인덱싱 생략·limit 예산 = DQ-14~16)을 스펙에 반영하고, 회귀 기준선을 실측값으로 정정 |
 | 2026-08-09 | v1 공개 릴리스 준비 — 죽은 코드 제거(kl_query·server·index.html 폴백), 민감 파일 git 추적 해제, mock 테스트·SKILL.md 경로 이식성 수정, README·LICENSE 정비 | 전체 | GitHub 공개(IntuitionSeeker/yt-subs)를 위한 보안·품질 정리, 히스토리 스쿼시로 v1 시작 |
+| 2026-08-22 | 429 방어 강화(FR14.2~14.3, 문서 v4.6) — 배치 휴식 랜덤화(8~12개/45~90초), 429 백오프 후 같은 영상 1회 재시도 | REQUIREMENTS.md · DESIGN.md · config.py · extractor.py · mock_scan_test.py | 실측: 고정 60초 휴식 직후 첫 요청마다 429(2026 패턴 기반 탐지) + 일시 429로 영상 3개 영구 누락 → 서명 제거·재시도로 해소 |

@@ -18,6 +18,7 @@
 > **v4.3:** 진행 중 라이브 가드 `live_wait`(FR16.5, §2.2), `reflow_sentences` 문장 단위 TXT(FR23), stats 8키
 > **v4.4:** Firefox 쿠키 직접 읽기(FR13.6) — `_ydl_opts` cookiesfrombrowser 우선, `has_auth()` 재시도 판정, `/cookies.source`
 > **v4.5:** [추출] 탭 채널 현황 카드(FR22, §2.9) — 신규 백엔드 없이 기존 `GET /channels/stats`·`extStart` 재사용
+> **v4.6:** 429 방어 강화(FR14.2~14.3, §2.2·§3.2) — 배치 크기·휴식 랜덤화(`BATCH_SIZE_RANGE`·`BATCH_REST_RANGE`), 429 백오프 후 같은 영상 1회 재시도(재시도도 요청 예산 소비, `stats.error`는 최종 포기 기준)
 
 ---
 
@@ -239,11 +240,12 @@ scan_playlists() ─ video_id→재생목록 매핑 (FR15, 요청 1+N회)
   decide(vid, mod, up)     ─ 날짜 미제공 → skip (FR2.6)
   ├ skip                   → 통과
   ├ limit 도달             → 카나리아 종료 (FR14.5)
-  ├ BATCH_SIZE마다 휴식     (FR14.2)
+  ├ 8~12개(랜덤)마다 45~90초(랜덤) 휴식 (FR14.2)
   └ process_video(vid, action, content_type, pl_map)
       ├ 성공   → stats, 429카운터 리셋
       ├ 멤버십 → _mark_skip(members_only)
-      └ 429    → 지수 백오프, 연속 5회 시 중단 (FR13.5·14.3)
+      └ 429    → 지수 백오프 → 같은 영상 1회 재시도(예산 소비),
+                 재실패 시 포기·다음 영상, 연속 5회 시 중단 (FR13.5·14.3)
 state.save() → _backfill_meta(매핑 비면 생략, FR15.5) → 통계 로그
 ```
 

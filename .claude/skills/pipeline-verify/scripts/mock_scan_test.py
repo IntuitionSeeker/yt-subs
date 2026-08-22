@@ -324,13 +324,14 @@ v15c, s15c = run_limit("limit_mix",
                        lambda vid: {"x1": "ok", "x2": "date_skip"}.get(vid, "no_sub"))
 assert v15c == ["x1", "x2"], v15c
 assert s15c["new"] == 1 and s15c["date_skip"] == 1 and s15c["no_sub"] == 0, s15c
-# 429 경로도 예산 소비 + 백오프·연속중단 보호는 그대로 (sleep만 mock)
+# 429 경로: 백오프 후 같은 영상 1회 재시도(FR14.3), 재시도도 예산 소비(DQ-16)
+# → limit=2는 x1의 시도 2회로 소진되고, error는 최종 포기 영상 수(1) 기준
 with mock.patch("extractor.time.sleep") as slept:
     v15d, s15d = run_limit("limit_429",
                            lambda vid: (_ for _ in ()).throw(
                                Exception("HTTP Error 429: Too Many Requests")))
-assert v15d == ["x1", "x2"], v15d
-assert s15d["error"] == 2, s15d
+assert v15d == ["x1", "x1"], f"429 후 같은 영상을 재시도해야 함: {v15d}"
+assert s15d["error"] == 1, s15d
 assert [c.args[0] for c in slept.call_args_list] == [config.BACKOFF_BASE_SEC,
                                                      config.BACKOFF_BASE_SEC * 2], \
     "지수 백오프가 유지돼야 함"

@@ -14,6 +14,7 @@
 > **v4.5:** [추출] 탭에 등록 채널 현황 카드 추가, 클릭 시 조건 화면 자동 진입(FR22, 프론트 전용)  
 > **v4.6:** 429 방어 강화(FR14.2~14.3) — 배치 휴식 랜덤화(고정 패턴 서명 제거), 429 백오프 후 같은 영상 1회 재시도(일시 차단으로 인한 영구 누락 방지)  
 > **v4.7:** 재생목록 URL 추출(FR24) — 대시보드에서 `/playlist?list=…` 스캔·조건 추출, 결과물은 원채널 폴더 저장 + 재생목록 제목을 카테고리로 병합  
+> **v4.8:** 채널 폴더(FR25) — channels.yaml `group` 필드, 라이브러리 폴더 섹션·전체 보기(영상 병합), 재생목록 추출 시 신규 채널 자동 폴더 지정  
 > **범위:** 채널 관리 → 자막 추출 → 메타데이터 수집 → 품질 검토 → 지식층 인덱싱 → 질의·대시보드
 
 ---
@@ -364,6 +365,18 @@
 | FR24.5 | 조건 필터(FR17.4)는 동일 적용(카테고리 칩은 재생목록 스캔에서 비어 있음). 진행율은 전체 대상 기준으로 채널 그룹 경계에서 연속 합산하고, 취소는 우아한 취소(FR18.2 준용). 완료 후 자동 인덱싱은 변경(new+updated>0)이 있는 채널만 각각 수행(FR17.9 준용) | 필수 |
 | FR24.6 | CLI(`yt.sh add/run`)는 범위 외 — 재생목록 지원은 대시보드 전용 | 명시 |
 
+### FR25 — 채널 폴더(그룹) (신규)
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR25.1 | `channels.yaml` 채널 항목에 선택 필드 `group`(폴더명) 추가. `ChannelRegistry.set_group(name, group)` — 빈 값/None이면 필드 제거(폴더 해제), 미등록 채널은 KeyError | 필수 |
+| FR25.2 | `POST /channels/group` `{channel, group?}` — 폴더 지정/변경/해제. 미등록 채널 404, `group`은 트림 후 빈 문자열이면 해제 | 필수 |
+| FR25.3 | `GET /channels/stats` 응답 항목에 `group` 필드 포함 (미분류는 `""`) | 필수 |
+| FR25.4 | 라이브러리 탭 — `group` 있는 채널은 📁 폴더 섹션으로 묶어 표시(접기/펼치기, 헤더에 채널 수·추출 합계). 미분류 채널은 기존대로 최상위 카드. 접기 상태는 세션 내 유지 | 필수 |
+| FR25.5 | 폴더 "전체 보기" — 폴더 내 모든 채널의 영상을 병합해 최신순 단일 목록으로 표시하고 각 행에 원채널 배지를 단다. 자막 열람·영상 삭제는 각 영상의 원채널 기준으로 동작. 내용 검색(FR20.4)은 채널 단위 기능이므로 폴더 모드에서는 동작하지 않는다 | 필수 |
+| FR25.6 | 채널 카드의 📁 버튼으로 폴더 지정/변경/해제 (프롬프트 입력, 빈 값 = 해제) | 필수 |
+| FR25.7 | 재생목록 추출(FR24.3)에서 **신규 등록**되는 채널은 재생목록 제목 폴더에 자동 지정된다. 이미 등록돼 있던 채널의 폴더는 변경하지 않는다 | 필수 |
+
 ---
 
 ## 4. 비기능 요구사항 (NFR)
@@ -431,6 +444,7 @@
 | FR16.5 | `Extractor.process_video` (live_status 가드, state 미기록) · stats `live_wait` 키 | extract_log.csv `live_wait` 행 |
 | FR23.1~23.3 | `subtitle_utils.reflow_sentences` · `srt_to_txt` | txt/ (문장 단위 개행) |
 | FR24.1~24.6 | `dashboard/jobs.py` (`classify_url` playlist 분기 · `_do_scan_playlist` · `_run_playlist` · `_merged_pl_map`) · `dashboard/index.html` (kind 표시·채널 배지) | 원채널 output/ + playlists.json 병합 |
+| FR25.1~25.7 | `channel_registry.set_group` · `dashboard/server.py` (`POST /channels/group`·stats group) · `dashboard/jobs.py` (`_run_playlist` 자동 폴더) · `dashboard/index.html` (폴더 섹션·전체 보기·📁 버튼) | channels.yaml `group` 필드 |
 | FR21.1~21.4 | `dashboard/server.py` (`POST /videos/delete`·`POST /channels/delete`·`_reject_path_traversal`) · `kl_indexer.KLIndexer.delete_video` · `dashboard/jobs.py` (`JobManager.is_busy`) · `dashboard/index.html` (`deleteVideo`·`deleteChannel`·`copySubtitle`) | output 파일·state·ChromaDB 정리 |
 | FR22.1~22.4 | `dashboard/index.html` (`loadExtChannels`·`extSelectChannel`·`switchTab`·`pollJob` 완료 훅) — 기존 `GET /channels/stats`(FR20.1)·`extStart`(FR17.3~17.4) 재사용, 신규 백엔드 없음 | (프론트 전용) |
 

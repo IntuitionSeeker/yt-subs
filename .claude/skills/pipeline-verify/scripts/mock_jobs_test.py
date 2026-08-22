@@ -462,6 +462,9 @@ assert runs9[0]["pl_map"]["p1"] == ["기존카테고리", "퀀트 강의"], \
     "병합 full-map 전달 (DQ-17)"
 assert "퀀트 강의" in runs9[0]["pl_map"]["p2"]
 assert reg9.add.called, "미등록 채널(UC…) 자동 등록"
+assert [c.args for c in reg9.set_group.call_args_list] == \
+    [("UCzzzzzzzzzzzzzzzzzzzzzz", "퀀트 강의")], \
+    "신규 등록 채널만 재생목록 폴더 자동 지정 (FR25.7)"
 assert job9["status"] == "done" and job9["total"] == 3 and job9["done"] == 3
 assert job9["stats"]["new"] == 2 and job9["stats"]["skip"] == 1
 assert [c.args[0] for c in idx9.call_args_list] == ["chanA"], \

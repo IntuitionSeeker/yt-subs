@@ -20,6 +20,7 @@
 > **v4.5:** [추출] 탭 채널 현황 카드(FR22, §2.9) — 신규 백엔드 없이 기존 `GET /channels/stats`·`extStart` 재사용
 > **v4.6:** 429 방어 강화(FR14.2~14.3, §2.2·§3.2) — 배치 크기·휴식 랜덤화(`BATCH_SIZE_RANGE`·`BATCH_REST_RANGE`), 429 백오프 후 같은 영상 1회 재시도(재시도도 요청 예산 소비, `stats.error`는 최종 포기 기준)
 > **v4.7:** 재생목록 URL 추출(FR24, §2.10) — `classify_url` playlist 분기, `_do_scan_playlist`(flat 스캔·채널별 state 조회), `_run_playlist`(채널 그룹 순차 실행·진행율 합산·채널별 인덱싱), `_merged_pl_map`(재생목록 제목 카테고리 병합), 신규 결정 DQ-17
+> **v4.8:** 채널 폴더(FR25) — `ChannelRegistry.set_group`(channels.yaml `group` 필드), `POST /channels/group`, `/channels/stats.group`, 라이브러리 폴더 섹션·병합 전체 보기(프론트 병합·원채널 배지·자막/삭제는 영상별 원채널로 라우팅), `_run_playlist` 신규 채널 자동 폴더 지정
 
 ---
 

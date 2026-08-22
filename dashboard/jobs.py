@@ -554,10 +554,12 @@ class JobManager:
                 if self._cancel.is_set():
                     cancelled = True
                     break
-                # 미등록 채널은 추출 시점에 자동 등록 (FR17.2 선례 준용)
+                # 미등록 채널은 추출 시점에 자동 등록 + 재생목록 폴더 지정 (FR25.7)
+                # (기존 등록 채널의 폴더는 건드리지 않는다)
                 if name not in reg.names():
                     reg.add(ch_url, lang=config.DEFAULT_LANG)
-                    log.info(f"✅ 채널 등록: {name}")
+                    reg.set_group(name, pl_title)
+                    log.info(f"✅ 채널 등록: {name} (폴더: {pl_title})")
                 try:
                     ch_cfg = reg.get(name)
                 except KeyError:                 # pragma: no cover - 방어적 폴백

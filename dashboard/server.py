@@ -82,6 +82,11 @@ class ChannelDeleteRequest(BaseModel):
     purge: bool = False
 
 
+class ChannelGroupRequest(BaseModel):
+    channel: str
+    group: str | None = None      # 트림 후 빈 값이면 폴더 해제 (FR25.2)
+
+
 def _reject_path_traversal(*values: str):
     """경로 파라미터 1차 검증 — 자막 조회(FR20.3)·삭제(FR21) 엔드포인트 공통."""
     for value in values:
@@ -213,6 +218,7 @@ def channels_stats():
             "url": ch.get("url", ""),
             "lang": ch.get("lang", config.DEFAULT_LANG),
             "added_at": ch.get("added_at", ""),
+            "group": ch.get("group", ""),          # 채널 폴더 (FR25.3)
             "extracted": extracted,
             "members_only": members_only,
             "no_sub": no_sub,
@@ -220,6 +226,17 @@ def channels_stats():
             "last_extracted": last,
         })
     return {"channels": out}
+
+
+@app.post("/channels/group")
+def channels_group(req: ChannelGroupRequest):
+    """채널 폴더 지정/변경/해제. FR25.2"""
+    reg = ChannelRegistry()
+    try:
+        group = reg.set_group(req.channel, req.group)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
+    return {"ok": True, "channel": req.channel, "group": group}
 
 
 @app.post("/videos/delete")

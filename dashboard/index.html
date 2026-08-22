@@ -506,6 +506,7 @@ let libGroup = null;             // 폴더 전체 보기 중이면 폴더명 (FR
 let libVideos = [];
 let libStats = [];
 const libCollapsed = new Set();  // 접힌 폴더 (세션 내 유지, FR25.4)
+const libSeenGroups = new Set(); // 처음 보는 폴더는 접힌 상태로 시작 (FR25.4)
 
 function chanCardHtml(c) {
   return `
@@ -539,6 +540,7 @@ async function loadLibrary() {
   for (const g of Object.keys(groups).sort()) {
     const list = groups[g];
     const ext = list.reduce((s, c) => s + (c.extracted || 0), 0);
+    if (!libSeenGroups.has(g)) { libSeenGroups.add(g); libCollapsed.add(g); }
     const collapsed = libCollapsed.has(g);
     html += `
       <div class="chan-group ${collapsed ? "collapsed" : ""}" data-group="${esc(g)}">
@@ -725,21 +727,50 @@ async function deleteVideo(basename) {
 
 async function libSearch() {
   const q = document.getElementById("libSearchQ").value.trim();
-  if (!q || !libChannel) return;
+  if (!q || (!libChannel && !libGroup)) return;
   const cat = document.getElementById("libCategorySel").value || null;
   const panel = document.getElementById("libDetail");
   panel.innerHTML = `<span class="spinner"></span>`;
   try {
-    const r = await fetch(`${API}/search`, {
-      method: "POST", headers: {"Content-Type": "application/json"},
-      body: JSON.stringify({ channel: libChannel, query: q, top_k: 8, category: cat })
-    });
-    const { results } = await r.json();
-    panel.innerHTML = `<h3>🔍 "${esc(q)}" 검색 결과 ${results.length}건</h3>` +
+    let results, head;
+    if (libGroup) {
+      // 폴더 모드: 인덱스 있는 소속 채널마다 검색 후 점수순 병합 (FR25.8)
+      const names = libStats
+        .filter(c => c.group === libGroup && (c.extracted || 0) > 0)
+        .map(c => c.name);
+      results = [];
+      const CONC = 3;                          // 임베딩 부하 제한 — 동시 3채널
+      for (let i = 0; i < names.length; i += CONC) {
+        panel.innerHTML = `<span class="spinner"></span> 폴더 검색 중 ` +
+          `${Math.min(i + CONC, names.length)}/${names.length} 채널…`;
+        const part = await Promise.all(names.slice(i, i + CONC).map(async n => {
+          try {
+            const r = await fetch(`${API}/search`, {
+              method: "POST", headers: {"Content-Type": "application/json"},
+              body: JSON.stringify({ channel: n, query: q, top_k: 5, category: cat })
+            });
+            if (!r.ok) return [];
+            return ((await r.json()).results || []).map(h => ({ ...h, _ch: n }));
+          } catch (e) { return []; }
+        }));
+        part.forEach(a => results.push(...a));
+      }
+      results.sort((a, b) => parseFloat(b.score) - parseFloat(a.score));
+      results = results.slice(0, 10);
+      head = `🔍 "${esc(q)}" — 📁 ${esc(libGroup)} 검색 결과 ${results.length}건`;
+    } else {
+      const r = await fetch(`${API}/search`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({ channel: libChannel, query: q, top_k: 8, category: cat })
+      });
+      results = (await r.json()).results;
+      head = `🔍 "${esc(q)}" 검색 결과 ${results.length}건`;
+    }
+    panel.innerHTML = `<h3>${head}</h3>` +
       (results.map(h => `
         <div class="hit">
           <span class="score">${h.score}</span>
-          <span style="font-size:12px;color:var(--muted)"> ${esc(h.title)} · ${fmtDate(h.upload_date)}</span>
+          <span style="font-size:12px;color:var(--muted)"> ${esc(h.title)}${h._ch ? ` · ${esc(h._ch)}` : ""} · ${fmtDate(h.upload_date)}</span>
           <div class="txt">${esc(h.text)}</div>
           <a href="${esc(h.source_url || '#')}" target="_blank">▶ 해당 구간 열기</a>
         </div>`).join("") ||
@@ -748,21 +779,51 @@ async function libSearch() {
 }
 
 /* ═══ [추출] 뷰 — 등록 채널 현황 (FR22) ═══ */
+const extCollapsed = new Set();   // 추출 탭 폴더 접기 상태 (FR25.9, 라이브러리와 별도)
+const extSeenGroups = new Set();
+
+function extCardHtml(c) {
+  return `
+    <div class="chan-card" data-name="${esc(c.name)}" data-url="${esc(c.url)}">
+      <div class="chan-name">${esc(c.name)}</div>
+      <div class="chan-stats">추출 ${c.extracted} · 🔒 ${c.members_only}
+        · 무자막 ${c.no_sub} · 최근 ${fmtDate(String(c.last_extracted||"").replaceAll("-","").slice(0,8))}</div>
+    </div>`;
+}
+
 async function loadExtChannels() {
   let stats = [];
   try {
     const r = await fetch(`${API}/channels/stats`);
     if (r.ok) stats = (await r.json()).channels;
   } catch (e) {}
-  document.getElementById("extChanCards").innerHTML = stats.length
-    ? stats.map(c => `
-      <div class="chan-card" data-name="${esc(c.name)}" data-url="${esc(c.url)}">
-        <div class="chan-name">${esc(c.name)}</div>
-        <div class="chan-stats">추출 ${c.extracted} · 🔒 ${c.members_only}
-          · 무자막 ${c.no_sub} · 최근 ${fmtDate(String(c.last_extracted||"").replaceAll("-","").slice(0,8))}</div>
-      </div>`).join("")
-    : `<div class="empty" style="margin:6px 0 0;font-size:13px;text-align:left">
+  if (!stats.length) {
+    document.getElementById("extChanCards").innerHTML =
+      `<div class="empty" style="margin:6px 0 0;font-size:13px;text-align:left">
          등록된 채널이 없습니다. 위에 채널 URL을 입력해 추가하세요.</div>`;
+    return;
+  }
+  // 폴더 섹션으로 그룹핑 — 라이브러리와 동일 규칙, 접기 상태는 별도 (FR25.9)
+  const groups = {};
+  const solo = [];
+  stats.forEach(c => c.group ? (groups[c.group] = groups[c.group] || []).push(c)
+                             : solo.push(c));
+  let html = solo.map(extCardHtml).join("");
+  for (const g of Object.keys(groups).sort()) {
+    const list = groups[g];
+    const ext = list.reduce((s, c) => s + (c.extracted || 0), 0);
+    if (!extSeenGroups.has(g)) { extSeenGroups.add(g); extCollapsed.add(g); }
+    const collapsed = extCollapsed.has(g);
+    html += `
+      <div class="chan-group ${collapsed ? "collapsed" : ""}" data-group="${esc(g)}">
+        <div class="chan-group-head" data-group="${esc(g)}">
+          <span class="g-title">${collapsed ? "▸" : "▾"} 📁 ${esc(g)}</span>
+          <span class="g-stats">채널 ${list.length} · 추출 ${ext}</span>
+        </div>
+        <div class="chan-group-body">${list.map(extCardHtml).join("")}</div>
+      </div>`;
+  }
+  document.getElementById("extChanCards").innerHTML = html;
 }
 
 async function extSelectChannel(name, url) {
@@ -1087,6 +1148,13 @@ delegate("chanCards", ".chan-group-head", el => {            // FR25.4 접기/�
   if (t) t.textContent = `${libCollapsed.has(g) ? "▸" : "▾"} 📁 ${g}`;
 });
 delegate("extChanCards", ".chan-card", el => extSelectChannel(el.dataset.name, el.dataset.url));
+delegate("extChanCards", ".chan-group-head", el => {         // FR25.9 접기/펼치기
+  const g = el.dataset.group;
+  extCollapsed.has(g) ? extCollapsed.delete(g) : extCollapsed.add(g);
+  el.closest(".chan-group").classList.toggle("collapsed");
+  const t = el.querySelector(".g-title");
+  if (t) t.textContent = `${extCollapsed.has(g) ? "▸" : "▾"} 📁 ${g}`;
+});
 delegate("libList", ".video-del", (el, ev) => {
   ev.stopImmediatePropagation();
   deleteVideo(el.closest(".lib-row").dataset.basename);

@@ -234,7 +234,9 @@ class RunExtractor(FakeExtractor):
         calls["pl_map"] = pl_map
         calls["date_range"] = date_range
         assert progress({"phase": "extracting", "done": 0, "total": len(entries),
-                         "current_title": "영상1", "stats": {}}) is True
+                         "current_title": "영상1", "stats": {},
+                         "event": {"id": "v1", "title": "영상1",
+                                   "kind": "new", "reason": "신규 추출"}}) is True
         return {"new": 1, "updated": 0, "skip": 0, "no_sub": 0,
                 "members_only": 0, "error": 0, "date_skip": 1}
 
@@ -261,6 +263,8 @@ assert calls["pl_map"] == {"v1": ["주식"], "v3": ["주식", "라이브"]}, "�
 assert calls["date_range"] == {"since": "20250101", "until": None}
 assert job["status"] == "done" and job["total"] == 2
 assert job["stats"]["new"] == 1 and job["stats"]["date_skip"] == 1
+assert job["events"] == [{"id": "v1", "title": "영상1", "kind": "new",
+                          "reason": "신규 추출"}], "이벤트 축적 (FR26.2)"
 assert idx.called and idx.return_value.index_all.called, "index=True·신규>0 → 인덱싱"
 print("✓ _run_channel: 멤버십 사전 제외 · 캐시 entries/pl_map 재사용 · date_range 전달 · 인덱싱")
 
@@ -431,7 +435,9 @@ class PlaylistExtractor(FakeExtractor):
                       "ids": [e["id"] for e in entries], "pl_map": pl_map})
         if self.cfg["name"] == "chanA":
             assert progress({"phase": "extracting", "done": 1, "total": len(entries),
-                             "current_title": "영상A", "stats": {"new": 1}}) is True
+                             "current_title": "영상A", "stats": {"new": 1},
+                             "event": {"id": "p1", "title": "영상A",
+                                       "kind": "new", "reason": "신규 추출"}}) is True
             st = mgr._job
             assert st["total"] == 3 and st["done"] == 1, \
                 f"진행율은 전체 기준 연속 합산: total={st['total']} done={st['done']}"
@@ -469,6 +475,9 @@ assert job9["status"] == "done" and job9["total"] == 3 and job9["done"] == 3
 assert job9["stats"]["new"] == 2 and job9["stats"]["skip"] == 1
 assert [c.args[0] for c in idx9.call_args_list] == ["chanA"], \
     "변경(new+updated>0) 있는 채널만 인덱싱"
+assert job9["events"] == [{"id": "p1", "title": "영상A", "kind": "new",
+                           "reason": "신규 추출", "channel": "chanA"}], \
+    "재생목록 이벤트에 원채널 부가 (FR26.2)"
 print("✓ _run_playlist: 그룹 순차·진행율 합산·병합 pl_map·자동 등록·조건부 인덱싱 (FR24.3~24.5)")
 
 print("\n모든 dashboard/jobs.py 로직 검증 통과")

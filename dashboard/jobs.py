@@ -426,6 +426,7 @@ class JobManager:
             "done": 0,
             "current_title": None,
             "stats": {k: 0 for k in _STAT_KEYS},
+            "events": [],           # 영상별 결과 이벤트 (FR26.2, 캡 1000)
             "error": None,
             "started_at": _now_iso(),
             "finished_at": None,
@@ -572,7 +573,8 @@ class JobManager:
                 ext = Extractor(ch_cfg)
                 stats = ext.run(entries=g_entries, pl_map=pl_map,
                                 date_range=date_range,
-                                progress=self._make_group_cb(job, agg, base_done, total)
+                                progress=self._make_group_cb(job, agg, base_done,
+                                                             total, channel=name)
                                 ) or {}
                 for k in _STAT_KEYS:
                     agg[k] += stats.get(k, 0)
@@ -600,7 +602,8 @@ class JobManager:
             log.error(f"✗ 작업 실패: {exc}")
             self._finish(job, "error", error=str(exc)[:300])
 
-    def _make_group_cb(self, job: dict, agg: dict, base_done: int, total: int):
+    def _make_group_cb(self, job: dict, agg: dict, base_done: int, total: int,
+                       channel: str = None):
         """재생목록 그룹용 진행 콜백 — done·stats를 그룹 경계에서 연속 합산 (FR24.5)."""
         def cb(payload: dict) -> bool:
             payload = payload or {}
@@ -616,6 +619,10 @@ class JobManager:
                 for k in _STAT_KEYS:
                     if k in st:
                         job["stats"][k] = agg[k] + st[k]
+                if payload.get("event"):
+                    # 재생목록 이벤트에는 원채널 표기 (FR26.2)
+                    self._append_event_locked(job, dict(payload["event"],
+                                                        channel=channel))
             return not self._cancel.is_set()
         return cb
 
@@ -636,6 +643,8 @@ class JobManager:
                     st = payload.get("stats") or {}
                     if k in st:
                         job["stats"][k] = st[k]
+                if payload.get("event"):
+                    self._append_event_locked(job, payload["event"])   # FR26.2
             return not self._cancel.is_set()
         return cb
 
@@ -667,24 +676,37 @@ class JobManager:
                 return
 
             self._update(job, phase="extracting", current_title=title)
+            _REASONS = {"new": "신규 추출", "date_skip": "기간 조건 밖",
+                        "live_wait": "라이브 종료 대기 — 다음 run에서 재시도",
+                        "no_sub": "자막 없음"}
             try:
                 result = ext.process_video(vid, "new", content_type=content_type, info=info)
                 if result == "ok":
                     self._bump(job, "new")
+                    kind = "new"
                 elif result in _STAT_KEYS:
                     self._bump(job, result)
+                    kind = result
                 else:
                     self._bump(job, "no_sub")
+                    kind = "no_sub"
+                self._append_event(job, {"id": vid, "title": title, "kind": kind,
+                                         "reason": _REASONS.get(kind, kind)})
             except Exception as exc:
                 msg = str(exc)
                 if Extractor._is_members_only(msg):
                     log.info(f"  🔒 멤버십 전용 (스킵): {vid}")
                     ext._mark_skip(vid, "members_only")
                     self._bump(job, "members_only")
+                    self._append_event(job, {"id": vid, "title": title,
+                                             "kind": "members_only",
+                                             "reason": "멤버십 전용 — 접근 불가"})
                 else:
                     log.error(f"  ✗ 오류 {vid}: {msg[:80]}")
                     self._bump(job, "error")
                     self._update(job, error=msg[:300])
+                    self._append_event(job, {"id": vid, "title": title,
+                                             "kind": "error", "reason": msg[:120]})
             ext.state.save()
             self._update(job, done=1, current_title=None)
 
@@ -699,6 +721,19 @@ class JobManager:
     def _bump(self, job: dict, key: str, n: int = 1):
         with self._lock:
             job["stats"][key] = job["stats"].get(key, 0) + n
+
+    _EVENTS_CAP = 1000
+
+    def _append_event(self, job: dict, ev: dict):
+        """영상별 결과 이벤트 축적 (FR26.2). 호출자가 락을 잡지 않았을 때 사용."""
+        with self._lock:
+            self._append_event_locked(job, ev)
+
+    def _append_event_locked(self, job: dict, ev: dict):
+        events = job.setdefault("events", [])
+        events.append(ev)
+        if len(events) > self._EVENTS_CAP:
+            del events[:len(events) - self._EVENTS_CAP]
 
     @staticmethod
     def _channel_url_from_info(info: dict) -> str:

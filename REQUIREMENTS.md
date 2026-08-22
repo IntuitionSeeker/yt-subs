@@ -15,6 +15,7 @@
 > **v4.6:** 429 방어 강화(FR14.2~14.3) — 배치 휴식 랜덤화(고정 패턴 서명 제거), 429 백오프 후 같은 영상 1회 재시도(일시 차단으로 인한 영구 누락 방지)  
 > **v4.7:** 재생목록 URL 추출(FR24) — 대시보드에서 `/playlist?list=…` 스캔·조건 추출, 결과물은 원채널 폴더 저장 + 재생목록 제목을 카테고리로 병합  
 > **v4.8:** 채널 폴더(FR25) — channels.yaml `group` 필드, 라이브러리 폴더 섹션·전체 보기(영상 병합), 재생목록 추출 시 신규 채널 자동 폴더 지정  
+> **v4.9:** 추출 결과 상세(FR26) — 영상별 이벤트(id·제목·종류·이유)를 job에 축적, 통계 칩 클릭 시 해당 분류 영상 목록·이유 표시  
 > **범위:** 채널 관리 → 자막 추출 → 메타데이터 수집 → 품질 검토 → 지식층 인덱싱 → 질의·대시보드
 
 ---
@@ -379,6 +380,16 @@
 | FR25.8 | 폴더 모드 내용 검색 — 폴더 "전체 보기" 상태에서 내용 검색 시, 인덱스가 있는(추출>0) 소속 채널 각각에 `POST /search`(채널당 top_k 5, 동시 3채널)를 실행해 점수순으로 병합, 상위 10건을 원채널 배지와 함께 표시한다. 검색 실패 채널은 건너뛴다 | 필수 |
 | FR25.9 | 추출 탭 채널 현황(FR22.1)도 폴더 섹션으로 묶어 표시(접기/펼치기, 라이브러리와 동일 규칙·기본 접힘·별도 접기 상태). 카드 클릭 동작(FR22.2)은 기존과 동일 | 필수 |
 
+### FR26 — 추출 결과 상세: 영상별 이벤트 (신규, 대시보드)
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR26.1 | `Extractor.run`은 영상 1개의 처리 결과가 확정될 때마다 진행 콜백 payload에 `event={id, title, kind, reason}`을 포함한다 (kind: new·updated·skip·no_sub·members_only·error·date_skip·live_wait). **영상 처리 전 보고에는 event 키가 없다**(기존 payload 스키마 유지). `progress=None`(CLI)이면 이벤트를 만들지 않는다(FR18.1 무영향). 스킵 영상도 이벤트 보고를 위해 처리 직후 1회 보고하며 취소 신호를 존중한다 | 필수 |
+| FR26.2 | JobManager는 event를 `job["events"]`에 축적(최대 1,000건, 초과 시 오래된 것부터 삭제). 재생목록 작업 이벤트에는 `channel` 필드를 추가한다. 단일 영상 작업도 동일하게 축적. `/extract/status` 응답에 events가 포함된다 | 필수 |
+| FR26.3 | 대시보드 진행/완료 통계의 각 항목은 개수>0이고 이벤트가 있으면 클릭 가능한 칩으로 표시되고, 클릭 시 해당 분류의 영상 목록(제목·이유·채널)을 진행 카드 아래 패널에 토글 표시한다. 새 작업이 시작되면(job_id 변경) 패널을 닫는다 | 필수 |
+| FR26.4 | 이유 문구 — 오류: 실제 예외 메시지(429는 구분 문구), 수정: "수정 감지 — 재추출", 스킵: "이미 추출됨 · 변경 없음", 신규: "신규 추출", 무자막·멤버십·기간외·라이브대기: 고정 문구 | 필수 |
+| FR26.5 | 이력 범위는 현행 status 정책과 동일 — **마지막 작업 1건**. 과거 작업 이력 저장은 범위 외(`extract_log.csv`가 보조 기록) | 명시 |
+
 ---
 
 ## 4. 비기능 요구사항 (NFR)
@@ -447,6 +458,7 @@
 | FR23.1~23.3 | `subtitle_utils.reflow_sentences` · `srt_to_txt` | txt/ (문장 단위 개행) |
 | FR24.1~24.6 | `dashboard/jobs.py` (`classify_url` playlist 분기 · `_do_scan_playlist` · `_run_playlist` · `_merged_pl_map`) · `dashboard/index.html` (kind 표시·채널 배지) | 원채널 output/ + playlists.json 병합 |
 | FR25.1~25.7 | `channel_registry.set_group` · `dashboard/server.py` (`POST /channels/group`·stats group) · `dashboard/jobs.py` (`_run_playlist` 자동 폴더) · `dashboard/index.html` (폴더 섹션·전체 보기·📁 버튼) | channels.yaml `group` 필드 |
+| FR26.1~26.5 | `extractor.py` (`_event`·`_report(event=)`) · `dashboard/jobs.py` (`job["events"]` 축적·`_append_event`) · `dashboard/index.html` (통계 칩·이벤트 패널) | /extract/status.events |
 | FR21.1~21.4 | `dashboard/server.py` (`POST /videos/delete`·`POST /channels/delete`·`_reject_path_traversal`) · `kl_indexer.KLIndexer.delete_video` · `dashboard/jobs.py` (`JobManager.is_busy`) · `dashboard/index.html` (`deleteVideo`·`deleteChannel`·`copySubtitle`) | output 파일·state·ChromaDB 정리 |
 | FR22.1~22.4 | `dashboard/index.html` (`loadExtChannels`·`extSelectChannel`·`switchTab`·`pollJob` 완료 훅) — 기존 `GET /channels/stats`(FR20.1)·`extStart`(FR17.3~17.4) 재사용, 신규 백엔드 없음 | (프론트 전용) |
 

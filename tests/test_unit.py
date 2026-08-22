@@ -327,3 +327,18 @@ def test_classify_url_invalid():
     from jobs import classify_url
     with pytest.raises(ValueError):
         classify_url("https://example.com/videos")
+
+
+# ─── V-U11b: 재생목록 URL 분류 (FR24.1) ─────────────────────────────────────
+def test_classify_url_playlist():
+    from jobs import classify_url
+    url = "https://www.youtube.com/playlist?list=PLnDn1H0jzj2irPsp9sy5HJZ-435yMOXy_"
+    assert classify_url(url) == ("playlist", url)
+
+
+def test_classify_url_watch_with_list_is_video():
+    """watch?v=…&list=…는 재생목록이 아니라 단일 영상으로 처리한다 (FR24.1)."""
+    from jobs import classify_url
+    assert classify_url(
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLxyz"
+    ) == ("video", "dQw4w9WgXcQ")

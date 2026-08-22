@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import re
 import sys
+import json
 import uuid
 import time
 import logging
@@ -46,6 +47,7 @@ SCAN_TTL_SEC = 600          # 스캔 캐시 TTL 10분 (DQ-13)
 
 # 영상 URL 패턴 — 프론트(index.html:575)와 동일 (FR17.1)
 _VIDEO_RE   = re.compile(r"(?:watch\?v=|youtu\.be/|/shorts/|/live/)([\w-]{11})")
+_PLAYLIST_RE = re.compile(r"/playlist\?list=([\w-]+)")    # FR24.1
 _HANDLE_RE  = re.compile(r"@[^/?&\s]+")
 _CHANNEL_RE = re.compile(r"/channel/(UC[\w-]+)")
 
@@ -68,8 +70,10 @@ class JobBusyError(Exception):
 # ─── URL 분류 (FR17.1) ───────────────────────────────────────────────────────
 def classify_url(url: str) -> tuple:
     """
-    URL을 영상/채널로 분류. 판별 불가 시 ValueError.
-      ("video", video_id) | ("channel", url)
+    URL을 영상/재생목록/채널로 분류. 판별 불가 시 ValueError.
+      ("video", video_id) | ("playlist", url) | ("channel", url)
+    우선순위: 영상 → 재생목록 → 채널 (FR24.1)
+    — `watch?v=…&list=…`는 단일 영상으로 처리 (기존 동작 유지).
     """
     raw = (url or "").strip()
     if not raw:
@@ -79,9 +83,11 @@ def classify_url(url: str) -> tuple:
     m = _VIDEO_RE.search(decoded)
     if m:
         return ("video", m.group(1))
+    if _PLAYLIST_RE.search(decoded):
+        return ("playlist", raw)
     if _HANDLE_RE.search(decoded) or _CHANNEL_RE.search(decoded):
         return ("channel", raw)
-    raise ValueError(f"영상 또는 채널 URL로 판별할 수 없습니다: {raw[:80]}")
+    raise ValueError(f"영상·재생목록·채널 URL로 판별할 수 없습니다: {raw[:80]}")
 
 
 # ─── 조건 필터 (FR17.4) ──────────────────────────────────────────────────────
@@ -144,6 +150,61 @@ def _probe_opts() -> dict:
         return opts
 
 
+def _flat_opts() -> dict:
+    """재생목록 flat 스캔용 옵션 — _probe_opts와 같은 재사용 패턴 (FR24.2)."""
+    return {**_probe_opts(), "extract_flat": True}
+
+
+def _entry_channel(e: dict):
+    """
+    flat 엔트리에서 (채널명, 채널 URL) 해석. FR24.3
+    uploader_id(@핸들) 우선 → channel_id(UC…) 폴백 → 해석 불가 시 None.
+    """
+    uid = (e.get("uploader_id") or "").strip()
+    if uid.startswith("@"):
+        return uid[1:], f"https://www.youtube.com/{uid}"
+    cid = (e.get("channel_id") or "").strip()
+    if cid.startswith("UC"):
+        return cid, f"https://www.youtube.com/channel/{cid}"
+    return None
+
+
+def _merged_pl_map(channel: str, vids: list, title: str) -> dict:
+    """
+    재생목록 제목을 채널 카테고리 맵에 병합한 full-map 반환 + playlists.json 갱신 (FR24.4).
+    DQ-17: _backfill_meta는 맵에 없는 vid의 meta.playlists를 []로 덮어쓰므로
+    부분 맵을 만들지 않는다 — 기존 playlists.json(없으면 기존 meta에서 재구성)에 병합.
+    """
+    mapping = {}
+    pl_path = config.channel_dir(channel) / "playlists.json"
+    if pl_path.exists():
+        try:
+            mapping = json.loads(pl_path.read_text(encoding="utf-8"))
+        except Exception:
+            mapping = {}
+    if not mapping:
+        meta_dir = config.channel_subdirs(channel)["meta"]
+        if meta_dir.exists():
+            for f in meta_dir.glob("*.json"):
+                try:
+                    m = json.loads(f.read_text(encoding="utf-8"))
+                except Exception:
+                    continue
+                if m.get("id") and m.get("playlists"):
+                    mapping[m["id"]] = list(m["playlists"])
+    for vid in vids:
+        lst = mapping.setdefault(vid, [])
+        if title not in lst:
+            lst.append(title)
+    try:
+        pl_path.parent.mkdir(parents=True, exist_ok=True)
+        pl_path.write_text(json.dumps(mapping, ensure_ascii=False, indent=2),
+                           encoding="utf-8")
+    except Exception:                       # pragma: no cover - 저장 실패해도 추출 계속
+        pass
+    return mapping
+
+
 # ─── 작업 관리자 (FR17.7·FR18) ───────────────────────────────────────────────
 class JobManager:
     """단일 uvicorn 프로세스 전제의 모듈 싱글턴. 동시 1작업."""
@@ -190,13 +251,15 @@ class JobManager:
             raise ValueError("scan_id가 만료되었습니다. 다시 스캔하세요.")
         return entry
 
-    # ── 채널 사전 스캔 (FR17.3) ──────────────────────────────────────────────
+    # ── 사전 스캔 (FR17.3 채널 · FR24.2 재생목록) ────────────────────────────
     def scan(self, url: str) -> dict:
         kind, _ = classify_url(url)          # 판별 불가 → ValueError(400)
-        if kind != "channel":
+        if kind == "video":
             raise ValueError("영상 URL은 /extract 로 바로 추출하세요.")
         self._acquire()
         try:
+            if kind == "playlist":
+                return self._do_scan_playlist(url)
             return self._do_scan(url)
         finally:
             self._release()
@@ -246,6 +309,63 @@ class JobManager:
         return {"scan_id": scan_id, "channel": name,
                 "videos": videos_view, "playlists": playlists}
 
+    # ── 재생목록 사전 스캔 (FR24.2) ──────────────────────────────────────────
+    def _do_scan_playlist(self, url: str) -> dict:
+        import yt_dlp
+        _app_extractor()                     # sys.path 정상화 (섀도잉 방어)
+        from state_manager import StateManager
+
+        log.info(f"🔍 재생목록 스캔: {url[:70]}")
+        with yt_dlp.YoutubeDL(_flat_opts()) as ydl:
+            info = ydl.extract_info(url, download=False)
+        title = (info.get("title") or "").strip() or "재생목록"
+        entries = [e for e in (info.get("entries") or []) if e.get("id")]
+
+        videos_view, by_channel, states = [], {}, {}
+        for e in entries:
+            # 진행 중/예약 라이브는 자막 미완성 → 제외 (FR16.3 준용)
+            if e.get("live_status") in ("is_live", "is_upcoming"):
+                continue
+            ch = _entry_channel(e)
+            if not ch:
+                log.warning(f"  ⚠ 채널 불명 → 제외: {e.get('id')}")
+                continue
+            name, ch_url = ch
+            e["content_type"] = e.get("content_type") or "video"
+            by_channel.setdefault(name, {"url": ch_url, "entries": []})["entries"].append(e)
+            if name not in states:
+                states[name] = (StateManager(name).state
+                                if config.channel_dir(name).exists() else {})
+            st = states[name].get(e["id"]) or {}
+            sub_type = st.get("sub_type")
+            videos_view.append({
+                "id": e["id"],
+                "title": e.get("title") or e["id"],
+                "channel": name,
+                "content_type": e["content_type"],
+                "playlists": [],
+                "members_only": bool(_is_members_availability(e.get("availability"))
+                                     or sub_type == "members_only"),
+                "extracted": sub_type in ("manual", "auto"),
+            })
+
+        scan_id = uuid.uuid4().hex[:12]
+        with self._lock:
+            self._scans[scan_id] = {
+                "scan_id": scan_id,
+                "kind": "playlist",
+                "playlist_title": title,
+                "channel": title,            # 표시용 (프론트 condChannel)
+                "url": url,
+                "videos_view": videos_view,
+                "by_channel": by_channel,
+                "created_at": time.time(),
+            }
+        log.info(f"  ✅ 재생목록 '{title}' 후보 {len(videos_view)}개 · "
+                 f"채널 {len(by_channel)}개 (scan_id={scan_id})")
+        return {"scan_id": scan_id, "kind": "playlist", "playlist": title,
+                "channel": title, "videos": videos_view, "playlists": []}
+
     # ── 추출 시작 (FR17.2·17.4·17.7) ─────────────────────────────────────────
     def start(self, req: dict) -> dict:
         req = req or {}
@@ -268,8 +388,12 @@ class JobManager:
             worker, args = self._run_single, (job, url, vid, index)
         else:
             entry = self._get_scan(scan_id)            # 만료·부재 → ValueError(400)
-            job = self._new_job("channel_run", entry["channel"], entry["url"])
-            worker, args = self._run_channel, (job, entry, filters, index)
+            if entry.get("kind") == "playlist":        # FR24.3
+                job = self._new_job("playlist_run", entry["channel"], entry["url"])
+                worker, args = self._run_playlist, (job, entry, filters, index)
+            else:
+                job = self._new_job("channel_run", entry["channel"], entry["url"])
+                worker, args = self._run_channel, (job, entry, filters, index)
 
         self._acquire()
         try:
@@ -399,6 +523,99 @@ class JobManager:
         except Exception as exc:
             log.error(f"✗ 작업 실패: {exc}")
             self._finish(job, "error", error=str(exc)[:300])
+
+    # ── 재생목록 워커 (FR24.3~24.5) ──────────────────────────────────────────
+    def _run_playlist(self, job: dict, entry: dict, filters: dict, index: bool):
+        """채널별 그룹 순차 실행 — 결과물은 각 영상의 원채널 폴더에 저장."""
+        pl_title = entry["playlist_title"]
+        try:
+            Extractor = _app_extractor().Extractor
+
+            selected = apply_filters(entry["videos_view"], filters)
+            ids = {v["id"] for v in selected}
+            groups = []                      # (채널명, 채널URL, 대상 엔트리) — 스캔 순서 유지
+            for name, grp in entry["by_channel"].items():
+                g = [e for e in grp["entries"] if e.get("id") in ids]
+                if g:
+                    groups.append((name, grp["url"], g))
+            total = sum(len(g) for _, _, g in groups)
+            self._update(job, total=total, phase="registering")
+
+            since = (filters or {}).get("since") or None
+            until = (filters or {}).get("until") or None
+            date_range = {"since": since, "until": until} if (since or until) else None
+
+            reg = ChannelRegistry()
+            agg = {k: 0 for k in _STAT_KEYS}     # 완료 그룹 누계 (진행 콜백이 합산)
+            base_done = 0
+            changed = []                          # new+updated>0 채널 → 인덱싱 대상
+            cancelled = False
+            for name, ch_url, g_entries in groups:
+                if self._cancel.is_set():
+                    cancelled = True
+                    break
+                # 미등록 채널은 추출 시점에 자동 등록 (FR17.2 선례 준용)
+                if name not in reg.names():
+                    reg.add(ch_url, lang=config.DEFAULT_LANG)
+                    log.info(f"✅ 채널 등록: {name}")
+                try:
+                    ch_cfg = reg.get(name)
+                except KeyError:                 # pragma: no cover - 방어적 폴백
+                    ch_cfg = {"name": name,
+                              "url": ChannelRegistry.normalize_url(ch_url),
+                              "lang": config.DEFAULT_LANG}
+
+                pl_map = _merged_pl_map(name, [e["id"] for e in g_entries], pl_title)
+                self._update(job, phase="extracting")
+                ext = Extractor(ch_cfg)
+                stats = ext.run(entries=g_entries, pl_map=pl_map,
+                                date_range=date_range,
+                                progress=self._make_group_cb(job, agg, base_done, total)
+                                ) or {}
+                for k in _STAT_KEYS:
+                    agg[k] += stats.get(k, 0)
+                base_done += len(g_entries)
+                if stats.get("new", 0) + stats.get("updated", 0) > 0:
+                    changed.append(name)
+                if stats.get("cancelled") or self._cancel.is_set():
+                    cancelled = True
+                    break
+
+            with self._lock:
+                for k in _STAT_KEYS:
+                    job["stats"][k] = agg[k]
+                if not cancelled:
+                    job["done"] = base_done
+
+            # 변경 있는 채널만 각각 인덱싱, 취소 시 생략 (FR24.5 · FR17.9 준용)
+            if index and not cancelled and changed:
+                from kl_indexer import KLIndexer
+                self._update(job, phase="indexing", current_title=None)
+                for name in changed:
+                    KLIndexer(name).index_all()
+            self._finish(job, "cancelled" if cancelled else "done")
+        except Exception as exc:
+            log.error(f"✗ 작업 실패: {exc}")
+            self._finish(job, "error", error=str(exc)[:300])
+
+    def _make_group_cb(self, job: dict, agg: dict, base_done: int, total: int):
+        """재생목록 그룹용 진행 콜백 — done·stats를 그룹 경계에서 연속 합산 (FR24.5)."""
+        def cb(payload: dict) -> bool:
+            payload = payload or {}
+            with self._lock:
+                if payload.get("phase"):
+                    job["phase"] = payload["phase"]
+                job["total"] = total                 # run()의 그룹 total로 덮어쓰지 않음
+                if payload.get("done") is not None:
+                    job["done"] = base_done + payload["done"]
+                if "current_title" in payload:
+                    job["current_title"] = payload["current_title"]
+                st = payload.get("stats") or {}
+                for k in _STAT_KEYS:
+                    if k in st:
+                        job["stats"][k] = agg[k] + st[k]
+            return not self._cancel.is_set()
+        return cb
 
     def _make_cb(self, job: dict):
         """progress 콜백 — 락 하에 job 갱신 + 취소 여부 반환. FR18.1·18.2"""

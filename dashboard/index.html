@@ -305,7 +305,7 @@
     <h2>⛏ 자막 추출</h2>
     <div class="url-row">
       <input id="extUrl"
-             placeholder="유튜브 채널 URL (@채널) 또는 영상 URL (watch?v=…) 입력"
+             placeholder="유튜브 채널(@채널) · 재생목록(playlist?list=…) · 영상(watch?v=…) URL 입력"
              onkeydown="if(event.key==='Enter')extStart()">
       <button class="primary" id="extBtn" onclick="extStart()">스캔 / 추출</button>
     </div>
@@ -676,7 +676,7 @@ async function extSelectChannel(name, url) {
 }
 
 /* ═══ [추출] 뷰 (FR17·FR18) ═══ */
-let scanData = null;   // {scan_id, channel, videos:[...], playlists:[...]}
+let scanData = null;   // {scan_id, channel, videos:[...], playlists:[...], kind?:"playlist", playlist?:제목}
 
 const VIDEO_URL_RE = /(?:watch\?v=|youtu\.be\/|\/shorts\/|\/live\/)([\w-]{11})/;
 
@@ -707,7 +707,7 @@ async function extStart() {
     if (!r.ok) throw new Error(r.status);
     scanData = await r.json();
   } catch (e) {
-    extNotice("채널 스캔에 실패했습니다 (/extract/scan). 서버 상태를 확인한 뒤 다시 시도하세요.");
+    extNotice("스캔에 실패했습니다 (/extract/scan). URL 형식과 서버 상태를 확인한 뒤 다시 시도하세요.");
     btn.disabled = false; btn.textContent = "스캔 / 추출";
     return;
   }
@@ -717,8 +717,11 @@ async function extStart() {
 
 function openCondCard() {
   document.getElementById("condCard").classList.remove("hidden");
+  const chanCount = scanData.kind === "playlist"
+    ? ` · 채널 ${new Set(scanData.videos.map(v => v.channel)).size}개` : "";
   document.getElementById("condChannel").textContent =
-    `— ${scanData.channel} · 후보 ${scanData.videos.length}개`;
+    `— ${scanData.kind === "playlist" ? "재생목록: " : ""}${scanData.channel}` +
+    ` · 후보 ${scanData.videos.length}개${chanCount}`;
   document.getElementById("fCats").innerHTML = scanData.playlists.map(p =>
     `<span class="chip" data-cat="${esc(p)}">${esc(p)}</span>`).join("") ||
     `<span style="color:var(--muted);font-size:12px">재생목록 없음</span>`;
@@ -769,6 +772,8 @@ function renderPreview() {
   document.getElementById("previewList").innerHTML = vids.map(v => `
     <div class="preview-item">
       <span class="t">${esc(v.title || v.id)}</span>
+      ${scanData.kind === "playlist" && v.channel
+        ? `<span style="color:var(--muted);font-size:11px">${esc(v.channel)}</span>` : ""}
       ${v.content_type === "live" ? `<span class="live">LIVE</span>` : ""}
       ${v.members_only ? `<span class="mem">멤버십</span>` : ""}
       ${v.extracted ? `<span class="done-tag">✓ 추출됨</span>` : ""}

@@ -22,6 +22,7 @@
 > **v4.7:** 재생목록 URL 추출(FR24, §2.10) — `classify_url` playlist 분기, `_do_scan_playlist`(flat 스캔·채널별 state 조회), `_run_playlist`(채널 그룹 순차 실행·진행율 합산·채널별 인덱싱), `_merged_pl_map`(재생목록 제목 카테고리 병합), 신규 결정 DQ-17
 > **v4.8:** 채널 폴더(FR25) — `ChannelRegistry.set_group`(channels.yaml `group` 필드), `POST /channels/group`, `/channels/stats.group`, 라이브러리 폴더 섹션·병합 전체 보기(프론트 병합·원채널 배지·자막/삭제는 영상별 원채널로 라우팅), `_run_playlist` 신규 채널 자동 폴더 지정. 보강: 폴더 모드 내용 검색(채널별 /search 병합, FR25.8), 추출 탭 폴더 표시(FR25.9), 처음 보는 폴더 기본 접힘(FR25.4)
 > **v4.9:** 추출 결과 상세(FR26) — `Extractor._event`+`_report(event=)`로 영상별 결과 이벤트를 진행 콜백에 실어 보내고(처리 전 보고에는 event 없음 — 기존 payload 스키마 유지), JobManager가 `job["events"]`에 축적(캡 1,000·재생목록은 channel 부가), 프론트 통계 칩 클릭 → 분류별 영상·이유 패널
+> **v5.1:** 이름 변경(FR31) — 신규 `renamer.py`(채널: yaml 키 이동+폴더 rename / 영상: meta.title+chroma metadata / 카테고리: playlists.json+meta 배열+chroma / 폴더: set_group 일괄), `KLIndexer.update_video_metadata`(get(where=video_id)→update, 재임베딩 없음), 전 작업 busy 가드(FR31.5)
 > **v5.0 (v3):** 챕터(FR27) — `meta_collector.save`가 info.chapters를 `[{start,end,title}]`로 정규화 저장, `/subtitle` 응답 확장, 상세 패널 챕터 링크. Markdown(FR28) — `/export/markdown` 서버 조립 + 프론트 Blob 다운로드. RSS(FR29) — 신규 `rss_monitor.py`(channel_id 해석 1회 캐시 → channels.yaml, 피드 파싱은 표준 xml.etree), `/channels/new`, 추출 탭 🔔 버튼(수동 트리거 — NFR3 유지). Whisper(FR30) — 신규 `transcriber.py`(faster-whisper CPU int8, 오디오 bestaudio 임시 다운로드, 세그먼트→SRT→기존 txt 경로), `sub_type="whisper"` 도입(stats.extracted 포함·decide 스킵), CLI `transcribe` 명령. 신규 결정 DQ-18(whisper sub_type 취급)
 
 ---

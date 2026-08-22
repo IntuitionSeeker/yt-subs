@@ -17,6 +17,7 @@
 > **v4.8:** 채널 폴더(FR25) — channels.yaml `group` 필드, 라이브러리 폴더 섹션·전체 보기(영상 병합), 재생목록 추출 시 신규 채널 자동 폴더 지정  
 > **v4.9:** 추출 결과 상세(FR26) — 영상별 이벤트(id·제목·종류·이유)를 job에 축적, 통계 칩 클릭 시 해당 분류 영상 목록·이유 표시  
 > **v5.0 (v3 릴리스):** 챕터 메타(FR27), Markdown 내보내기(FR28), RSS 새 영상 감지(FR29), Whisper 전사 폴백(FR30)  
+> **v5.1:** 이름 변경(FR31) — 채널·영상 제목·카테고리·폴더, ChromaDB 메타 동기화(재임베딩 없음)  
 > **범위:** 채널 관리 → 자막 추출 → 메타데이터 수집 → 품질 검토 → 지식층 인덱싱 → 질의·대시보드
 
 ---
@@ -426,6 +427,17 @@
 | FR30.4 | 모델: `WHISPER_MODEL` 환경변수(기본 `small`), CPU int8. 모델은 HF 캐시(기존 마운트)에 1회 다운로드. faster-whisper는 requirements에 추가 | 필수 |
 | FR30.5 | 대시보드 통합(작업 큐·진행율)은 v3 범위 외 — CLI 전용. 전사는 영상당 수 분 소요될 수 있음(명시) | 명시 |
 
+### FR31 — 이름 변경 (신규, v3)
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR31.1 | **채널 이름 변경** `POST /channels/rename {channel, new_name}` — channels.yaml 키 이동(설정·group·channel_id 보존) + `output/` 폴더 이동. 새 이름은 경로 검증(FR20.3 준용)·중복(레지스트리 또는 폴더 존재) 시 409. ChromaDB는 채널 폴더 내부라 함께 이동 | 필수 |
+| FR31.2 | **영상 제목 변경** `POST /videos/rename {channel, basename, new_title}` — meta.json `title` 갱신 + ChromaDB 두 컬렉션의 해당 영상 청크 metadata.title 갱신(재임베딩 없음). **파일명(basename)은 유지** — 파일 정체성·링크 보존 | 필수 |
+| FR31.3 | **카테고리(재생목록 태그) 이름 변경** `POST /categories/rename {channels:[], old, new}` — 각 채널의 playlists.json 값·meta.playlists 배열에서 치환 + ChromaDB metadata.playlists 갱신. 폴더 전체 보기에서는 소속 채널 전체에 일괄 적용 | 필수 |
+| FR31.4 | **폴더 이름 변경** `POST /folders/rename {old, new}` — group=old인 모든 채널을 new로 변경 (`set_group` 재사용) | 필수 |
+| FR31.5 | 모든 이름 변경은 추출/스캔 작업 중(`JobManager` 점유) 409 거부 — 파일 이동·수정과 작업의 경합 방지 (FR21.4 준용) | 필수 |
+| FR31.6 | UI — 채널 카드 ✏️(이름), 폴더 헤더 ✏️, 영상 행 ✏️(제목), 카테고리 선택 시 ✏️(선택된 카테고리 변경). 모두 prompt 입력 | 필수 |
+
 ---
 
 ## 4. 비기능 요구사항 (NFR)
@@ -499,6 +511,7 @@
 | FR28.1~28.2 | `dashboard/server.py`(/export/markdown) · `dashboard/index.html`(⬇ MD 버튼) | (파생 문서) |
 | FR29.1~29.4 | `rss_monitor.py`(channel_id 해석·피드 파싱) · `channel_registry.set_channel_id` · `dashboard/server.py`(/channels/new) · `dashboard/index.html`(🔔 버튼·배지) | channels.yaml `channel_id` |
 | FR30.1~30.5 | `transcriber.py`(faster-whisper) · `main.py`(cmd_transcribe) · `yt.sh` · requirements | srt/txt/meta/state (`sub_type=whisper`) |
+| FR31.1~31.6 | `renamer.py`(신규) · `channel_registry.rename` · `kl_indexer.update_video_metadata` · `dashboard/server.py`(4 엔드포인트) · `dashboard/index.html`(✏️ 버튼 4곳) | channels.yaml·output/·meta·playlists.json·chroma metadata |
 | FR21.1~21.4 | `dashboard/server.py` (`POST /videos/delete`·`POST /channels/delete`·`_reject_path_traversal`) · `kl_indexer.KLIndexer.delete_video` · `dashboard/jobs.py` (`JobManager.is_busy`) · `dashboard/index.html` (`deleteVideo`·`deleteChannel`·`copySubtitle`) | output 파일·state·ChromaDB 정리 |
 | FR22.1~22.4 | `dashboard/index.html` (`loadExtChannels`·`extSelectChannel`·`switchTab`·`pollJob` 완료 훅) — 기존 `GET /channels/stats`(FR20.1)·`extStart`(FR17.3~17.4) 재사용, 신규 백엔드 없음 | (프론트 전용) |
 

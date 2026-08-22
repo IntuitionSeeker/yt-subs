@@ -150,7 +150,11 @@
   /* 채널 폴더 (FR25) */
   .chan-folder { position: absolute; top: 8px; right: 28px; }
   .chan-folder:hover { color: var(--accent); background: var(--accent-dim); }
-  .chan-card .chan-name { padding-right: 44px; }
+  .chan-card .chan-name { padding-right: 64px; }
+  /* 이름 변경 (FR31) */
+  .chan-rename { position: absolute; top: 8px; right: 48px; }
+  .chan-rename:hover, .grp-rename:hover, .video-rename:hover, .cat-rename:hover {
+    color: var(--accent); background: var(--accent-dim); }
   .chan-group { width: 100%; border: 1px dashed var(--border); border-radius: 10px;
     padding: 8px 10px; }
   .chan-group-head { display: flex; align-items: center; gap: 10px; cursor: pointer;
@@ -332,6 +336,8 @@
     <select id="libCategorySel" onchange="renderLibList()">
       <option value="">전체 카테고리</option>
     </select>
+    <button class="icon-btn cat-rename" title="선택된 카테고리 이름 변경"
+            onclick="renameCategory()">✏️</button>
     <input type="text" id="libSearchQ" placeholder="🔍 자막 내용 검색 (Enter)…"
            style="flex:1" onkeydown="if(event.key==='Enter')libSearch()">
   </div>
@@ -548,6 +554,7 @@ const libSeenGroups = new Set(); // 처음 보는 폴더는 접힌 상태로 시
 function chanCardHtml(c) {
   return `
     <div class="chan-card" data-name="${esc(c.name)}">
+      <button class="icon-btn chan-rename" title="이름 변경">✏️</button>
       <button class="icon-btn chan-folder" title="폴더 지정/해제">📁</button>
       <button class="icon-btn chan-del" title="채널 삭제">🗑</button>
       <div class="chan-name">${esc(c.name)}</div>
@@ -584,6 +591,7 @@ async function loadLibrary() {
         <div class="chan-group-head ${libGroup === g ? "active" : ""}" data-group="${esc(g)}">
           <span class="g-title">${collapsed ? "▸" : "▾"} 📁 ${esc(g)}</span>
           <span class="g-stats">채널 ${list.length} · 추출 ${ext}</span>
+          <button class="icon-btn grp-rename" data-grouprename="${esc(g)}" title="폴더 이름 변경">✏️</button>
           <button class="grp-all" data-groupall="${esc(g)}">전체 보기</button>
         </div>
         <div class="chan-group-body">${list.map(chanCardHtml).join("")}</div>
@@ -639,6 +647,75 @@ async function libSelectGroup(g) {
   renderLibList();
 }
 
+/* ═══ 이름 변경 (FR31) ═══ */
+async function _renamePost(path, body, errPrefix) {
+  const r = await fetch(`${API}${path}`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) {
+    const detail = (await r.json().catch(() => ({}))).detail || r.status;
+    throw new Error(`${errPrefix}: ${detail}`);
+  }
+  return r.json();
+}
+
+async function renameChannel(name) {
+  const n = prompt(`'${name}' 채널의 새 이름`, name);
+  if (n === null || n.trim() === "" || n.trim() === name) return;
+  try {
+    await _renamePost("/channels/rename", { channel: name, new_name: n.trim() },
+                      "채널 이름 변경 실패");
+    if (libChannel === name) libChannel = n.trim();
+    loadLibrary(); loadExtChannels(); loadChannels();
+  } catch (e) { alert(e.message); }
+}
+
+async function renameFolder(g) {
+  const n = prompt(`'${g}' 폴더의 새 이름`, g);
+  if (n === null || n.trim() === "" || n.trim() === g) return;
+  try {
+    await _renamePost("/folders/rename", { old: g, new: n.trim() },
+                      "폴더 이름 변경 실패");
+    if (libGroup === g) libGroup = n.trim();
+    if (libCollapsed.has(g)) { libCollapsed.delete(g); libCollapsed.add(n.trim()); }
+    libSeenGroups.add(n.trim());
+    loadLibrary(); loadExtChannels();
+  } catch (e) { alert(e.message); }
+}
+
+async function renameVideo(basename) {
+  const v = libVideos.find(x => x.basename === basename);
+  const n = prompt("영상의 새 제목 (파일명은 유지됩니다)", (v && v.title) || "");
+  if (n === null || n.trim() === "" || (v && n.trim() === v.title)) return;
+  const ch = (v && v._ch) || libChannel;
+  try {
+    await _renamePost("/videos/rename",
+                      { channel: ch, basename, new_title: n.trim() },
+                      "제목 변경 실패");
+    if (v) v.title = n.trim();
+    renderLibList();
+  } catch (e) { alert(e.message); }
+}
+
+async function renameCategory() {
+  const cat = document.getElementById("libCategorySel").value;
+  if (!cat) { alert("변경할 카테고리를 먼저 선택하세요."); return; }
+  const n = prompt(`카테고리 '${cat}'의 새 이름`, cat);
+  if (n === null || n.trim() === "" || n.trim() === cat) return;
+  // 폴더 전체 보기면 소속 채널 전체, 아니면 현재 채널만 (FR31.3)
+  const channels = libGroup
+    ? libStats.filter(c => c.group === libGroup).map(c => c.name)
+    : [libChannel];
+  try {
+    const res = await _renamePost("/categories/rename",
+                                  { channels, old: cat, new: n.trim() },
+                                  "카테고리 이름 변경 실패");
+    alert(`변경 완료 — 영상 ${res.videos}개 반영`);
+    libGroup ? libSelectGroup(libGroup) : libSelect(libChannel);
+  } catch (e) { alert(e.message); }
+}
+
 async function setChannelGroup(name) {
   /* 📁 버튼 — 폴더 지정/변경/해제 (FR25.6) */
   const cur = (libStats.find(c => c.name === name) || {}).group || "";
@@ -670,6 +747,7 @@ function renderLibList() {
         ${v.sub_type ? `<span class="subtype">${v.sub_type === "manual" ? "📝수동" : v.sub_type === "whisper" ? "🎤전사" : "🤖자동"}</span>` : ""}
         ${(v.playlists||[]).map(p=>`<span class="playlist">${esc(p)}</span>`).join("")}
         <a class="ext-link" href="${esc(v.url || '#')}" target="_blank">↗ 원본</a>
+        <button class="icon-btn video-rename" title="제목 변경">✏️</button>
         <button class="icon-btn video-del" title="영상 삭제">🗑</button>
       </div>
     </div>`).join("") ||
@@ -1273,6 +1351,14 @@ delegate("chanCards", ".chan-folder", (el, ev) => {          // FR25.6 — .chan
   ev.stopImmediatePropagation();
   setChannelGroup(el.closest(".chan-card").dataset.name);
 });
+delegate("chanCards", ".chan-rename", (el, ev) => {          // FR31.1
+  ev.stopImmediatePropagation();
+  renameChannel(el.closest(".chan-card").dataset.name);
+});
+delegate("chanCards", ".grp-rename", (el, ev) => {           // FR31.4 — 헤더보다 먼저
+  ev.stopImmediatePropagation();
+  renameFolder(el.dataset.grouprename);
+});
 delegate("chanCards", ".chan-card", el => libSelect(el.dataset.name));
 delegate("chanCards", ".grp-all", (el, ev) => {              // FR25.5 — .chan-group-head보다 먼저 등록
   ev.stopImmediatePropagation();
@@ -1301,6 +1387,10 @@ delegate("extChanCards", ".chan-group-head", el => {         // FR25.9 접기/�
 delegate("libList", ".video-del", (el, ev) => {
   ev.stopImmediatePropagation();
   deleteVideo(el.closest(".lib-row").dataset.basename);
+});
+delegate("libList", ".video-rename", (el, ev) => {           // FR31.2
+  ev.stopImmediatePropagation();
+  renameVideo(el.closest(".lib-row").dataset.basename);
 });
 delegate("libList", ".lib-row", el => showSubtitle(el.dataset.basename, el));
 delegate("fCats", ".chip", el => { el.classList.toggle("on"); renderPreview(); });

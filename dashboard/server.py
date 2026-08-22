@@ -87,6 +87,28 @@ class ChannelGroupRequest(BaseModel):
     group: str | None = None      # 트림 후 빈 값이면 폴더 해제 (FR25.2)
 
 
+class ChannelRenameRequest(BaseModel):
+    channel: str
+    new_name: str
+
+
+class VideoRenameRequest(BaseModel):
+    channel: str
+    basename: str
+    new_title: str
+
+
+class CategoryRenameRequest(BaseModel):
+    channels: list[str]
+    old: str
+    new: str
+
+
+class FolderRenameRequest(BaseModel):
+    old: str
+    new: str
+
+
 def _reject_path_traversal(*values: str):
     """경로 파라미터 1차 검증 — 자막 조회(FR20.3)·삭제(FR21) 엔드포인트 공통."""
     for value in values:
@@ -244,6 +266,69 @@ def channels_group(req: ChannelGroupRequest):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
     return {"ok": True, "channel": req.channel, "group": group}
+
+
+# ─── 이름 변경 (FR31) ────────────────────────────────────────────────────────
+def _reject_if_busy():
+    """추출/스캔 작업 중 이름 변경 금지 — 파일 경합 방지. FR31.5"""
+    if MANAGER.is_busy():
+        raise HTTPException(status_code=409,
+                            detail="추출/스캔 작업 중에는 이름을 변경할 수 없습니다.")
+
+
+@app.post("/channels/rename")
+def channels_rename(req: ChannelRenameRequest):
+    """채널 이름 변경 — 레지스트리 + output 폴더. FR31.1"""
+    _reject_if_busy()
+    _reject_path_traversal(req.channel, req.new_name.strip() or req.new_name)
+    import renamer
+    try:
+        renamer.rename_channel(req.channel, req.new_name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, "channel": req.new_name.strip()}
+
+
+@app.post("/videos/rename")
+def videos_rename(req: VideoRenameRequest):
+    """영상 제목 변경 — meta.title + 인덱스 metadata (파일명 유지). FR31.2"""
+    _reject_if_busy()
+    _reject_path_traversal(req.channel, req.basename)
+    import renamer
+    try:
+        result = renamer.rename_video_title(req.channel, req.basename, req.new_title)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, **result}
+
+
+@app.post("/categories/rename")
+def categories_rename(req: CategoryRenameRequest):
+    """카테고리 이름 변경 — 채널 목록 일괄. FR31.3"""
+    _reject_if_busy()
+    _reject_path_traversal(*req.channels)
+    import renamer
+    try:
+        result = renamer.rename_category(req.channels, req.old, req.new)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, **result}
+
+
+@app.post("/folders/rename")
+def folders_rename(req: FolderRenameRequest):
+    """폴더(그룹) 이름 변경. FR31.4"""
+    _reject_if_busy()
+    import renamer
+    try:
+        count = renamer.rename_folder(req.old, req.new)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "channels": count}
 
 
 @app.post("/videos/delete")

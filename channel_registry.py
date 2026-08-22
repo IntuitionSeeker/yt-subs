@@ -61,6 +61,14 @@ class ChannelRegistry:
         self._save()
         return name
 
+    def set_channel_id(self, name: str, channel_id: str):
+        """RSS용 channel_id(UC…) 캐시. FR29.1"""
+        ch = self.data.get("channels", {}).get(name)
+        if ch is None:
+            raise KeyError(f"등록되지 않은 채널: {name}")
+        ch["channel_id"] = channel_id
+        self._save()
+
     def set_group(self, name: str, group: str = None) -> str:
         """채널 폴더(그룹) 지정. FR25.1 — 빈 값/None이면 필드 제거(해제)."""
         ch = self.data.get("channels", {}).get(name)

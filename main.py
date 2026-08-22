@@ -33,6 +33,18 @@ def cmd_run(args):
         Extractor(reg.get(name)).run(limit=args.limit)
 
 
+def cmd_transcribe(args):
+    """무자막(sub_type=none) 영상 Whisper 전사. FR30.1"""
+    from transcriber import Transcriber
+    reg = ChannelRegistry()
+    targets = [args.channel] if args.channel else reg.names()
+    if not targets:
+        log.info("등록된 채널이 없습니다. './yt.sh add URL' 로 추가하세요.")
+        return
+    for name in targets:
+        Transcriber(reg.get(name)).run(limit=args.limit)
+
+
 def cmd_review(args):
     """품질 검토. FR4"""
     from quality_checker import QualityChecker
@@ -162,6 +174,11 @@ def build_parser():
     sp.add_argument("channel", nargs="?")
     sp.add_argument("--limit", type=int, help="카나리아 실행: 최대 N개 영상만 처리")
     sp.set_defaults(func=cmd_run)
+
+    sp = sub.add_parser("transcribe", help="무자막 영상 Whisper 전사 (FR30)")
+    sp.add_argument("channel", nargs="?")
+    sp.add_argument("--limit", type=int, help="최대 N개만 전사")
+    sp.set_defaults(func=cmd_transcribe)
 
     sp = sub.add_parser("review", help="품질 검토")
     sp.add_argument("channel", nargs="?"); sp.add_argument("--llm", action="store_true")

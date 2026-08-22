@@ -63,6 +63,7 @@ chmod +x yt.sh
 | `./yt.sh run [채널]` | 신규/수정 영상만 업데이트 (전체 또는 특정 채널) |
 | `./yt.sh review [--llm]` | 자막 품질 검토 (규칙 기반 / LLM 포함) |
 | `./yt.sh reextract` | SUSPECT 영상 재추출 |
+| `./yt.sh transcribe [채널] [--limit N]` | 무자막 영상 Whisper 음성 전사 (폴백) |
 | `./yt.sh index` | ChromaDB 인덱싱 |
 | `./yt.sh list` | 등록 채널 목록 |
 | `./yt.sh remove 채널` | 채널 등록 해제 |

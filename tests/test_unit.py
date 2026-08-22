@@ -344,6 +344,68 @@ def test_classify_url_watch_with_list_is_video():
     ) == ("video", "dQw4w9WgXcQ")
 
 
+# ─── V-U13: 챕터 정규화 (FR27.1) ────────────────────────────────────────────
+def test_normalize_chapters():
+    from meta_collector import MetaCollector
+    raw = [{"start_time": 0.0, "end_time": 62.5, "title": "인트로"},
+           {"start_time": 62.5, "end_time": 300, "title": " 본론 "},
+           {"start_time": None, "end_time": None, "title": "무시안됨"},
+           "깨진 항목"]
+    got = MetaCollector._normalize_chapters(raw)
+    assert got[0] == {"start": 0, "end": 62, "title": "인트로"}
+    assert got[1] == {"start": 62, "end": 300, "title": "본론"}
+    assert got[2] == {"start": 0, "end": 0, "title": "무시안됨"}
+    assert len(got) == 3                       # dict 아닌 항목만 걸러짐
+    assert MetaCollector._normalize_chapters(None) == []
+
+
+# ─── V-U14: Whisper SRT 조립 (FR30.2) ───────────────────────────────────────
+def test_segments_to_srt():
+    from transcriber import segments_to_srt, _srt_ts
+    assert _srt_ts(0) == "00:00:00,000"
+    assert _srt_ts(3661.5) == "01:01:01,500"
+    segs = [{"start": 0.0, "end": 2.5, "text": " 안녕하세요 "},
+            {"start": 2.5, "end": 5.0, "text": ""},          # 빈 텍스트 제외
+            {"start": 5.0, "end": 8.0, "text": "본문입니다"}]
+    srt = segments_to_srt(segs)
+    blocks = [b for b in srt.split("\n\n") if b.strip()]
+    assert len(blocks) == 2
+    assert "00:00:00,000 --> 00:00:02,500" in blocks[0]
+    assert "안녕하세요" in blocks[0] and "본문입니다" in blocks[1]
+
+
+# ─── V-U15: RSS 피드 파싱 (FR29.2) ──────────────────────────────────────────
+def test_rss_fetch_feed(monkeypatch):
+    import rss_monitor
+    xml = """<?xml version="1.0"?>
+    <feed xmlns="http://www.w3.org/2005/Atom"
+          xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+      <entry><yt:videoId>abc123def45</yt:videoId>
+        <title>새 영상</title><published>2026-08-22T01:00:00+00:00</published></entry>
+      <entry><yt:videoId>xyz987uvw65</yt:videoId>
+        <title>둘째 영상</title><published>2026-08-21T01:00:00+00:00</published></entry>
+    </feed>"""
+    monkeypatch.setattr(rss_monitor, "_http_get", lambda url: xml)
+    got = rss_monitor.fetch_feed("UCxxxx")
+    assert got == [
+        {"id": "abc123def45", "title": "새 영상", "published": "2026-08-22"},
+        {"id": "xyz987uvw65", "title": "둘째 영상", "published": "2026-08-21"},
+    ]
+
+
+def test_rss_resolve_channel_id(monkeypatch):
+    import rss_monitor
+    # /channel/UC… URL은 요청 없이 즉시
+    assert rss_monitor.resolve_channel_id(
+        "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv/videos"
+    ) == "UCabcdefghijklmnopqrstuv"
+    # @핸들은 HTML에서 해석
+    monkeypatch.setattr(rss_monitor, "_http_get",
+                        lambda url: '..."channelId":"UCzzzzzzzzzzzzzzzzzzzzzz"...')
+    assert rss_monitor.resolve_channel_id(
+        "https://www.youtube.com/@handle/videos") == "UCzzzzzzzzzzzzzzzzzzzzzz"
+
+
 # ─── V-U12: 채널 폴더 (FR25.1) ──────────────────────────────────────────────
 def test_registry_set_group(tmp_path):
     reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")

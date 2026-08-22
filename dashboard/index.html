@@ -179,7 +179,25 @@
     text-align: right; }
   .lib-row { position: relative; }
   .video-del { margin-left: auto; }
-  .lib-detail-actions { display: flex; justify-content: flex-end; margin-bottom: 8px; }
+  .lib-detail-actions { display: flex; justify-content: flex-end; gap: 6px; margin-bottom: 8px; }
+  /* 챕터 목록 (FR27) */
+  .chapters { display: flex; flex-direction: column; gap: 3px; margin-bottom: 12px;
+    border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+    max-height: 160px; overflow-y: auto; }
+  .chapters a { color: var(--text); text-decoration: none; font-size: 12px; }
+  .chapters a:hover { color: var(--accent); }
+  .chapters .ts { font-family: var(--mono); color: var(--accent); font-size: 11px; }
+  /* RSS 새 영상 (FR29) */
+  .rss-chan { border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px;
+    margin-bottom: 6px; font-size: 12px; }
+  .rss-name { cursor: pointer; font-weight: 600; }
+  .rss-name:hover { color: var(--accent); }
+  .rss-name b { color: var(--green); }
+  .rss-vid { color: var(--muted); font-size: 11px; margin-top: 3px;
+    padding-left: 8px; }
+  .rss-badge { position: absolute; top: 8px; right: 8px; background: var(--green);
+    color: #10141c; font-size: 10px; font-weight: 700; padding: 1px 7px;
+    border-radius: 999px; }
   .copy-btn { background: var(--accent-dim); border: 1px solid var(--border);
     color: var(--text); font-size: 12px; padding: 4px 10px; border-radius: 6px;
     cursor: pointer; font-family: var(--mono); }
@@ -348,7 +366,12 @@
 
   <!-- 등록된 채널 + 추출 현황 (FR22) — 클릭하면 그 채널의 추출 조건으로 이동 -->
   <div class="card">
-    <h2>📋 등록된 채널 <span style="color:var(--muted);font-weight:400;font-size:12px">클릭하면 추출 조건이 열립니다</span></h2>
+    <h2>📋 등록된 채널
+      <span style="color:var(--muted);font-weight:400;font-size:12px">클릭하면 추출 조건이 열립니다</span>
+      <button class="ghost" id="rssBtn" style="float:right;font-size:12px"
+              onclick="checkNewVideos()">🔔 새 영상 확인</button>
+    </h2>
+    <div id="rssResult" class="hidden" style="margin-bottom:10px"></div>
     <div class="chan-cards" id="extChanCards">
       <span class="spinner"></span>
     </div>
@@ -644,7 +667,7 @@ function renderLibList() {
         <span>${fmtDate(v.upload_date)}</span>
         ${v._ch ? `<span class="subtype">${esc(v._ch)}</span>` : ""}
         ${v.content_type === "live" ? `<span class="live">LIVE</span>` : ""}
-        ${v.sub_type ? `<span class="subtype">${v.sub_type === "manual" ? "📝수동" : "🤖자동"}</span>` : ""}
+        ${v.sub_type ? `<span class="subtype">${v.sub_type === "manual" ? "📝수동" : v.sub_type === "whisper" ? "🎤전사" : "🤖자동"}</span>` : ""}
         ${(v.playlists||[]).map(p=>`<span class="playlist">${esc(p)}</span>`).join("")}
         <a class="ext-link" href="${esc(v.url || '#')}" target="_blank">↗ 원본</a>
         <button class="icon-btn video-del" title="영상 삭제">🗑</button>
@@ -655,6 +678,27 @@ function renderLibList() {
 
 let libDetailText = null;
 let libDetailBasename = null;
+let libDetailChannel = null;
+
+async function downloadMarkdown() {
+  /* ⬇ MD — 서버 조립 markdown을 .md 파일로 저장 (FR28.2) */
+  if (!libDetailBasename) return;
+  try {
+    const r = await fetch(`${API}/export/markdown` +
+      `?channel=${encodeURIComponent(libDetailChannel || libChannel)}` +
+      `&basename=${encodeURIComponent(libDetailBasename)}`);
+    if (!r.ok) throw new Error(r.status);
+    const { filename, markdown } = await r.json();
+    const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(a.href);
+  } catch (e) { alert("Markdown 내보내기 실패: " + e.message); }
+}
 
 async function showSubtitle(basename, el) {
   document.querySelectorAll(".lib-row").forEach(r => r.classList.remove("sel"));
@@ -669,12 +713,23 @@ async function showSubtitle(basename, el) {
     const r = await fetch(`${API}/subtitle?channel=${encodeURIComponent(subCh)}` +
                           `&basename=${encodeURIComponent(basename)}`);
     if (!r.ok) throw new Error(r.status);
-    const { text } = await r.json();
+    const { text, chapters, url } = await r.json();
     libDetailText = text;
+    libDetailChannel = subCh;
+    // 챕터 목록 (FR27.3) — 타임스탬프 새 탭 링크
+    const fmtTs = s => s >= 3600
+      ? `${String(Math.floor(s/3600)).padStart(2,"0")}:${String(Math.floor(s%3600/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`
+      : `${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
+    const chapHtml = (chapters || []).length && url ? `
+      <div class="chapters">
+        ${chapters.map(c => `<a href="${esc(url)}&t=${c.start}s" target="_blank">
+          <span class="ts">${fmtTs(c.start)}</span> ${esc(c.title)}</a>`).join("")}
+      </div>` : "";
     panel.innerHTML = `<div class="lib-detail-actions">
+        <button class="copy-btn" onclick="downloadMarkdown()">⬇ MD</button>
         <button class="copy-btn" id="copySubBtn" onclick="copySubtitle()">📋 복사</button>
       </div>
-      <h3>📄 ${esc(basename)}</h3><pre>${esc(text)}</pre>`;
+      <h3>📄 ${esc(basename)}</h3>${chapHtml}<pre>${esc(text)}</pre>`;
   } catch (e) {
     panel.innerHTML = `<div class="notice">자막을 불러오지 못했습니다 — ${esc(basename)}.
       서버 상태를 확인한 뒤 다시 시도하세요.</div>`;
@@ -795,10 +850,51 @@ async function libSearch() {
 /* ═══ [추출] 뷰 — 등록 채널 현황 (FR22) ═══ */
 const extCollapsed = new Set();   // 추출 탭 폴더 접기 상태 (FR25.9, 라이브러리와 별도)
 const extSeenGroups = new Set();
+let rssNewCounts = {};            // 채널명 → 새 영상 수 (🔔 확인 결과, FR29.3)
+
+async function checkNewVideos() {
+  /* 🔔 새 영상 확인 — 수동 트리거 전용 (FR29.3, NFR3 유지) */
+  const btn = document.getElementById("rssBtn");
+  const box = document.getElementById("rssResult");
+  btn.disabled = true; btn.textContent = "확인 중…";
+  try {
+    const r = await fetch(`${API}/channels/new`);
+    if (!r.ok) throw new Error(r.status);
+    const { channels, errors } = await r.json();
+    rssNewCounts = Object.fromEntries(
+      Object.entries(channels).map(([n, vids]) => [n, vids.length]));
+    const names = Object.keys(channels);
+    box.classList.remove("hidden");
+    if (!names.length) {
+      box.innerHTML = `<div class="empty" style="font-size:12px;text-align:left;margin:0">
+        새 영상이 없습니다 (RSS는 채널당 최근 15개까지 확인)</div>`;
+    } else {
+      box.innerHTML = names.map(n => `
+        <div class="rss-chan">
+          <span class="rss-name" data-rsschan="${esc(n)}">📢 ${esc(n)}
+            <b>새 ${channels[n].length}개</b> — 클릭하여 추출</span>
+          ${channels[n].map(v => `<div class="rss-vid">· ${esc(v.title)}
+            <span style="color:var(--muted)">${esc(v.published)}</span></div>`).join("")}
+        </div>`).join("");
+    }
+    if (Object.keys(errors || {}).length) {
+      box.innerHTML += `<div style="color:var(--warn);font-size:11px;margin-top:6px">
+        확인 실패: ${Object.entries(errors).map(([n, e]) => `${esc(n)}(${esc(e)})`).join(" · ")}</div>`;
+    }
+    loadExtChannels();      // 배지 반영
+  } catch (e) {
+    box.classList.remove("hidden");
+    box.innerHTML = `<div class="notice">새 영상 확인 실패 (/channels/new). 서버 상태를 확인하세요.</div>`;
+  }
+  btn.disabled = false; btn.textContent = "🔔 새 영상 확인";
+}
 
 function extCardHtml(c) {
+  const badge = rssNewCounts[c.name]
+    ? `<span class="rss-badge">새 ${rssNewCounts[c.name]}</span>` : "";
   return `
     <div class="chan-card" data-name="${esc(c.name)}" data-url="${esc(c.url)}">
+      ${badge}
       <div class="chan-name">${esc(c.name)}</div>
       <div class="chan-stats">추출 ${c.extracted} · 🔒 ${c.members_only}
         · 무자막 ${c.no_sub} · 최근 ${fmtDate(String(c.last_extracted||"").replaceAll("-","").slice(0,8))}</div>
@@ -1190,6 +1286,11 @@ delegate("chanCards", ".chan-group-head", el => {            // FR25.4 접기/�
   if (t) t.textContent = `${libCollapsed.has(g) ? "▸" : "▾"} 📁 ${g}`;
 });
 delegate("extChanCards", ".chan-card", el => extSelectChannel(el.dataset.name, el.dataset.url));
+delegate("rssResult", ".rss-name", el => {                   // FR29.3 — 채널 스캔 진입
+  const name = el.dataset.rsschan;
+  const card = document.querySelector(`#extChanCards .chan-card[data-name="${CSS.escape(name)}"]`);
+  if (card) extSelectChannel(name, card.dataset.url);
+});
 delegate("extChanCards", ".chan-group-head", el => {         // FR25.9 접기/펼치기
   const g = el.dataset.group;
   extCollapsed.has(g) ? extCollapsed.delete(g) : extCollapsed.add(g);

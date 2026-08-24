@@ -39,6 +39,27 @@ class KLIndexer:
             name=name, metadata={"hnsw:space": "cosine"}
         )
 
+    # ── 이름 변경 메타 동기화 (FR31.2·31.3) ──────────────────────────────────
+    def update_video_metadata(self, video_id: str, fields: dict) -> int:
+        """해당 영상의 모든 청크 metadata에 fields를 병합 (재임베딩 없음).
+        인덱스가 없거나 청크가 없으면 0 — 이름 변경을 막지 않는다."""
+        if not self.dirs["chroma"].exists():
+            return 0
+        updated = 0
+        for col_name in (config.COL_SUBTITLE, config.COL_DESC):
+            try:
+                col = self._collection(col_name)
+                got = col.get(where={"video_id": video_id})
+                ids = got.get("ids") or []
+                if not ids:
+                    continue
+                metas = [{**m, **fields} for m in got["metadatas"]]
+                col.update(ids=ids, metadatas=metas)
+                updated += len(ids)
+            except Exception as exc:      # pragma: no cover - 인덱스 손상 방어
+                log.warning(f"  ⚠ chroma 메타 갱신 실패({col_name}): {str(exc)[:60]}")
+        return updated
+
     # ── 메타 로드 헬퍼 ───────────────────────────────────────────────────────
     def _load_meta(self, basename: str) -> dict:
         meta_path = self.dirs["meta"] / f"{basename}.json"

@@ -39,6 +39,21 @@ class MetaCollector:
     def __init__(self, channel: str):
         self.dirs = config.channel_subdirs(channel)
 
+    @staticmethod
+    def _normalize_chapters(chapters) -> list:
+        """yt-dlp chapters → [{start:int초, end:int초, title}] (FR27.1). 없으면 []."""
+        out = []
+        for ch in chapters or []:
+            if not isinstance(ch, dict):
+                continue
+            try:
+                out.append({"start": int(ch.get("start_time") or 0),
+                            "end": int(ch.get("end_time") or 0),
+                            "title": str(ch.get("title") or "").strip()})
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def save(self, info: dict, basename: str, sub_type: str,
              playlists: list = None, content_type: str = "video") -> dict:
         """
@@ -49,6 +64,7 @@ class MetaCollector:
         meta["sub_type"] = sub_type
         meta["playlists"] = playlists or []      # 재생목록 카테고리 (FR15.2)
         meta["content_type"] = content_type      # "video" | "live" (FR16.4)
+        meta["chapters"] = self._normalize_chapters(info.get("chapters"))  # FR27.1
         meta["extracted_at"] = datetime.datetime.now().isoformat(timespec="seconds")
 
         # 종목/티커 추출 (제목 + 설명 + 태그)

@@ -100,6 +100,11 @@ def resolve_cookiefile():
 # ─── 429 가드 ────────────────────────────────────────────────────────────────
 CONSECUTIVE_429_LIMIT = 5      # 연속 429 N회 발생 시 추출 자동 중단
 
+# ─── Whisper 전사 폴백 (FR30) ────────────────────────────────────────────────
+import os as _os
+WHISPER_MODEL   = _os.environ.get("WHISPER_MODEL", "small")   # tiny/base/small/medium…
+WHISPER_COMPUTE = "int8"       # CPU 전용 — ARM64에서 안정적
+
 # ─── 품질 검토 임계값 ────────────────────────────────────────────────────────
 MIN_WORD_COUNT     = 30
 MAX_REPEAT_RATIO   = 0.50

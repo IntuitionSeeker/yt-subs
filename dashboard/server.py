@@ -87,6 +87,28 @@ class ChannelGroupRequest(BaseModel):
     group: str | None = None      # 트림 후 빈 값이면 폴더 해제 (FR25.2)
 
 
+class ChannelRenameRequest(BaseModel):
+    channel: str
+    new_name: str
+
+
+class VideoRenameRequest(BaseModel):
+    channel: str
+    basename: str
+    new_title: str
+
+
+class CategoryRenameRequest(BaseModel):
+    channels: list[str]
+    old: str
+    new: str
+
+
+class FolderRenameRequest(BaseModel):
+    old: str
+    new: str
+
+
 def _reject_path_traversal(*values: str):
     """경로 파라미터 1차 검증 — 자막 조회(FR20.3)·삭제(FR21) 엔드포인트 공통."""
     for value in values:
@@ -204,7 +226,7 @@ def channels_stats():
         last = ""
         for item in state.values():
             sub_type = item.get("sub_type")
-            if sub_type in ("manual", "auto"):
+            if sub_type in ("manual", "auto", "whisper"):    # DQ-18
                 extracted += 1
             elif sub_type == "members_only":
                 members_only += 1
@@ -228,6 +250,13 @@ def channels_stats():
     return {"channels": out}
 
 
+@app.get("/channels/new")
+def channels_new():
+    """RSS로 등록 채널의 새 영상 감지 (수동 트리거 전용). FR29.2"""
+    import rss_monitor            # 지연 임포트
+    return rss_monitor.check_new_videos()
+
+
 @app.post("/channels/group")
 def channels_group(req: ChannelGroupRequest):
     """채널 폴더 지정/변경/해제. FR25.2"""
@@ -237,6 +266,69 @@ def channels_group(req: ChannelGroupRequest):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
     return {"ok": True, "channel": req.channel, "group": group}
+
+
+# ─── 이름 변경 (FR31) ────────────────────────────────────────────────────────
+def _reject_if_busy():
+    """추출/스캔 작업 중 이름 변경 금지 — 파일 경합 방지. FR31.5"""
+    if MANAGER.is_busy():
+        raise HTTPException(status_code=409,
+                            detail="추출/스캔 작업 중에는 이름을 변경할 수 없습니다.")
+
+
+@app.post("/channels/rename")
+def channels_rename(req: ChannelRenameRequest):
+    """채널 이름 변경 — 레지스트리 + output 폴더. FR31.1"""
+    _reject_if_busy()
+    _reject_path_traversal(req.channel, req.new_name.strip() or req.new_name)
+    import renamer
+    try:
+        renamer.rename_channel(req.channel, req.new_name)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc))
+    return {"ok": True, "channel": req.new_name.strip()}
+
+
+@app.post("/videos/rename")
+def videos_rename(req: VideoRenameRequest):
+    """영상 제목 변경 — meta.title + 인덱스 metadata (파일명 유지). FR31.2"""
+    _reject_if_busy()
+    _reject_path_traversal(req.channel, req.basename)
+    import renamer
+    try:
+        result = renamer.rename_video_title(req.channel, req.basename, req.new_title)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, **result}
+
+
+@app.post("/categories/rename")
+def categories_rename(req: CategoryRenameRequest):
+    """카테고리 이름 변경 — 채널 목록 일괄. FR31.3"""
+    _reject_if_busy()
+    _reject_path_traversal(*req.channels)
+    import renamer
+    try:
+        result = renamer.rename_category(req.channels, req.old, req.new)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, **result}
+
+
+@app.post("/folders/rename")
+def folders_rename(req: FolderRenameRequest):
+    """폴더(그룹) 이름 변경. FR31.4"""
+    _reject_if_busy()
+    import renamer
+    try:
+        count = renamer.rename_folder(req.old, req.new)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "channels": count}
 
 
 @app.post("/videos/delete")
@@ -291,9 +383,22 @@ def delete_channel(req: ChannelDeleteRequest):
     return {"deleted": True, "purged": purged}
 
 
+def _load_meta(channel: str, basename: str) -> dict:
+    """meta/*.json 로드 (경로 검증 포함). 없거나 파싱 실패 시 {}."""
+    meta_dir = config.channel_subdirs(channel)["meta"].resolve()
+    path = (meta_dir / f"{basename}.json").resolve()
+    if not path.is_relative_to(meta_dir) or not path.exists():
+        return {}
+    try:
+        import json
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
 @app.get("/subtitle")
 def subtitle(channel: str, basename: str):
-    """자막 전문(txt) 반환. 경로 탈출 2중 검증. FR20.3"""
+    """자막 전문(txt) + 챕터·원본 링크 반환. 경로 탈출 2중 검증. FR20.3·FR27.2"""
     _reject_path_traversal(channel, basename)
     txt_dir = config.channel_subdirs(channel)["txt"].resolve()
     path = (txt_dir / f"{basename}.txt").resolve()
@@ -301,7 +406,52 @@ def subtitle(channel: str, basename: str):
         raise HTTPException(status_code=400, detail="잘못된 경로 파라미터입니다.")
     if not path.exists():
         raise HTTPException(status_code=404, detail="자막 파일이 없습니다.")
-    return {"basename": basename, "text": path.read_text(encoding="utf-8")}
+    meta = _load_meta(channel, basename)
+    return {"basename": basename, "text": path.read_text(encoding="utf-8"),
+            "chapters": meta.get("chapters") or [],
+            "url": meta.get("webpage_url")}
+
+
+@app.get("/export/markdown")
+def export_markdown(channel: str, basename: str):
+    """영상 1개를 Markdown 문서로 조립. FR28.1"""
+    _reject_path_traversal(channel, basename)
+    txt_dir = config.channel_subdirs(channel)["txt"].resolve()
+    path = (txt_dir / f"{basename}.txt").resolve()
+    if not path.is_relative_to(txt_dir):
+        raise HTTPException(status_code=400, detail="잘못된 경로 파라미터입니다.")
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="자막 파일이 없습니다.")
+    meta = _load_meta(channel, basename)
+    url = meta.get("webpage_url") or ""
+    ud = str(meta.get("upload_date") or "")
+    date_str = f"{ud[:4]}-{ud[4:6]}-{ud[6:8]}" if len(ud) == 8 else ud
+
+    lines = [f"# {meta.get('title') or basename}", ""]
+    info_bits = []
+    if url:
+        info_bits.append(f"[원본 영상]({url})")
+    if date_str:
+        info_bits.append(f"업로드 {date_str}")
+    info_bits.append(f"채널 {meta.get('channel') or channel}")
+    if meta.get("playlists"):
+        info_bits.append("카테고리 " + " · ".join(meta["playlists"]))
+    if meta.get("tickers"):
+        info_bits.append("종목 " + " ".join(meta["tickers"]))
+    lines += ["> " + " | ".join(info_bits), ""]
+
+    chapters = meta.get("chapters") or []
+    if chapters and url:
+        lines += ["## 챕터", ""]
+        for ch in chapters:
+            s = int(ch.get("start") or 0)
+            ts = f"{s // 3600:02d}:{s % 3600 // 60:02d}:{s % 60:02d}" if s >= 3600 \
+                else f"{s // 60:02d}:{s % 60:02d}"
+            lines.append(f"- [{ts}]({url}&t={s}s) {ch.get('title') or ''}")
+        lines.append("")
+
+    lines += ["## 자막 전문", "", path.read_text(encoding="utf-8")]
+    return {"filename": f"{basename}.md", "markdown": "\n".join(lines)}
 
 
 if __name__ == "__main__":

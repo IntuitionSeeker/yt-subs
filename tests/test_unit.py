@@ -344,6 +344,128 @@ def test_classify_url_watch_with_list_is_video():
     ) == ("video", "dQw4w9WgXcQ")
 
 
+# ─── V-U16: 이름 변경 (FR31) ────────────────────────────────────────────────
+def test_registry_rename(tmp_path):
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@옛채널")
+    reg.set_group("옛채널", "폴더A")
+    reg.rename("옛채널", "새채널")
+    reg2 = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    assert "옛채널" not in reg2.names()
+    assert reg2.get("새채널")["group"] == "폴더A", "설정 보존"
+    with pytest.raises(KeyError):
+        reg2.rename("없는채널", "x")
+    reg2.add("https://youtube.com/@다른채널")
+    with pytest.raises(ValueError):
+        reg2.rename("다른채널", "새채널")     # 중복 금지
+
+
+def test_rename_channel_moves_folder(tmp_path, monkeypatch):
+    import config as cfg
+    monkeypatch.setattr(cfg, "OUTPUT_BASE", tmp_path / "out")
+    monkeypatch.setattr(cfg, "CHANNELS_YAML", tmp_path / "channels.yaml")
+    import renamer
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@무브채널")
+    old_dir = cfg.channel_dir("무브채널")
+    (old_dir / "txt").mkdir(parents=True)
+    (old_dir / "txt" / "a.txt").write_text("자막", encoding="utf-8")
+    renamer.rename_channel("무브채널", "이동됨")
+    assert not old_dir.exists()
+    assert (cfg.channel_dir("이동됨") / "txt" / "a.txt").read_text(encoding="utf-8") == "자막"
+
+
+def test_rename_video_and_category(tmp_path, monkeypatch):
+    import json as _json
+    import config as cfg
+    monkeypatch.setattr(cfg, "OUTPUT_BASE", tmp_path / "out")
+    import renamer
+    monkeypatch.setattr(renamer, "_indexer",
+                        lambda ch: type("Idx", (), {
+                            "update_video_metadata": staticmethod(lambda vid, f: 3)})())
+    meta_dir = cfg.channel_subdirs("ch1")["meta"]
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "v.json").write_text(_json.dumps(
+        {"id": "vid1", "title": "옛제목", "playlists": ["옛카테고리", "유지"]},
+        ensure_ascii=False), encoding="utf-8")
+    (cfg.channel_dir("ch1") / "playlists.json").write_text(
+        _json.dumps({"vid1": ["옛카테고리", "유지"]}, ensure_ascii=False), encoding="utf-8")
+    # 영상 제목
+    res = renamer.rename_video_title("ch1", "v", "새제목")
+    assert res == {"title": "새제목", "chunks": 3}
+    meta = _json.loads((meta_dir / "v.json").read_text(encoding="utf-8"))
+    assert meta["title"] == "새제목"
+    # 카테고리 (다른 태그는 유지)
+    res2 = renamer.rename_category(["ch1"], "옛카테고리", "새카테고리")
+    assert res2["videos"] == 1
+    meta = _json.loads((meta_dir / "v.json").read_text(encoding="utf-8"))
+    assert meta["playlists"] == ["새카테고리", "유지"]
+    pl = _json.loads((cfg.channel_dir("ch1") / "playlists.json").read_text(encoding="utf-8"))
+    assert pl["vid1"] == ["새카테고리", "유지"]
+
+
+# ─── V-U13: 챕터 정규화 (FR27.1) ────────────────────────────────────────────
+def test_normalize_chapters():
+    from meta_collector import MetaCollector
+    raw = [{"start_time": 0.0, "end_time": 62.5, "title": "인트로"},
+           {"start_time": 62.5, "end_time": 300, "title": " 본론 "},
+           {"start_time": None, "end_time": None, "title": "무시안됨"},
+           "깨진 항목"]
+    got = MetaCollector._normalize_chapters(raw)
+    assert got[0] == {"start": 0, "end": 62, "title": "인트로"}
+    assert got[1] == {"start": 62, "end": 300, "title": "본론"}
+    assert got[2] == {"start": 0, "end": 0, "title": "무시안됨"}
+    assert len(got) == 3                       # dict 아닌 항목만 걸러짐
+    assert MetaCollector._normalize_chapters(None) == []
+
+
+# ─── V-U14: Whisper SRT 조립 (FR30.2) ───────────────────────────────────────
+def test_segments_to_srt():
+    from transcriber import segments_to_srt, _srt_ts
+    assert _srt_ts(0) == "00:00:00,000"
+    assert _srt_ts(3661.5) == "01:01:01,500"
+    segs = [{"start": 0.0, "end": 2.5, "text": " 안녕하세요 "},
+            {"start": 2.5, "end": 5.0, "text": ""},          # 빈 텍스트 제외
+            {"start": 5.0, "end": 8.0, "text": "본문입니다"}]
+    srt = segments_to_srt(segs)
+    blocks = [b for b in srt.split("\n\n") if b.strip()]
+    assert len(blocks) == 2
+    assert "00:00:00,000 --> 00:00:02,500" in blocks[0]
+    assert "안녕하세요" in blocks[0] and "본문입니다" in blocks[1]
+
+
+# ─── V-U15: RSS 피드 파싱 (FR29.2) ──────────────────────────────────────────
+def test_rss_fetch_feed(monkeypatch):
+    import rss_monitor
+    xml = """<?xml version="1.0"?>
+    <feed xmlns="http://www.w3.org/2005/Atom"
+          xmlns:yt="http://www.youtube.com/xml/schemas/2015">
+      <entry><yt:videoId>abc123def45</yt:videoId>
+        <title>새 영상</title><published>2026-08-22T01:00:00+00:00</published></entry>
+      <entry><yt:videoId>xyz987uvw65</yt:videoId>
+        <title>둘째 영상</title><published>2026-08-21T01:00:00+00:00</published></entry>
+    </feed>"""
+    monkeypatch.setattr(rss_monitor, "_http_get", lambda url: xml)
+    got = rss_monitor.fetch_feed("UCxxxx")
+    assert got == [
+        {"id": "abc123def45", "title": "새 영상", "published": "2026-08-22"},
+        {"id": "xyz987uvw65", "title": "둘째 영상", "published": "2026-08-21"},
+    ]
+
+
+def test_rss_resolve_channel_id(monkeypatch):
+    import rss_monitor
+    # /channel/UC… URL은 요청 없이 즉시
+    assert rss_monitor.resolve_channel_id(
+        "https://www.youtube.com/channel/UCabcdefghijklmnopqrstuv/videos"
+    ) == "UCabcdefghijklmnopqrstuv"
+    # @핸들은 HTML에서 해석
+    monkeypatch.setattr(rss_monitor, "_http_get",
+                        lambda url: '..."channelId":"UCzzzzzzzzzzzzzzzzzzzzzz"...')
+    assert rss_monitor.resolve_channel_id(
+        "https://www.youtube.com/@handle/videos") == "UCzzzzzzzzzzzzzzzzzzzzzz"
+
+
 # ─── V-U12: 채널 폴더 (FR25.1) ──────────────────────────────────────────────
 def test_registry_set_group(tmp_path):
     reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")

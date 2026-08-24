@@ -16,6 +16,8 @@
 > **v4.7:** 재생목록 URL 추출(FR24) — 대시보드에서 `/playlist?list=…` 스캔·조건 추출, 결과물은 원채널 폴더 저장 + 재생목록 제목을 카테고리로 병합  
 > **v4.8:** 채널 폴더(FR25) — channels.yaml `group` 필드, 라이브러리 폴더 섹션·전체 보기(영상 병합), 재생목록 추출 시 신규 채널 자동 폴더 지정  
 > **v4.9:** 추출 결과 상세(FR26) — 영상별 이벤트(id·제목·종류·이유)를 job에 축적, 통계 칩 클릭 시 해당 분류 영상 목록·이유 표시  
+> **v5.0 (v3 릴리스):** 챕터 메타(FR27), Markdown 내보내기(FR28), RSS 새 영상 감지(FR29), Whisper 전사 폴백(FR30)  
+> **v5.1:** 이름 변경(FR31) — 채널·영상 제목·카테고리·폴더, ChromaDB 메타 동기화(재임베딩 없음)  
 > **범위:** 채널 관리 → 자막 추출 → 메타데이터 수집 → 품질 검토 → 지식층 인덱싱 → 질의·대시보드
 
 ---
@@ -390,6 +392,52 @@
 | FR26.4 | 이유 문구 — 오류: 실제 예외 메시지(429는 구분 문구), 수정: "수정 감지 — 재추출", 스킵: "이미 추출됨 · 변경 없음", 신규: "신규 추출", 무자막·멤버십·기간외·라이브대기: 고정 문구 | 필수 |
 | FR26.5 | 이력 범위는 현행 status 정책과 동일 — **마지막 작업 1건**. 과거 작업 이력 저장은 범위 외(`extract_log.csv`가 보조 기록) | 명시 |
 
+### FR27 — 챕터 메타 (신규, v3)
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR27.1 | `process_video` full info의 `chapters`를 meta.json에 저장 — `[{start:int초, end:int초, title}]`. 챕터 없으면 `[]` | 필수 |
+| FR27.2 | `GET /subtitle` 응답에 `chapters`·`url`(원본 링크) 추가 — meta.json에서 읽음(없거나 파싱 실패 시 `[]`/null) | 필수 |
+| FR27.3 | 라이브러리 상세 패널 자막 위에 챕터 목록 표시 — 각 챕터는 `watch?v=…&t=<start>s` 새 탭 링크 | 필수 |
+| FR27.4 | 기존 추출 영상은 재추출 전까지 챕터 없음(백필 없음 — 요청 예산 보호) | 명시 |
+
+### FR28 — Markdown 내보내기 (신규, v3)
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR28.1 | `GET /export/markdown?channel&basename` → `{filename, markdown}`. 구성: 제목(H1)·원본 링크·업로드일·채널·카테고리·티커 → 챕터 목록(타임스탬프 링크) → 자막 전문. 경로 검증은 FR20.3 준용 | 필수 |
+| FR28.2 | 라이브러리 상세 패널에 "⬇ MD" 버튼 — 클릭 시 markdown을 `.md` 파일로 다운로드(클라이언트 Blob). Obsidian 등에 바로 넣을 수 있는 일반 Markdown | 필수 |
+
+### FR29 — RSS 새 영상 감지 (신규, v3)
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR29.1 | 채널 `channel_id`(UC…) 해석·캐시 — channels.yaml에 `channel_id` 필드. 없으면 채널 페이지 HTML에서 1회 해석(`"channelId":"UC…"` 정규식, 브라우저 UA) 후 저장. 실패 시 해당 채널은 이번 확인에서 제외 | 필수 |
+| FR29.2 | `GET /channels/new` — 등록 채널별 RSS 피드(`feeds/videos.xml?channel_id=…`)를 조회해 state.json에 없는 영상을 `{channel: [{id,title,published}]}`로 반환. RSS는 채널당 최신 15개까지만 제공(명시). 피드 조회 실패 채널은 `errors`에 나열 | 필수 |
+| FR29.3 | 추출 탭에 "🔔 새 영상 확인" 버튼 — 클릭 시에만 조회(자동 폴링 없음, NFR3 수동 원칙 유지). 결과는 채널별 새 영상 목록 + 채널 카드에 "새 N" 배지, 각 채널 행에서 클릭 한 번으로 해당 채널 스캔 진입(FR22.2 재사용) | 필수 |
+| FR29.4 | RSS 조회는 YouTube 영상 페이지 요청이 아니므로 429 예산과 무관(가벼움). 다만 순차 조회·타임아웃 10초 | 명시 |
+
+### FR30 — Whisper 전사 폴백 (신규, v3)
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR30.1 | `./yt.sh transcribe [채널] [--limit N]` — state에 `sub_type=none`(무자막)으로 기록된 영상의 음성을 faster-whisper로 전사. 채널 생략 시 전 채널 | 필수 |
+| FR30.2 | 처리: 오디오만 다운로드(bestaudio, `_ydl_opts` 재사용 — 쿠키·딜레이 적용) → faster-whisper 전사(채널 `lang` 힌트) → 세그먼트를 SRT로 조립 → 기존 `srt_to_txt` 경로로 TXT 저장 → meta·state를 `sub_type="whisper"`로 갱신 → extract_log에 `ok` 행. 오디오 임시 파일은 처리 후 삭제 | 필수 |
+| FR30.3 | `sub_type="whisper"`는 추출 완료로 취급 — `decide()` 스킵 대상, `/channels/stats.extracted` 집계 포함, 대시보드 뱃지 "🎤전사" | 필수 |
+| FR30.4 | 모델: `WHISPER_MODEL` 환경변수(기본 `small`), CPU int8. 모델은 HF 캐시(기존 마운트)에 1회 다운로드. faster-whisper는 requirements에 추가 | 필수 |
+| FR30.5 | 대시보드 통합(작업 큐·진행율)은 v3 범위 외 — CLI 전용. 전사는 영상당 수 분 소요될 수 있음(명시) | 명시 |
+
+### FR31 — 이름 변경 (신규, v3)
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR31.1 | **채널 이름 변경** `POST /channels/rename {channel, new_name}` — channels.yaml 키 이동(설정·group·channel_id 보존) + `output/` 폴더 이동. 새 이름은 경로 검증(FR20.3 준용)·중복(레지스트리 또는 폴더 존재) 시 409. ChromaDB는 채널 폴더 내부라 함께 이동 | 필수 |
+| FR31.2 | **영상 제목 변경** `POST /videos/rename {channel, basename, new_title}` — meta.json `title` 갱신 + ChromaDB 두 컬렉션의 해당 영상 청크 metadata.title 갱신(재임베딩 없음). **파일명(basename)은 유지** — 파일 정체성·링크 보존 | 필수 |
+| FR31.3 | **카테고리(재생목록 태그) 이름 변경** `POST /categories/rename {channels:[], old, new}` — 각 채널의 playlists.json 값·meta.playlists 배열에서 치환 + ChromaDB metadata.playlists 갱신. 폴더 전체 보기에서는 소속 채널 전체에 일괄 적용 | 필수 |
+| FR31.4 | **폴더 이름 변경** `POST /folders/rename {old, new}` — group=old인 모든 채널을 new로 변경 (`set_group` 재사용) | 필수 |
+| FR31.5 | 모든 이름 변경은 추출/스캔 작업 중(`JobManager` 점유) 409 거부 — 파일 이동·수정과 작업의 경합 방지 (FR21.4 준용) | 필수 |
+| FR31.6 | UI — 채널 카드 ✏️(이름), 폴더 헤더 ✏️, 영상 행 ✏️(제목), 카테고리 선택 시 ✏️(선택된 카테고리 변경). 모두 prompt 입력 | 필수 |
+
 ---
 
 ## 4. 비기능 요구사항 (NFR)
@@ -459,6 +507,11 @@
 | FR24.1~24.6 | `dashboard/jobs.py` (`classify_url` playlist 분기 · `_do_scan_playlist` · `_run_playlist` · `_merged_pl_map`) · `dashboard/index.html` (kind 표시·채널 배지) | 원채널 output/ + playlists.json 병합 |
 | FR25.1~25.7 | `channel_registry.set_group` · `dashboard/server.py` (`POST /channels/group`·stats group) · `dashboard/jobs.py` (`_run_playlist` 자동 폴더) · `dashboard/index.html` (폴더 섹션·전체 보기·📁 버튼) | channels.yaml `group` 필드 |
 | FR26.1~26.5 | `extractor.py` (`_event`·`_report(event=)`) · `dashboard/jobs.py` (`job["events"]` 축적·`_append_event`) · `dashboard/index.html` (통계 칩·이벤트 패널) | /extract/status.events |
+| FR27.1~27.4 | `meta_collector.save`(chapters) · `dashboard/server.py`(/subtitle.chapters) · `dashboard/index.html`(챕터 목록) | meta.json `chapters` |
+| FR28.1~28.2 | `dashboard/server.py`(/export/markdown) · `dashboard/index.html`(⬇ MD 버튼) | (파생 문서) |
+| FR29.1~29.4 | `rss_monitor.py`(channel_id 해석·피드 파싱) · `channel_registry.set_channel_id` · `dashboard/server.py`(/channels/new) · `dashboard/index.html`(🔔 버튼·배지) | channels.yaml `channel_id` |
+| FR30.1~30.5 | `transcriber.py`(faster-whisper) · `main.py`(cmd_transcribe) · `yt.sh` · requirements | srt/txt/meta/state (`sub_type=whisper`) |
+| FR31.1~31.6 | `renamer.py`(신규) · `channel_registry.rename` · `kl_indexer.update_video_metadata` · `dashboard/server.py`(4 엔드포인트) · `dashboard/index.html`(✏️ 버튼 4곳) | channels.yaml·output/·meta·playlists.json·chroma metadata |
 | FR21.1~21.4 | `dashboard/server.py` (`POST /videos/delete`·`POST /channels/delete`·`_reject_path_traversal`) · `kl_indexer.KLIndexer.delete_video` · `dashboard/jobs.py` (`JobManager.is_busy`) · `dashboard/index.html` (`deleteVideo`·`deleteChannel`·`copySubtitle`) | output 파일·state·ChromaDB 정리 |
 | FR22.1~22.4 | `dashboard/index.html` (`loadExtChannels`·`extSelectChannel`·`switchTab`·`pollJob` 완료 훅) — 기존 `GET /channels/stats`(FR20.1)·`extStart`(FR17.3~17.4) 재사용, 신규 백엔드 없음 | (프론트 전용) |
 

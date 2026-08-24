@@ -290,7 +290,7 @@ class JobManager:
                 # 스캔 availability OR state.sub_type 합집합
                 "members_only": bool(_is_members_availability(e.get("availability"))
                                      or sub_type == "members_only"),
-                "extracted": sub_type in ("manual", "auto"),
+                "extracted": sub_type in ("manual", "auto", "whisper"),   # DQ-18
             })
 
         playlists = sorted({p for lst in pl_map.values() for p in lst})
@@ -346,7 +346,7 @@ class JobManager:
                 "playlists": [],
                 "members_only": bool(_is_members_availability(e.get("availability"))
                                      or sub_type == "members_only"),
-                "extracted": sub_type in ("manual", "auto"),
+                "extracted": sub_type in ("manual", "auto", "whisper"),   # DQ-18
             })
 
         scan_id = uuid.uuid4().hex[:12]

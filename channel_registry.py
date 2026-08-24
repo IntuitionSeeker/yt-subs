@@ -61,6 +61,25 @@ class ChannelRegistry:
         self._save()
         return name
 
+    def rename(self, old: str, new: str):
+        """채널 이름 변경 — 설정(group·channel_id 포함) 보존. FR31.1
+        레지스트리만 변경하며 output 폴더 이동은 호출자(renamer) 책임."""
+        channels = self.data.get("channels", {})
+        if old not in channels:
+            raise KeyError(f"등록되지 않은 채널: {old}")
+        if new in channels:
+            raise ValueError(f"이미 존재하는 채널 이름: {new}")
+        channels[new] = channels.pop(old)
+        self._save()
+
+    def set_channel_id(self, name: str, channel_id: str):
+        """RSS용 channel_id(UC…) 캐시. FR29.1"""
+        ch = self.data.get("channels", {}).get(name)
+        if ch is None:
+            raise KeyError(f"등록되지 않은 채널: {name}")
+        ch["channel_id"] = channel_id
+        self._save()
+
     def set_group(self, name: str, group: str = None) -> str:
         """채널 폴더(그룹) 지정. FR25.1 — 빈 값/None이면 필드 제거(해제)."""
         ch = self.data.get("channels", {}).get(name)

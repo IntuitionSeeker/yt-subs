@@ -18,6 +18,10 @@
 > **v4.3:** 진행 중 라이브 가드 `live_wait`(FR16.5, §2.2), `reflow_sentences` 문장 단위 TXT(FR23), stats 8키
 > **v4.4:** Firefox 쿠키 직접 읽기(FR13.6) — `_ydl_opts` cookiesfrombrowser 우선, `has_auth()` 재시도 판정, `/cookies.source`
 > **v4.5:** [추출] 탭 채널 현황 카드(FR22, §2.9) — 신규 백엔드 없이 기존 `GET /channels/stats`·`extStart` 재사용
+> **v4.6:** 429 방어 강화(FR14.2~14.3, §2.2·§3.2) — 배치 크기·휴식 랜덤화(`BATCH_SIZE_RANGE`·`BATCH_REST_RANGE`), 429 백오프 후 같은 영상 1회 재시도(재시도도 요청 예산 소비, `stats.error`는 최종 포기 기준)
+> **v4.7:** 재생목록 URL 추출(FR24, §2.10) — `classify_url` playlist 분기, `_do_scan_playlist`(flat 스캔·채널별 state 조회), `_run_playlist`(채널 그룹 순차 실행·진행율 합산·채널별 인덱싱), `_merged_pl_map`(재생목록 제목 카테고리 병합), 신규 결정 DQ-17
+> **v4.8:** 채널 폴더(FR25) — `ChannelRegistry.set_group`(channels.yaml `group` 필드), `POST /channels/group`, `/channels/stats.group`, 라이브러리 폴더 섹션·병합 전체 보기(프론트 병합·원채널 배지·자막/삭제는 영상별 원채널로 라우팅), `_run_playlist` 신규 채널 자동 폴더 지정. 보강: 폴더 모드 내용 검색(채널별 /search 병합, FR25.8), 추출 탭 폴더 표시(FR25.9), 처음 보는 폴더 기본 접힘(FR25.4)
+> **v4.9:** 추출 결과 상세(FR26) — `Extractor._event`+`_report(event=)`로 영상별 결과 이벤트를 진행 콜백에 실어 보내고(처리 전 보고에는 event 없음 — 기존 payload 스키마 유지), JobManager가 `job["events"]`에 축적(캡 1,000·재생목록은 channel 부가), 프론트 통계 칩 클릭 → 분류별 영상·이유 패널
 
 ---
 
@@ -239,11 +243,12 @@ scan_playlists() ─ video_id→재생목록 매핑 (FR15, 요청 1+N회)
   decide(vid, mod, up)     ─ 날짜 미제공 → skip (FR2.6)
   ├ skip                   → 통과
   ├ limit 도달             → 카나리아 종료 (FR14.5)
-  ├ BATCH_SIZE마다 휴식     (FR14.2)
+  ├ 8~12개(랜덤)마다 45~90초(랜덤) 휴식 (FR14.2)
   └ process_video(vid, action, content_type, pl_map)
       ├ 성공   → stats, 429카운터 리셋
       ├ 멤버십 → _mark_skip(members_only)
-      └ 429    → 지수 백오프, 연속 5회 시 중단 (FR13.5·14.3)
+      └ 429    → 지수 백오프 → 같은 영상 1회 재시도(예산 소비),
+                 재실패 시 포기·다음 영상, 연속 5회 시 중단 (FR13.5·14.3)
 state.save() → _backfill_meta(매핑 비면 생략, FR15.5) → 통계 로그
 ```
 
@@ -585,6 +590,7 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | DQ-13 | 스캔 캐시 | scan_id 서버 메모리 캐시 TTL 10분 (재스캔 요청 절약). 응답용 view뿐 아니라 **원본 entries·pl_map도 함께 보관**해 `run(entries=, pl_map=)`으로 재사용 |
 | DQ-14 | 취소 시 인덱싱 | **생략한다.** 취소는 "지금 멈춤" 신호인데 `index_all()`은 임베딩 모델 로드 + 전체 재임베딩으로 수 분이 걸려 취소 의미를 훼손한다. FR18.2가 보장하는 state 저장·`_backfill_meta`는 정상 수행하고 `status="cancelled"`로 즉시 종료하며, 추출된 파일은 다음 추출 또는 `./yt.sh index`에서 upsert된다(유실 없음). FR17.9의 "완료 후"에 취소는 포함되지 않는다 (FR17.8) |
 | DQ-15 | 조건 적용 순서 | **ⓒ카테고리 → ⓓ멤버십 → ⓔ검색어를 AND로 거른 뒤 마지막에 ⓐ최신N을 slice**하고, ⓑ기간은 처리 시 확정(DQ-12). 세 술어는 부작용이 없어 상호 순서와 무관하며 **slice 위치만이 결과를 가른다**(먼저 slice하면 대상이 줄어든다). 프론트 미리보기 `applyFilters()`가 이 순서이므로 **프론트 로직을 계약으로 삼고 백엔드 `jobs.apply_filters()`가 맞춘다** — 어긋나면 V-D11("미리보기 대상 수 = 실제 처리 수")이 즉시 깨진다. ⓐ의 "최신"은 flat 스캔에 날짜가 없어(FR2.6) **스캔 배열 순서(videos 탭 → streams 탭)** 기준이다 (FR17.4) |
+| DQ-17 | 재생목록 태깅은 병합 full-map으로만 | `_backfill_meta(mapping)`은 **맵에 없는 vid의 meta.playlists를 `[]`로 덮어쓴다**(전체 맵 전제 설계). 따라서 재생목록 추출(FR24.4)에서 {대상 vid: [재생목록]}만 담은 부분 맵을 `run(pl_map=)`에 넘기면 그 채널의 기존 카테고리가 전부 소실된다. 반드시 채널의 기존 playlists.json(없으면 기존 meta들에서 재구성)에 재생목록 제목을 **병합한 전체 맵**을 전달한다 (FR24.4) |
 | DQ-16 | `--limit` 예산 기준 | limit은 "성공 추출 수"가 아니라 **요청 소비 수** 상한이다. `extract_info` 요청을 쓰는 모든 경로(정상·무자막·**멤버십 재시도(FR19.1)**·오류·`date_skip`)가 예산을 소비하고, 요청을 쓰지 않는 state `skip`은 소비하지 않는다. FR14.5의 목적이 429 방어(요청 총량 통제)이기 때문이며, FR19.1 도입으로 멤버십 재시도가 매 run 요청을 쓰게 되면서 성공-기준 카운트로는 카나리아가 실제 요청 수를 통제하지 못한다 (FR14.5) |
 
 ---

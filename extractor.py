@@ -3,6 +3,7 @@ import re
 import csv
 import json
 import time
+import random
 import logging
 import urllib.request
 import http.cookiejar
@@ -281,25 +282,36 @@ class Extractor:
     # ── 진행 보고 (FR18.1, FR18.2) ───────────────────────────────────────────
     @staticmethod
     def _report(progress, phase: str, done: int, total: int,
-                current_title, stats: dict) -> bool:
+                current_title, stats: dict, event: dict = None) -> bool:
         """
         진행 콜백 호출. 반환 False = 취소 요청.
         progress가 None이면 아무 것도 하지 않고 True (CLI 경로 무영향, FR18.1).
         콜백 내부 예외는 추출을 죽이지 않고 '계속 진행'으로 간주한다.
+        event는 영상 1개 결과 확정 보고에만 실린다 (FR26.1) — 처리 전 보고에는
+        키 자체가 없어 기존 payload 스키마가 유지된다.
         """
         if progress is None:
             return True
+        payload = {
+            "phase": phase,
+            "done": done,
+            "total": total,
+            "current_title": current_title,
+            "stats": dict(stats),   # 스냅샷 — 폴링 중 동시 변경 방지
+        }
+        if event is not None:
+            payload["event"] = event
         try:
-            return bool(progress({
-                "phase": phase,
-                "done": done,
-                "total": total,
-                "current_title": current_title,
-                "stats": dict(stats),   # 스냅샷 — 폴링 중 동시 변경 방지
-            }))
+            return bool(progress(payload))
         except Exception as exc:
             log.warning(f"  ⚠ 진행 콜백 오류(무시): {str(exc)[:60]}")
             return True
+
+    @staticmethod
+    def _event(vid: str, entry: dict, kind: str, reason: str) -> dict:
+        """영상별 처리 결과 이벤트 (FR26.1) — 대시보드 통계 칩 상세용."""
+        return {"id": vid, "title": entry.get("title") or vid,
+                "kind": kind, "reason": reason}
 
     # ── 채널 전체 실행 ───────────────────────────────────────────────────────
     def run(self, force_vid: str = None, limit: int = None,
@@ -344,6 +356,8 @@ class Extractor:
         processed = 0         # extract_info 요청을 소비한 시도 수 — --limit 기준
         since_rest = 0        # 마지막 배치 휴식 이후 시도 수 (실패 포함) — 휴식 기준
         done = 0              # 처리 완료 수 (스킵 포함) — 진행률 기준
+        # 배치 크기는 매 배치 재추첨 — 고정 주기는 차단 탐지의 기계 서명 (FR14.2)
+        batch_size = random.randint(*config.BATCH_SIZE_RANGE)
 
         for i, entry in enumerate(entries, 1):
             if cancelled:
@@ -362,6 +376,13 @@ class Extractor:
             if action == "skip":
                 stats["skip"] += 1
                 done += 1
+                # 스킵도 이벤트 1회 보고 (FR26.1) — 취소 신호 존중
+                if not self._report(progress, "extracting", done, total,
+                                    entry.get("title"), stats,
+                                    event=self._event(vid, entry, "skip",
+                                                      "이미 추출됨 · 변경 없음")):
+                    cancelled = True
+                    break
                 continue
 
             # 카나리아 실행 (FR14.5): 처리 수가 limit에 도달하면 안전하게 종료
@@ -369,11 +390,13 @@ class Extractor:
                 log.info(f"  🐤 --limit {limit} 도달 → 카나리아 종료 (나머지는 다음 run에서 이어받기)")
                 break
 
-            # 배치 휴식 (FR14.2): N개 시도할 때마다 일정 시간 쉼
-            if since_rest >= config.BATCH_SIZE:
-                log.info(f"  💤 {config.BATCH_SIZE}개 처리 → {config.BATCH_REST_SEC}초 휴식 (차단 예방)")
-                time.sleep(config.BATCH_REST_SEC)
+            # 배치 휴식 (FR14.2): 랜덤 개수 시도마다 랜덤 시간 쉼
+            if since_rest >= batch_size:
+                rest = random.randint(*config.BATCH_REST_RANGE)
+                log.info(f"  💤 {since_rest}개 처리 → {rest}초 휴식 (차단 예방)")
+                time.sleep(rest)
                 since_rest = 0
+                batch_size = random.randint(*config.BATCH_SIZE_RANGE)
 
             # 영상 처리 직전 진행 보고 — False면 우아한 취소 (FR18.2)
             if not self._report(progress, "extracting", done, total,
@@ -383,51 +406,83 @@ class Extractor:
 
             since_rest += 1
             processed += 1                   # 요청 예산 소비 (성공·실패 무관)
-            try:
-                result = self.process_video(
-                    vid, action,
-                    content_type=entry.get("content_type", "video"),
-                    playlists_map=pl_map,
-                    date_range=date_range)
-                consecutive_429 = 0          # 성공 시 카운터 리셋
-                if result == "ok":
-                    stats[action] += 1
-                elif result in ("date_skip", "live_wait"):
-                    stats[result] += 1
-                else:
-                    stats["no_sub"] += 1
-            except Exception as exc:
-                msg = str(exc)
-                # 멤버십 전용 영상은 오류가 아니라 접근 불가로 분류
-                if self._is_members_only(msg):
-                    log.info(f"  🔒 멤버십 전용 (스킵): {vid}")
-                    self._log_row([vid, "-", "-", action, "-", "members_only", "-"])
-                    self._mark_skip(vid, "members_only")
-                    stats["members_only"] += 1
-                    consecutive_429 = 0
-                elif self._is_429(msg):
-                    consecutive_429 += 1
-                    log.warning(f"  ⏳ 429 차단 ({consecutive_429}/{config.CONSECUTIVE_429_LIMIT}): {vid}")
-                    self._log_row([vid, "-", "-", action, "-", "error:429", "-"])
-                    stats["error"] += 1
-                    # 연속 429가 임계 초과하면 추출 중단 (차단 악화 방지)
-                    if consecutive_429 >= config.CONSECUTIVE_429_LIMIT:
-                        aborted = True
-                        break
-                    # 지수 백오프 (FR14.3): 429가 연속될수록 더 오래 대기
-                    backoff = config.BACKOFF_BASE_SEC * consecutive_429
-                    log.warning(f"  ⏸  {backoff}초 대기 후 재개 (백오프)")
-                    time.sleep(backoff)
-                else:
-                    log.error(f"  ✗ 오류 {vid}: {msg[:80]}")
-                    self._log_row([vid, "-", "-", action, "-", f"error:{msg[:60]}", "-"])
-                    stats["error"] += 1
-                    consecutive_429 = 0
+            retried_429 = False              # 429 재시도는 영상당 1회 (FR14.3)
+            event = None                     # 결과 확정 시 채워짐 (FR26.1)
+            while True:
+                try:
+                    result = self.process_video(
+                        vid, action,
+                        content_type=entry.get("content_type", "video"),
+                        playlists_map=pl_map,
+                        date_range=date_range)
+                    consecutive_429 = 0          # 성공 시 카운터 리셋
+                    if result == "ok":
+                        stats[action] += 1
+                        event = self._event(vid, entry, action,
+                                            "신규 추출" if action == "new"
+                                            else "수정 감지 — 재추출")
+                    elif result in ("date_skip", "live_wait"):
+                        stats[result] += 1
+                        event = self._event(vid, entry, result,
+                                            "기간 조건 밖" if result == "date_skip"
+                                            else "라이브 종료 대기 — 다음 run에서 재시도")
+                    else:
+                        stats["no_sub"] += 1
+                        event = self._event(vid, entry, "no_sub", "자막 없음")
+                except Exception as exc:
+                    msg = str(exc)
+                    # 멤버십 전용 영상은 오류가 아니라 접근 불가로 분류
+                    if self._is_members_only(msg):
+                        log.info(f"  🔒 멤버십 전용 (스킵): {vid}")
+                        self._log_row([vid, "-", "-", action, "-", "members_only", "-"])
+                        self._mark_skip(vid, "members_only")
+                        stats["members_only"] += 1
+                        consecutive_429 = 0
+                        event = self._event(vid, entry, "members_only",
+                                            "멤버십 전용 — 접근 불가")
+                    elif self._is_429(msg):
+                        consecutive_429 += 1
+                        log.warning(f"  ⏳ 429 차단 ({consecutive_429}/{config.CONSECUTIVE_429_LIMIT}): {vid}")
+                        self._log_row([vid, "-", "-", action, "-", "error:429", "-"])
+                        # 연속 429가 임계 초과하면 추출 중단 (차단 악화 방지)
+                        if consecutive_429 >= config.CONSECUTIVE_429_LIMIT:
+                            stats["error"] += 1
+                            event = self._event(vid, entry, "error",
+                                                "429 연속 차단 — 추출 중단")
+                            aborted = True
+                            break
+                        # 지수 백오프 (FR14.3): 429가 연속될수록 더 오래 대기
+                        backoff = config.BACKOFF_BASE_SEC * consecutive_429
+                        log.warning(f"  ⏸  {backoff}초 대기 후 재개 (백오프)")
+                        time.sleep(backoff)
+                        # 일시적 429가 대부분이므로 같은 영상을 1회 재시도 (FR14.3)
+                        # 재시도도 extract_info 1회를 쓰므로 예산·휴식 카운터 소비 (DQ-16)
+                        if not retried_429:
+                            retried_429 = True
+                            processed += 1
+                            since_rest += 1
+                            log.info(f"  🔁 같은 영상 재시도: {vid}")
+                            continue
+                        stats["error"] += 1      # 재시도도 실패 → 이번 run에서 포기
+                        event = self._event(vid, entry, "error",
+                                            "429 요청 차단 — 백오프 재시도도 실패, 다음 run에서 이어받기")
+                    else:
+                        log.error(f"  ✗ 오류 {vid}: {msg[:80]}")
+                        self._log_row([vid, "-", "-", action, "-", f"error:{msg[:60]}", "-"])
+                        stats["error"] += 1
+                        consecutive_429 = 0
+                        event = self._event(vid, entry, "error", msg[:120])
+                break
+            if aborted:
+                # 중단 직전 마지막 이벤트도 보고 (취소 판단은 무의미 — 어차피 종료)
+                self._report(progress, "extracting", done, total,
+                             entry.get("title"), stats, event=event)
+                break
 
             done += 1
-            # 영상 처리 직후 진행 보고 (done·stats 갱신)
+            # 영상 처리 직후 진행 보고 (done·stats 갱신 + 결과 이벤트, FR26.1)
             if not self._report(progress, "extracting", done, total,
-                                entry.get("title"), stats):
+                                entry.get("title"), stats, event=event):
                 cancelled = True
                 break
 

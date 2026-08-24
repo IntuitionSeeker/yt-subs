@@ -327,3 +327,35 @@ def test_classify_url_invalid():
     from jobs import classify_url
     with pytest.raises(ValueError):
         classify_url("https://example.com/videos")
+
+
+# ─── V-U11b: 재생목록 URL 분류 (FR24.1) ─────────────────────────────────────
+def test_classify_url_playlist():
+    from jobs import classify_url
+    url = "https://www.youtube.com/playlist?list=PLnDn1H0jzj2irPsp9sy5HJZ-435yMOXy_"
+    assert classify_url(url) == ("playlist", url)
+
+
+def test_classify_url_watch_with_list_is_video():
+    """watch?v=…&list=…는 재생목록이 아니라 단일 영상으로 처리한다 (FR24.1)."""
+    from jobs import classify_url
+    assert classify_url(
+        "https://www.youtube.com/watch?v=dQw4w9WgXcQ&list=PLxyz"
+    ) == ("video", "dQw4w9WgXcQ")
+
+
+# ─── V-U12: 채널 폴더 (FR25.1) ──────────────────────────────────────────────
+def test_registry_set_group(tmp_path):
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@폴더채널")
+    # 지정 → yaml 재로드해도 유지
+    assert reg.set_group("폴더채널", "AI 강의") == "AI 강의"
+    reg2 = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    assert reg2.get("폴더채널")["group"] == "AI 강의"
+    # 빈 값 → 해제 (필드 제거)
+    assert reg2.set_group("폴더채널", "  ") == ""
+    reg3 = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    assert "group" not in reg3.get("폴더채널")
+    # 미등록 채널 → KeyError
+    with pytest.raises(KeyError):
+        reg3.set_group("없는채널", "x")

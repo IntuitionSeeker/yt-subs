@@ -324,13 +324,14 @@ v15c, s15c = run_limit("limit_mix",
                        lambda vid: {"x1": "ok", "x2": "date_skip"}.get(vid, "no_sub"))
 assert v15c == ["x1", "x2"], v15c
 assert s15c["new"] == 1 and s15c["date_skip"] == 1 and s15c["no_sub"] == 0, s15c
-# 429 경로도 예산 소비 + 백오프·연속중단 보호는 그대로 (sleep만 mock)
+# 429 경로: 백오프 후 같은 영상 1회 재시도(FR14.3), 재시도도 예산 소비(DQ-16)
+# → limit=2는 x1의 시도 2회로 소진되고, error는 최종 포기 영상 수(1) 기준
 with mock.patch("extractor.time.sleep") as slept:
     v15d, s15d = run_limit("limit_429",
                            lambda vid: (_ for _ in ()).throw(
                                Exception("HTTP Error 429: Too Many Requests")))
-assert v15d == ["x1", "x2"], v15d
-assert s15d["error"] == 2, s15d
+assert v15d == ["x1", "x1"], f"429 후 같은 영상을 재시도해야 함: {v15d}"
+assert s15d["error"] == 1, s15d
 assert [c.args[0] for c in slept.call_args_list] == [config.BACKOFF_BASE_SEC,
                                                      config.BACKOFF_BASE_SEC * 2], \
     "지수 백오프가 유지돼야 함"
@@ -392,5 +393,49 @@ assert read_status()["message"].endswith("#0"), read_status()
 cookie_health.clear()
 config.COOKIE_FILE = _orig_cookie
 print("✓ mark_invalid: 프로세스당 1회 기록 · 최초 detected_at 보존 · 쿠키 갱신 후 재감지")
+
+# ── 17. 영상별 결과 이벤트 (FR26.1) ─────────────────────────────────────────
+# 성공(new): 처리 전 보고에는 event 없음, 처리 후 보고에 event 포함
+seen17 = []
+e17 = fresh("evt_new")
+with mock.patch.object(Extractor, "process_video",
+                       lambda self, vid, action="new", **kw: "ok"):
+    e17.run(entries=[{"id": "n1", "title": "새영상"}], pl_map={},
+            progress=lambda p: seen17.append(p) or True)
+pre17 = [p for p in seen17 if p["phase"] == "extracting" and "event" not in p]
+ev17 = [p["event"] for p in seen17 if "event" in p]
+assert pre17, "처리 전 보고에는 event 키가 없어야 함 (기존 스키마 유지)"
+assert ev17 == [{"id": "n1", "title": "새영상", "kind": "new", "reason": "신규 추출"}], ev17
+
+# 스킵: 이벤트 1회 보고 (기존엔 무보고)
+seen18 = []
+e18 = fresh("evt_skip")
+with mock.patch.object(StateManager, "decide", lambda self, *a, **k: "skip"), \
+     mock.patch.object(Extractor, "process_video", boom):
+    st18 = e18.run(entries=[{"id": "s1", "title": "스킵영상"}], pl_map={},
+                   progress=lambda p: seen18.append(p) or True)
+ev18 = [p["event"] for p in seen18 if "event" in p]
+assert ev18 == [{"id": "s1", "title": "스킵영상", "kind": "skip",
+                 "reason": "이미 추출됨 · 변경 없음"}], ev18
+assert st18["skip"] == 1
+
+# 오류: 예외 메시지가 이유로 실림
+seen19 = []
+e19 = fresh("evt_err")
+with mock.patch.object(Extractor, "process_video",
+                       lambda self, vid, action="new", **kw:
+                       (_ for _ in ()).throw(Exception("HTTP Error 403: Forbidden"))):
+    e19.run(entries=[{"id": "x1", "title": "오류영상"}], pl_map={},
+            progress=lambda p: seen19.append(p) or True)
+ev19 = [p["event"] for p in seen19 if "event" in p]
+assert ev19 and ev19[-1]["kind"] == "error" and "403" in ev19[-1]["reason"], ev19
+
+# progress=None(CLI)이면 이벤트 자체가 만들어지지 않음 — run이 그냥 통과하면 OK
+e20 = fresh("evt_cli")
+with mock.patch.object(Extractor, "process_video",
+                       lambda self, vid, action="new", **kw: "ok"):
+    st20 = e20.run(entries=[{"id": "c1", "title": "t"}], pl_map={})
+assert st20["new"] == 1
+print("✓ 이벤트(FR26.1): 처리 전 보고 스키마 유지 · new/skip/error 이벤트 · CLI 무영향")
 
 print("\n모든 mock 단위 검증 통과")

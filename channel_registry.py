@@ -41,6 +41,29 @@ class ChannelRegistry:
             return m.group(1)
         raise ValueError(f"채널명을 URL에서 추출할 수 없습니다: {url}")
 
+    def resolve_name(self, url: str) -> str:
+        """
+        URL → **등록된** 채널명 역조회. FR32.2 (DQ-19)
+
+        `extract_handle`은 신규 등록용 규칙(DQ-07)이라 등록명과 핸들이 다른
+        채널(개명·핸들 변경)에서 없는 폴더를 가리킨다. 조회 경로는 레지스트리를
+        진실로 삼고, 매칭 실패 시에만 핸들로 폴백한다.
+        """
+        try:
+            handle = self.extract_handle(url).lower()
+        except ValueError:
+            handle = None
+        if handle:
+            for name, cfg in self.list().items():
+                if name.lower() == handle:
+                    return name
+                try:
+                    if self.extract_handle(cfg.get("url") or "").lower() == handle:
+                        return name
+                except ValueError:
+                    continue
+        return self.extract_handle(url)      # 미등록 → 기존 규칙 유지
+
     @staticmethod
     def normalize_url(url: str) -> str:
         """채널 영상 목록 URL로 정규화 (디코드 + /videos 부착)."""

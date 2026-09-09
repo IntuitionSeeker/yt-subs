@@ -336,7 +336,11 @@ class FakeReg:
     added = []
     extract_handle = staticmethod(CR.extract_handle)
     normalize_url = staticmethod(CR.normalize_url)
+    resolve_name = CR.resolve_name          # 실제 역조회 로직 검증 (FR32.2)
     def names(self): return ["기존채널"]
+    def list(self):
+        return {"기존채널": {"url": "https://www.youtube.com/@기존채널/videos",
+                          "lang": "ko"}}
     def add(self, url, lang=None, note=""):
         FakeReg.added.append(url); return CR.extract_handle(url)
     def get(self, name):

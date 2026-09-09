@@ -264,6 +264,53 @@ def test_ydl_opts_firefox_priority(tmp_path, monkeypatch):
     assert "cookiefile" not in opts
 
 
+# ─── FR32.1: 제목 언어 고정 (DQ-20) ──────────────────────────────────────────
+def test_ydl_opts_pins_title_language(tmp_path, monkeypatch):
+    """채널 lang을 extractor_args.youtube.lang으로 고정 — 스캔·추출 제목 언어 일치."""
+    import sys
+    import unittest.mock as mock
+    import config
+    monkeypatch.setattr(config, "OUTPUT_BASE", tmp_path)
+    monkeypatch.setattr(config, "FIREFOX_PROFILE", tmp_path / "no_ff")
+    monkeypatch.setattr(config, "COOKIE_FILE", tmp_path / "no_cookie.txt")
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.MagicMock())
+    from extractor import Extractor
+
+    ext = Extractor({"name": "langch", "url": "https://www.youtube.com/@langch/videos",
+                     "lang": "ja"})
+    assert ext._ydl_opts(extract_flat=True)["extractor_args"]["youtube"]["lang"] == ["ja"]
+    # 채널 lang 미지정 → 기본 언어
+    ext2 = Extractor({"name": "langch2", "url": "https://www.youtube.com/@langch2/videos"})
+    assert (ext2._ydl_opts()["extractor_args"]["youtube"]["lang"]
+            == [config.DEFAULT_LANG])
+    # self 없는 호출 경로(jobs._probe_opts)도 기본 언어로 동작
+    opts = Extractor._ydl_opts(None, skip_download=True)
+    assert opts["extractor_args"]["youtube"]["lang"] == [config.DEFAULT_LANG]
+    # 공유 상수를 오염시키지 않는다
+    assert "extractor_args" not in config.YTDLP_COMMON
+
+
+# ─── FR32.2: URL → 등록 채널명 역조회 (DQ-19) ────────────────────────────────
+def test_resolve_name_prefers_registry(tmp_path):
+    """등록명≠URL핸들이어도 등록명을 돌려준다 — 없는 폴더 조회·중복 추출 방지."""
+    yml = tmp_path / "channels.yaml"
+    reg = ChannelRegistry(yaml_path=yml)
+    reg.data = {"channels": {
+        "소수몽키": {"url": "https://www.youtube.com/@sosumonkey/videos", "lang": "ko"},
+        "호두감자": {"url": "https://youtube.com/@두두감자/videos", "lang": "ko"},
+    }}
+    # 등록된 URL의 핸들로 조회 → 등록명
+    assert reg.resolve_name("https://www.youtube.com/@sosumonkey/streams/videos") == "소수몽키"
+    assert reg.resolve_name("https://youtube.com/@두두감자") == "호두감자"
+    # 등록명 자체로 조회해도 등록명 (대소문자 무시)
+    assert reg.resolve_name("https://www.youtube.com/@소수몽키") == "소수몽키"
+    # 미등록 채널 → 기존 규칙(핸들) 폴백
+    assert reg.resolve_name("https://www.youtube.com/@신규채널/videos") == "신규채널"
+    # 핸들 추출 불가 URL은 기존대로 ValueError
+    with pytest.raises(ValueError):
+        reg.resolve_name("https://example.com/foo")
+
+
 # ─── V-U5: 품질 규칙 검토 ────────────────────────────────────────────────────
 def test_quality_normal():
     text = "오늘은 삼성전자 주가 전망에 대해 분석해보겠습니다. " * 10

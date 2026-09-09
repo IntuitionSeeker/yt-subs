@@ -23,6 +23,7 @@
 > **v4.8:** 채널 폴더(FR25) — `ChannelRegistry.set_group`(channels.yaml `group` 필드), `POST /channels/group`, `/channels/stats.group`, 라이브러리 폴더 섹션·병합 전체 보기(프론트 병합·원채널 배지·자막/삭제는 영상별 원채널로 라우팅), `_run_playlist` 신규 채널 자동 폴더 지정. 보강: 폴더 모드 내용 검색(채널별 /search 병합, FR25.8), 추출 탭 폴더 표시(FR25.9), 처음 보는 폴더 기본 접힘(FR25.4)
 > **v4.9:** 추출 결과 상세(FR26) — `Extractor._event`+`_report(event=)`로 영상별 결과 이벤트를 진행 콜백에 실어 보내고(처리 전 보고에는 event 없음 — 기존 payload 스키마 유지), JobManager가 `job["events"]`에 축적(캡 1,000·재생목록은 channel 부가), 프론트 통계 칩 클릭 → 분류별 영상·이유 패널
 > **v5.1:** 이름 변경(FR31) — 신규 `renamer.py`(채널: yaml 키 이동+폴더 rename / 영상: meta.title+chroma metadata / 카테고리: playlists.json+meta 배열+chroma / 폴더: set_group 일괄), `KLIndexer.update_video_metadata`(get(where=video_id)→update, 재임베딩 없음), 전 작업 busy 가드(FR31.5)
+> **v5.2 (버그 수정):** 스캔 정합성(FR32) — `_ydl_opts`에 `extractor_args.youtube.lang` 주입(DQ-20), `ChannelRegistry.resolve_name` 신설 후 `_do_scan`·`_entry_channel`이 레지스트리 역조회 사용(DQ-19). 신규 결정 DQ-19·DQ-20
 > **v5.0 (v3):** 챕터(FR27) — `meta_collector.save`가 info.chapters를 `[{start,end,title}]`로 정규화 저장, `/subtitle` 응답 확장, 상세 패널 챕터 링크. Markdown(FR28) — `/export/markdown` 서버 조립 + 프론트 Blob 다운로드. RSS(FR29) — 신규 `rss_monitor.py`(channel_id 해석 1회 캐시 → channels.yaml, 피드 파싱은 표준 xml.etree), `/channels/new`, 추출 탭 🔔 버튼(수동 트리거 — NFR3 유지). Whisper(FR30) — 신규 `transcriber.py`(faster-whisper CPU int8, 오디오 bestaudio 임시 다운로드, 세그먼트→SRT→기존 txt 경로), `sub_type="whisper"` 도입(stats.extracted 포함·decide 스킵), CLI `transcribe` 명령. 신규 결정 DQ-18(whisper sub_type 취급)
 
 ---
@@ -595,6 +596,8 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | DQ-18 | `sub_type="whisper"`는 추출 완료와 동급 | Whisper 전사 결과는 manual/auto 자막과 동일하게 취급한다 — `StateManager.decide()`의 스킵 판정, `/channels/stats.extracted` 집계, 대시보드 추출됨 표시, 인덱싱 대상 모두 포함. 품질은 auto 자막보다 낮을 수 있으나 "없는 것보다 낫다"가 FR30의 취지이고, 재추출을 원하면 기존 reextract 경로(state 삭제)로 가능하기 때문 (FR30.3) |
 | DQ-17 | 재생목록 태깅은 병합 full-map으로만 | `_backfill_meta(mapping)`은 **맵에 없는 vid의 meta.playlists를 `[]`로 덮어쓴다**(전체 맵 전제 설계). 따라서 재생목록 추출(FR24.4)에서 {대상 vid: [재생목록]}만 담은 부분 맵을 `run(pl_map=)`에 넘기면 그 채널의 기존 카테고리가 전부 소실된다. 반드시 채널의 기존 playlists.json(없으면 기존 meta들에서 재구성)에 재생목록 제목을 **병합한 전체 맵**을 전달한다 (FR24.4) |
 | DQ-16 | `--limit` 예산 기준 | limit은 "성공 추출 수"가 아니라 **요청 소비 수** 상한이다. `extract_info` 요청을 쓰는 모든 경로(정상·무자막·**멤버십 재시도(FR19.1)**·오류·`date_skip`)가 예산을 소비하고, 요청을 쓰지 않는 state `skip`은 소비하지 않는다. FR14.5의 목적이 429 방어(요청 총량 통제)이기 때문이며, FR19.1 도입으로 멤버십 재시도가 매 run 요청을 쓰게 되면서 성공-기준 카운트로는 카나리아가 실제 요청 수를 통제하지 못한다 (FR14.5) |
+| DQ-19 | 스캔 채널명은 **레지스트리 역조회**가 1순위 | `_do_scan`이 `extract_handle(url)`로 이름을 재추출하면 등록명≠핸들인 채널(개명·핸들 변경)에서 `output/<핸들>/state.json`(없는 경로)을 읽어 `extracted`가 전부 false가 되고, 이어지는 추출이 핸들 이름의 새 폴더에 중복 저장된다. DQ-07(핸들 자동 추출)은 **신규 등록** 규칙이지 **기존 채널 조회** 규칙이 아니다 — 조회 경로는 레지스트리를 진실로 삼고 미등록일 때만 핸들로 폴백한다 (FR32.2~32.3) |
+| DQ-20 | 제목 언어는 `extractor_args.youtube.lang`으로 **고정** | 다국어 제목 채널에서 flat 스캔(browse)과 영상별 full info(player)가 서로 다른 언어 트랙을 반환해 같은 영상 제목이 화면마다 달라졌다. 후처리 정규화가 아니라 **요청 단계에서 언어를 고정**한다 — 모든 경로가 같은 옵션 빌더(`_ydl_opts`)를 지나므로 한 곳에서 계약이 성립하고, 저장된 meta.title과 스캔 제목이 같아진다. 값은 채널 `lang`(NFR4), 번역이 없으면 yt-dlp가 원제로 폴백한다 (FR32.1) |
 
 ---
 

@@ -1,8 +1,8 @@
 # REQUIREMENTS — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v4.5  
+> **버전:** v5.2  
 > **작성일:** 2026-08-09  
-> **연계 문서:** DESIGN.md v4.5  
+> **연계 문서:** DESIGN.md v5.2  
 > **주요 변경:** 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20), 개발 거버넌스(NFR10)  
 > **v4.1 (FR17~20 백엔드 구현 확정 반영):** 조건 적용 순서·ⓐ"최신" 정의·ⓓ↔FR19.1 우선순위 비고(FR17.4),
@@ -18,6 +18,8 @@
 > **v4.9:** 추출 결과 상세(FR26) — 영상별 이벤트(id·제목·종류·이유)를 job에 축적, 통계 칩 클릭 시 해당 분류 영상 목록·이유 표시  
 > **v5.0 (v3 릴리스):** 챕터 메타(FR27), Markdown 내보내기(FR28), RSS 새 영상 감지(FR29), Whisper 전사 폴백(FR30)  
 > **v5.1:** 이름 변경(FR31) — 채널·영상 제목·카테고리·폴더, ChromaDB 메타 동기화(재임베딩 없음)  
+> **v5.2 (버그 수정):** 스캔 정합성(FR32) — 다국어 제목으로 스캔·라이브러리 제목이 어긋나던 문제(FR32.1),
+> 등록명≠URL핸들 채널에서 `extracted` 오판·중복 폴더 생성(FR32.2~32.3)  
 > **범위:** 채널 관리 → 자막 추출 → 메타데이터 수집 → 품질 검토 → 지식층 인덱싱 → 질의·대시보드
 
 ---
@@ -438,6 +440,23 @@
 | FR31.5 | 모든 이름 변경은 추출/스캔 작업 중(`JobManager` 점유) 409 거부 — 파일 이동·수정과 작업의 경합 방지 (FR21.4 준용) | 필수 |
 | FR31.6 | UI — 채널 카드 ✏️(이름), 폴더 헤더 ✏️, 영상 행 ✏️(제목), 카테고리 선택 시 ✏️(선택된 카테고리 변경). 모두 prompt 입력 | 필수 |
 
+### FR32 — 스캔 정합성 (버그 수정, v4)
+
+대시보드 추출 탭 사전 스캔(FR17.3)이 라이브러리(저장본)와 다른 결과를 보여주던 두 결함을 바로잡는다.
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR32.1 | **제목 언어 고정** — yt-dlp 옵션에 `extractor_args={"youtube": {"lang": [<채널 lang>]}}`를 주입한다(NFR4: 채널 `lang` 우선, 없으면 `config.DEFAULT_LANG`). 크리에이터가 다국어 제목을 등록한 채널에서 flat 스캔은 영어 트랙을, 영상별 full info는 한국어 트랙을 받아 **같은 영상의 제목이 화면마다 달라지던** 문제를 제거한다. 해당 언어 번역이 없는 영상은 원제로 폴백한다(정상) | 필수 |
+| FR32.2 | **스캔 시 등록 채널명 해석** — `POST /extract/scan`(채널)은 URL에서 핸들을 재추출하지 않고 **레지스트리에서 URL→등록명을 역조회**한다. 매칭 기준은 `extract_handle` 값 일치(대소문자 무시), 실패 시에만 `extract_handle` 폴백. 등록명과 URL 핸들이 다른 채널(개명·핸들 변경)에서 없는 폴더의 state.json을 읽어 **`extracted`가 전부 false**로 나오고, 이어지는 추출이 **핸들 이름의 새 폴더에 중복 저장**되던 문제를 제거한다 | 필수 |
+| FR32.3 | FR32.2의 해석은 **재생목록 스캔·추출의 원채널 해석**(FR24.3 `_entry_channel`)과 **단일영상 추출의 채널 해석**(FR17.2 `_run_single`)에도 동일 적용한다 — 핸들이 이미 등록된 채널이면 그 등록명을 쓴다(같은 채널이 핸들 이름으로 이중 등록되는 것을 막는다) | 필수 |
+| FR32.4 | 기존 오염 데이터 정리는 수동 운영 작업으로 분리한다(자동 마이그레이션 없음) — 빈 껍데기 폴더·핸들 이름으로 중복 추출된 폴더는 라이브러리 채널 삭제(FR21.1) 또는 폴더 삭제로 처리 | 명시 |
+
+> **FR32.1 검증 실측(2026-09-09, 호두감자 = Hodu's AI Analysis Lab):** 저장본과 같은 영상 52개 비교 시
+> 옵션 없음 → 일치 1 / 불일치 51, `lang=ko` → 일치 51 / 불일치 1. 남은 1건은 크리에이터의 실제 제목 수정이다.
+
+> **FR32.2 영향 채널(2026-09-09 실측):** JTV(핸들 JTV201807)·호두감자(두두감자)·한균수(한균수의주식사용설명)·
+> 소수몽키(sosumonkey)·김민겸(퀀트)(김민겸-m6t). 이 중 `output/한균수의주식사용설명/`에 video_id 9개가 중복 추출됐다.
+
 ---
 
 ## 4. 비기능 요구사항 (NFR)
@@ -512,6 +531,9 @@
 | FR29.1~29.4 | `rss_monitor.py`(channel_id 해석·피드 파싱) · `channel_registry.set_channel_id` · `dashboard/server.py`(/channels/new) · `dashboard/index.html`(🔔 버튼·배지) | channels.yaml `channel_id` |
 | FR30.1~30.5 | `transcriber.py`(faster-whisper) · `main.py`(cmd_transcribe) · `yt.sh` · requirements | srt/txt/meta/state (`sub_type=whisper`) |
 | FR31.1~31.6 | `renamer.py`(신규) · `channel_registry.rename` · `kl_indexer.update_video_metadata` · `dashboard/server.py`(4 엔드포인트) · `dashboard/index.html`(✏️ 버튼 4곳) | channels.yaml·output/·meta·playlists.json·chroma metadata |
+| FR32.1 | `extractor.Extractor._ydl_opts` (`extractor_args.youtube.lang`) | 스캔·추출 전 경로 공통 |
+| FR32.2~32.3 | `channel_registry.ChannelRegistry.resolve_name`(신규) · `dashboard/jobs.py`(`_do_scan`·`_entry_channel`·`_run_single`) | 레지스트리 역조회, 폴백은 `extract_handle` |
+| FR32.4 | (구현 없음 — 수동 정리) | — |
 | FR21.1~21.4 | `dashboard/server.py` (`POST /videos/delete`·`POST /channels/delete`·`_reject_path_traversal`) · `kl_indexer.KLIndexer.delete_video` · `dashboard/jobs.py` (`JobManager.is_busy`) · `dashboard/index.html` (`deleteVideo`·`deleteChannel`·`copySubtitle`) | output 파일·state·ChromaDB 정리 |
 | FR22.1~22.4 | `dashboard/index.html` (`loadExtChannels`·`extSelectChannel`·`switchTab`·`pollJob` 완료 훅) — 기존 `GET /channels/stats`(FR20.1)·`extStart`(FR17.3~17.4) 재사용, 신규 백엔드 없음 | (프론트 전용) |
 

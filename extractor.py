@@ -34,6 +34,13 @@ class Extractor:
     def _ydl_opts(self, **extra) -> dict:
         """공통 yt-dlp 옵션 + 쿠키(있으면) + 추가 옵션을 병합."""
         opts = {**config.YTDLP_COMMON, **extra}
+        # 제목 언어 고정 (FR32.1, DQ-20) — 다국어 제목 채널에서 flat 스캔(browse)과
+        # 영상별 full info(player)가 서로 다른 언어 트랙을 반환하는 것을 막는다.
+        # self 없이 호출되는 경로(jobs._probe_opts)가 있어 기본 언어로 폴백한다.
+        lang = getattr(self, "lang", None) or config.DEFAULT_LANG
+        ea = {k: dict(v) for k, v in (opts.get("extractor_args") or {}).items()}
+        ea.setdefault("youtube", {})["lang"] = [lang]
+        opts["extractor_args"] = ea
         ff = config.firefox_profile_dir()
         if ff:
             # Firefox 프로필에서 매 실행 최신 쿠키를 직접 읽는다 (FR13.6).

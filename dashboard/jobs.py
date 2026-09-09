@@ -155,18 +155,25 @@ def _flat_opts() -> dict:
     return {**_probe_opts(), "extract_flat": True}
 
 
-def _entry_channel(e: dict):
+def _entry_channel(e: dict, reg: "ChannelRegistry" = None):
     """
     flat 엔트리에서 (채널명, 채널 URL) 해석. FR24.3
     uploader_id(@핸들) 우선 → channel_id(UC…) 폴백 → 해석 불가 시 None.
+    이미 등록된 채널이면 등록명을 쓴다 (FR32.3, DQ-19).
     """
     uid = (e.get("uploader_id") or "").strip()
-    if uid.startswith("@"):
-        return uid[1:], f"https://www.youtube.com/{uid}"
     cid = (e.get("channel_id") or "").strip()
-    if cid.startswith("UC"):
-        return cid, f"https://www.youtube.com/channel/{cid}"
-    return None
+    if uid.startswith("@"):
+        url = f"https://www.youtube.com/{uid}"
+        name = uid[1:]
+    elif cid.startswith("UC"):
+        url = f"https://www.youtube.com/channel/{cid}"
+        name = cid
+    else:
+        return None
+    if reg is not None:
+        name = reg.resolve_name(url)
+    return name, url
 
 
 def _merged_pl_map(channel: str, vids: list, title: str) -> dict:
@@ -267,10 +274,15 @@ class JobManager:
     def _do_scan(self, url: str) -> dict:
         Extractor = _app_extractor().Extractor
 
-        name = ChannelRegistry.extract_handle(url)     # 등록은 하지 않는다
+        # 등록은 하지 않되, 이미 등록된 채널이면 그 등록명·lang을 쓴다 (FR32.2, DQ-19).
+        # 핸들을 재추출하면 등록명≠핸들인 채널에서 없는 폴더의 state를 읽어
+        # extracted가 전부 false가 되고, 추출이 새 폴더에 중복 저장된다.
+        reg = ChannelRegistry()
+        name = reg.resolve_name(url)
+        lang = (reg.list().get(name) or {}).get("lang") or config.DEFAULT_LANG
         ch_cfg = {"name": name,
                   "url": ChannelRegistry.normalize_url(url),
-                  "lang": config.DEFAULT_LANG}
+                  "lang": lang}
         log.info(f"🔍 스캔: {name}")
         ext = Extractor(ch_cfg)
         entries = ext.scan_channel()
@@ -322,11 +334,12 @@ class JobManager:
         entries = [e for e in (info.get("entries") or []) if e.get("id")]
 
         videos_view, by_channel, states = [], {}, {}
+        reg = ChannelRegistry()                  # 등록명 역조회용 (FR32.3)
         for e in entries:
             # 진행 중/예약 라이브는 자막 미완성 → 제외 (FR16.3 준용)
             if e.get("live_status") in ("is_live", "is_upcoming"):
                 continue
-            ch = _entry_channel(e)
+            ch = _entry_channel(e, reg)
             if not ch:
                 log.warning(f"  ⚠ 채널 불명 → 제외: {e.get('id')}")
                 continue
@@ -659,8 +672,8 @@ class JobManager:
                 info = ydl.extract_info(url, download=False)
 
             channel_url = self._channel_url_from_info(info)
-            name = ChannelRegistry.extract_handle(channel_url)
             reg = ChannelRegistry()
+            name = reg.resolve_name(channel_url)              # 등록명 우선 (FR32.3)
             if name not in reg.names():                       # 기존 항목 덮어쓰기 금지
                 reg.add(channel_url, lang=config.DEFAULT_LANG)
                 log.info(f"✅ 채널 등록: {name}")

@@ -266,7 +266,16 @@ assert job["stats"]["new"] == 1 and job["stats"]["date_skip"] == 1
 assert job["events"] == [{"id": "v1", "title": "영상1", "kind": "new",
                           "reason": "신규 추출"}], "이벤트 축적 (FR26.2)"
 assert idx.called and idx.return_value.index_all.called, "index=True·신규>0 → 인덱싱"
+# 인덱싱 진행 콜백 전달 + 추출 결과(done/total) 보존 (FR33.3, DQ-22)
+_cb = idx.return_value.index_all.call_args.kwargs.get("on_progress")
+assert callable(_cb), "index_all(on_progress=) 전달"
+_before = (job["done"], job["total"])
+_cb("subtitle", 7, 100, "인덱싱 중인 영상")
+assert job["index_stage"] == "subtitle" and job["index_done"] == 7 \
+    and job["index_total"] == 100, job
+assert (job["done"], job["total"]) == _before, "인덱싱 진행이 추출 done/total을 덮지 않는다"
 print("✓ _run_channel: 멤버십 사전 제외 · 캐시 entries/pl_map 재사용 · date_range 전달 · 인덱싱")
+print("✓ _maybe_index: on_progress 콜백 → index_stage/done/total, 추출 done/total 보존 (FR33.3)")
 
 # 취소면 인덱싱 생략 (사용자 확정 ①)
 class CancelExtractor(FakeExtractor):

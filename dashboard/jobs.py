@@ -438,6 +438,10 @@ class JobManager:
             "total": 0,
             "done": 0,
             "current_title": None,
+            # 인덱싱 진행율 — 추출용 done/total과 분리한다 (FR33.3, DQ-22)
+            "index_stage": None,
+            "index_done": 0,
+            "index_total": 0,
             "stats": {k: 0 for k in _STAT_KEYS},
             "events": [],           # 영상별 결과 이벤트 (FR26.2, 캡 1000)
             "error": None,
@@ -485,6 +489,13 @@ class JobManager:
             job["error"] = error
             job["finished_at"] = _now_iso()
 
+    def _index_cb(self, job: dict):
+        """KLIndexer.index_all에 넘길 진행 콜백 (FR33.3)."""
+        def cb(stage, done, total, title):
+            self._update(job, index_stage=stage, index_done=done,
+                         index_total=total, current_title=title)
+        return cb
+
     def _maybe_index(self, job: dict, channel: str, index: bool, cancelled: bool):
         """완료 후 자동 인덱싱 (FR17.9). 취소 시에는 생략한다."""
         if not index or cancelled:
@@ -494,8 +505,10 @@ class JobManager:
         if changed <= 0:
             return
         from kl_indexer import KLIndexer
-        self._update(job, phase="indexing", current_title=None)
-        KLIndexer(channel).index_all()
+        self._update(job, phase="indexing", current_title=None,
+                     index_stage=None, index_done=0, index_total=0)
+        KLIndexer(channel).index_all(on_progress=self._index_cb(job))
+        self._update(job, current_title=None)
 
     # ── 채널 워커 ────────────────────────────────────────────────────────────
     def _run_channel(self, job: dict, entry: dict, filters: dict, index: bool):
@@ -607,9 +620,11 @@ class JobManager:
             # 변경 있는 채널만 각각 인덱싱, 취소 시 생략 (FR24.5 · FR17.9 준용)
             if index and not cancelled and changed:
                 from kl_indexer import KLIndexer
-                self._update(job, phase="indexing", current_title=None)
+                self._update(job, phase="indexing", current_title=None,
+                             index_stage=None, index_done=0, index_total=0)
                 for name in changed:
-                    KLIndexer(name).index_all()
+                    KLIndexer(name).index_all(on_progress=self._index_cb(job))
+                self._update(job, current_title=None)
             self._finish(job, "cancelled" if cancelled else "done")
         except Exception as exc:
             log.error(f"✗ 작업 실패: {exc}")

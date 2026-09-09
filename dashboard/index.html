@@ -1201,16 +1201,24 @@ async function pollJob() {
   card.classList.remove("hidden");
   const running = job.status === "running";
   pill.classList.toggle("hidden", !running);
-  if (running) pill.innerHTML =
-    `<span class="spinner"></span> ${job.done ?? 0}/${job.total ?? "?"} 추출 중`;
+  // 인덱싱 단계에는 인덱싱 기준으로 배지·바를 전환한다 (FR33.3, DQ-22)
+  const indexing = job.phase === "indexing";
+  const idxLabel = job.index_stage === "desc" ? "설명 인덱싱" : "자막 인덱싱";
+  if (running) pill.innerHTML = indexing
+    ? `<span class="spinner"></span> ${job.index_done ?? 0}/${job.index_total ?? "?"} ${idxLabel}`
+    : `<span class="spinner"></span> ${job.done ?? 0}/${job.total ?? "?"} 추출 중`;
 
   document.getElementById("jobMeta").innerHTML =
     `<span>${esc(job.channel || "")}</span><span>${esc(job.kind || "")}</span>` +
-    `<span>phase: ${esc(job.phase || "")}</span><span>status: ${esc(job.status)}</span>`;
-  const pct = job.total ? Math.round((job.done || 0) / job.total * 100) : 0;
-  document.getElementById("jobBar").style.width = pct + "%";
+    `<span>phase: ${esc(job.phase || "")}</span><span>status: ${esc(job.status)}</span>` +
+    (indexing ? `<span>추출 ${job.done ?? 0}/${job.total ?? 0} 완료</span>` : "");
+  const [cur, tot] = indexing
+    ? [job.index_done || 0, job.index_total || 0]
+    : [job.done || 0, job.total || 0];
+  document.getElementById("jobBar").style.width =
+    (tot ? Math.round(cur / tot * 100) : 0) + "%";
   document.getElementById("jobCurrent").innerHTML = job.current_title
-    ? `현재: ${esc(job.current_title)}` : "";
+    ? `${indexing ? "인덱싱" : "현재"}: ${esc(job.current_title)}` : "";
   const s = job.stats || {};
   // 새 작업 시작 시 이벤트 패널 초기화 (FR26.3)
   if (job.job_id !== jobLastId) { jobLastId = job.job_id; jobEvtKind = null; }

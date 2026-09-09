@@ -1,8 +1,8 @@
 # REQUIREMENTS — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v5.2  
+> **버전:** v5.3  
 > **작성일:** 2026-08-09  
-> **연계 문서:** DESIGN.md v5.2  
+> **연계 문서:** DESIGN.md v5.3  
 > **주요 변경:** 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20), 개발 거버넌스(NFR10)  
 > **v4.1 (FR17~20 백엔드 구현 확정 반영):** 조건 적용 순서·ⓐ"최신" 정의·ⓓ↔FR19.1 우선순위 비고(FR17.4),
@@ -18,6 +18,7 @@
 > **v4.9:** 추출 결과 상세(FR26) — 영상별 이벤트(id·제목·종류·이유)를 job에 축적, 통계 칩 클릭 시 해당 분류 영상 목록·이유 표시  
 > **v5.0 (v3 릴리스):** 챕터 메타(FR27), Markdown 내보내기(FR28), RSS 새 영상 감지(FR29), Whisper 전사 폴백(FR30)  
 > **v5.1:** 이름 변경(FR31) — 채널·영상 제목·카테고리·폴더, ChromaDB 메타 동기화(재임베딩 없음)  
+> **v5.3:** 증분 인덱싱·인덱싱 진행율(FR33) — 변경 없는 영상은 재임베딩 생략, 인덱싱 단계 진행 상황 노출  
 > **v5.2 (버그 수정):** 스캔 정합성(FR32) — 다국어 제목으로 스캔·라이브러리 제목이 어긋나던 문제(FR32.1),
 > 등록명≠URL핸들 채널에서 `extracted` 오판·중복 폴더 생성(FR32.2~32.3)  
 > **범위:** 채널 관리 → 자막 추출 → 메타데이터 수집 → 품질 검토 → 지식층 인덱싱 → 질의·대시보드
@@ -457,6 +458,19 @@
 > **FR32.2 영향 채널(2026-09-09 실측):** JTV(핸들 JTV201807)·호두감자(두두감자)·한균수(한균수의주식사용설명)·
 > 소수몽키(sosumonkey)·김민겸(퀀트)(김민겸-m6t). 이 중 `output/한균수의주식사용설명/`에 video_id 9개가 중복 추출됐다.
 
+### FR33 — 증분 인덱싱 · 인덱싱 진행율 (v4)
+
+`index_all()`이 채널의 모든 자막/설명을 **매번 재임베딩**해, 신규 3개를 추출해도 100개 전부를 다시 계산했다
+(JTV 실측 3.3개/분 → 약 30분). 인덱싱 단계에는 진행율이 없어 화면이 `10/10`에 멈춘 것처럼 보였다.
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR33.1 | **증분 인덱싱** — 영상별로 인덱싱 전에 ChromaDB의 기존 청크를 조회해, **청크 id 집합·문서 본문·메타데이터가 모두 동일하면 임베딩과 upsert를 건너뛴다.** 하나라도 다르면(자막 재추출·제목/카테고리 변경·청킹 규칙 변경) 기존 방식대로 전량 재임베딩한다. 자막(`index_subtitles`)·설명(`index_descriptions`) 양쪽에 적용 | 필수 |
+| FR33.2 | FR33.1의 판정은 **저장된 문서 본문 비교**로 한다 — 별도 해시 필드를 메타에 추가하지 않는다. 이미 인덱싱된 기존 데이터가 마이그레이션 없이 즉시 혜택을 받아야 하기 때문이다(DQ-21) | 필수 |
+| FR33.3 | **인덱싱 진행율** — `index_all(on_progress=)` 콜백으로 `(단계, 완료 수, 전체 수, 현재 제목)`을 보고하고, 대시보드 job에 `index_stage`·`index_done`·`index_total`을 실어 `GET /extract/status`로 노출한다. 프론트는 `phase=="indexing"`일 때 진행 배지·바를 인덱싱 기준으로 전환한다(추출 통계 칩은 그대로 유지) | 필수 |
+| FR33.4 | 콜백은 선택 인자다 — CLI(`./yt.sh index`·`run`)는 콜백 없이 기존과 동일하게 동작한다(FR18.1 준용) | 필수 |
+| FR33.5 | 건너뛴 영상 수는 인덱싱 완료 로그에 남긴다(`자막 N청크(신규 M) · 건너뜀 K`) — 증분이 실제로 동작하는지 운영 중 확인 가능해야 한다 | 필수 |
+
 ---
 
 ## 4. 비기능 요구사항 (NFR)
@@ -534,6 +548,8 @@
 | FR32.1 | `extractor.Extractor._ydl_opts` (`extractor_args.youtube.lang`) | 스캔·추출 전 경로 공통 |
 | FR32.2~32.3 | `channel_registry.ChannelRegistry.resolve_name`(신규) · `dashboard/jobs.py`(`_do_scan`·`_entry_channel`·`_run_single`) | 레지스트리 역조회, 폴백은 `extract_handle` |
 | FR32.4 | (구현 없음 — 수동 정리) | — |
+| FR33.1~33.2·33.5 | `kl_indexer.KLIndexer._unchanged`(신규) · `index_subtitles` · `index_descriptions` | ChromaDB 조회(임베딩 없음) |
+| FR33.3~33.4 | `kl_indexer.index_all(on_progress=)` · `dashboard/jobs.py`(`_maybe_index`·`_run_playlist`) · `dashboard/index.html`(`pollJob` 진행 배지·바) | job `index_stage`/`index_done`/`index_total` |
 | FR21.1~21.4 | `dashboard/server.py` (`POST /videos/delete`·`POST /channels/delete`·`_reject_path_traversal`) · `kl_indexer.KLIndexer.delete_video` · `dashboard/jobs.py` (`JobManager.is_busy`) · `dashboard/index.html` (`deleteVideo`·`deleteChannel`·`copySubtitle`) | output 파일·state·ChromaDB 정리 |
 | FR22.1~22.4 | `dashboard/index.html` (`loadExtChannels`·`extSelectChannel`·`switchTab`·`pollJob` 완료 훅) — 기존 `GET /channels/stats`(FR20.1)·`extStart`(FR17.3~17.4) 재사용, 신규 백엔드 없음 | (프론트 전용) |
 

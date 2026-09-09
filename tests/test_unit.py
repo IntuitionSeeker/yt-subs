@@ -311,6 +311,52 @@ def test_resolve_name_prefers_registry(tmp_path):
         reg.resolve_name("https://example.com/foo")
 
 
+# ─── FR33.1~33.2: 증분 인덱싱 판정 (DQ-21) ───────────────────────────────────
+class _FakeCol:
+    """col.get(where=, include=)만 흉내내는 최소 스텁."""
+    def __init__(self, rows):        # rows: {id: (doc, meta)}
+        self.rows = rows
+    def get(self, where=None, include=None):
+        vid = (where or {}).get("video_id")
+        items = [(i, d, m) for i, (d, m) in self.rows.items()
+                 if m.get("video_id") == vid]
+        return {"ids": [i for i, _, _ in items],
+                "documents": [d for _, d, _ in items],
+                "metadatas": [m for _, _, m in items]}
+
+
+def test_unchanged_detects_identical_and_changes():
+    from kl_indexer import KLIndexer
+    ids = ["v1_0", "v1_1"]
+    docs = ["첫 청크", "둘째 청크"]
+    metas = [{"video_id": "v1", "title": "제목", "chunk_index": 0},
+             {"video_id": "v1", "title": "제목", "chunk_index": 1}]
+    same = _FakeCol({i: (d, m) for i, d, m in zip(ids, docs, metas)})
+    assert KLIndexer._unchanged(same, "v1", ids, docs, metas) is True
+
+    # 본문이 바뀌면 재임베딩 (청크 수가 같아도 잡아낸다)
+    moved = _FakeCol({"v1_0": ("첫 청크", metas[0]),
+                      "v1_1": ("다른 내용", metas[1])})
+    assert KLIndexer._unchanged(moved, "v1", ids, docs, metas) is False
+
+    # 메타(제목·카테고리)가 바뀌면 재임베딩 — 이름 변경 반영
+    retitled = _FakeCol({"v1_0": (docs[0], {**metas[0], "title": "새 제목"}),
+                         "v1_1": (docs[1], metas[1])})
+    assert KLIndexer._unchanged(retitled, "v1", ids, docs, metas) is False
+
+    # 청크 수가 다르면 재임베딩
+    partial = _FakeCol({"v1_0": (docs[0], metas[0])})
+    assert KLIndexer._unchanged(partial, "v1", ids, docs, metas) is False
+
+    # 미인덱싱(빈 컬렉션) → 재임베딩
+    assert KLIndexer._unchanged(_FakeCol({}), "v1", ids, docs, metas) is False
+
+    # 조회 실패는 보수적으로 "변경됨"
+    class Boom:
+        def get(self, **kw): raise RuntimeError("chroma 손상")
+    assert KLIndexer._unchanged(Boom(), "v1", ids, docs, metas) is False
+
+
 # ─── V-U5: 품질 규칙 검토 ────────────────────────────────────────────────────
 def test_quality_normal():
     text = "오늘은 삼성전자 주가 전망에 대해 분석해보겠습니다. " * 10

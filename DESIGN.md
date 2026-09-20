@@ -25,6 +25,7 @@
 > **v5.1:** 이름 변경(FR31) — 신규 `renamer.py`(채널: yaml 키 이동+폴더 rename / 영상: meta.title+chroma metadata / 카테고리: playlists.json+meta 배열+chroma / 폴더: set_group 일괄), `KLIndexer.update_video_metadata`(get(where=video_id)→update, 재임베딩 없음), 전 작업 busy 가드(FR31.5)
 > **v5.3:** 증분 인덱싱(FR33.1~33.2) — `KLIndexer._unchanged`가 ChromaDB 기존 청크(id·문서·메타)를 대조해 동일하면 임베딩 생략. 인덱싱 진행율(FR33.3) — `index_all(on_progress=)` → job `index_stage`/`index_done`/`index_total` → 프론트 배지·바 전환. 신규 결정 DQ-21·DQ-22
 > **v5.2 (버그 수정):** 스캔 정합성(FR32) — `_ydl_opts`에 `extractor_args.youtube.lang` 주입(DQ-20), `ChannelRegistry.resolve_name` 신설 후 `_do_scan`·`_entry_channel`이 레지스트리 역조회 사용(DQ-19). 신규 결정 DQ-19·DQ-20
+> **v5.4:** Whisper 전사 진행률(FR30.6) — `transcriber.progress_percent`(t/duration → 0~100, 비정상 입력은 0)와 `with_progress(segments, duration, on_progress)` 제너레이터 신설. faster-whisper의 segments는 지연 생성자라 **통과시키며** 보고한다(따로 순회하면 재전사·빈 결과). 진행률은 자막 시각 기준이라 단조 증가하지만 VAD가 건너뛴 무음 때문에 경과 시간과 정비례하지는 않는다. CLI는 10% 단위 로그, `on_progress`는 대시보드 접점으로만 열어두고 배선은 하지 않는다(FR30.5 유지)
 > **v5.0 (v3):** 챕터(FR27) — `meta_collector.save`가 info.chapters를 `[{start,end,title}]`로 정규화 저장, `/subtitle` 응답 확장, 상세 패널 챕터 링크. Markdown(FR28) — `/export/markdown` 서버 조립 + 프론트 Blob 다운로드. RSS(FR29) — 신규 `rss_monitor.py`(channel_id 해석 1회 캐시 → channels.yaml, 피드 파싱은 표준 xml.etree), `/channels/new`, 추출 탭 🔔 버튼(수동 트리거 — NFR3 유지). Whisper(FR30) — 신규 `transcriber.py`(faster-whisper CPU int8, 오디오 bestaudio 임시 다운로드, 세그먼트→SRT→기존 txt 경로), `sub_type="whisper"` 도입(stats.extracted 포함·decide 스킵), CLI `transcribe` 명령. 신규 결정 DQ-18(whisper sub_type 취급)
 
 ---
@@ -528,6 +529,8 @@ V-U10 members 재시도       쿠키 유/무별 decide 판정 (FR19.1) — 구�
 V-U11 classify_url        영상/채널/판별불가 8케이스 (FR17.1) — tests/test_unit.py 편입 완료
 V-U12 reflow_sentences     문장 단위 개행 한·영/무공백 한글/소수점 보존 (FR23) — 3케이스
 V-U13 live guard           is_live/is_upcoming → live_wait + state 미기록, was_live 정상 경로 (FR16.5)
+V-U17 transcribe progress  퍼센트 계산(클램프·duration 0·비정상 입력), 진행률+SRT 동시 산출,
+                          지연 생성자 1회 소비 (FR30.6)
                           (2026-08-04, 25 passed로 게이트 검증)
 ```
 

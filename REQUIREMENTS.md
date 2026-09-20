@@ -1,8 +1,8 @@
 # REQUIREMENTS — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v5.3  
+> **버전:** v5.4  
 > **작성일:** 2026-08-09  
-> **연계 문서:** DESIGN.md v5.3  
+> **연계 문서:** DESIGN.md v5.4  
 > **주요 변경:** 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20), 개발 거버넌스(NFR10)  
 > **v4.1 (FR17~20 백엔드 구현 확정 반영):** 조건 적용 순서·ⓐ"최신" 정의·ⓓ↔FR19.1 우선순위 비고(FR17.4),
@@ -21,6 +21,7 @@
 > **v5.3:** 증분 인덱싱·인덱싱 진행율(FR33) — 변경 없는 영상은 재임베딩 생략, 인덱싱 단계 진행 상황 노출  
 > **v5.2 (버그 수정):** 스캔 정합성(FR32) — 다국어 제목으로 스캔·라이브러리 제목이 어긋나던 문제(FR32.1),
 > 등록명≠URL핸들 채널에서 `extracted` 오판·중복 폴더 생성(FR32.2~32.3)  
+> **v5.4:** Whisper 전사 진행률(FR30.6) — 세그먼트 스트림에서 진행률을 계산해 CLI 로그에 노출, `on_progress` 콜백 훅 신설(대시보드 통합은 FR30.5대로 여전히 범위 외)  
 > **범위:** 채널 관리 → 자막 추출 → 메타데이터 수집 → 품질 검토 → 지식층 인덱싱 → 질의·대시보드
 
 ---
@@ -429,6 +430,7 @@
 | FR30.3 | `sub_type="whisper"`는 추출 완료로 취급 — `decide()` 스킵 대상, `/channels/stats.extracted` 집계 포함, 대시보드 뱃지 "🎤전사" | 필수 |
 | FR30.4 | 모델: `WHISPER_MODEL` 환경변수(기본 `small`), CPU int8. 모델은 HF 캐시(기존 마운트)에 1회 다운로드. faster-whisper는 requirements에 추가 | 필수 |
 | FR30.5 | 대시보드 통합(작업 큐·진행율)은 v3 범위 외 — CLI 전용. 전사는 영상당 수 분 소요될 수 있음(명시) | 명시 |
+| FR30.6 | 진행률 노출 — faster-whisper 세그먼트 스트림을 통과시키며 `end/info.duration`으로 0~100%를 계산해 10% 단위로 CLI 로그(`… 전사 40% (3:12 / 8:02)`)에 남긴다. `Transcriber.run/transcribe_video(on_progress=)` 콜백으로도 흘려 후속 대시보드 통합의 접점을 남긴다(통합 자체는 FR30.5 유지). 세그먼트는 **1회만 소비**한다(지연 생성자 — 재순회 시 재전사·빈 결과). `info.duration`을 모르면 로그 생략, 전사는 정상 진행 | 필수 |
 
 ### FR31 — 이름 변경 (신규, v3)
 
@@ -543,7 +545,7 @@
 | FR27.1~27.4 | `meta_collector.save`(chapters) · `dashboard/server.py`(/subtitle.chapters) · `dashboard/index.html`(챕터 목록) | meta.json `chapters` |
 | FR28.1~28.2 | `dashboard/server.py`(/export/markdown) · `dashboard/index.html`(⬇ MD 버튼) | (파생 문서) |
 | FR29.1~29.4 | `rss_monitor.py`(channel_id 해석·피드 파싱) · `channel_registry.set_channel_id` · `dashboard/server.py`(/channels/new) · `dashboard/index.html`(🔔 버튼·배지) | channels.yaml `channel_id` |
-| FR30.1~30.5 | `transcriber.py`(faster-whisper) · `main.py`(cmd_transcribe) · `yt.sh` · requirements | srt/txt/meta/state (`sub_type=whisper`) |
+| FR30.1~30.6 | `transcriber.py`(faster-whisper · `progress_percent`·`with_progress`) · `main.py`(cmd_transcribe) · `yt.sh` · requirements | srt/txt/meta/state (`sub_type=whisper`) |
 | FR31.1~31.6 | `renamer.py`(신규) · `channel_registry.rename` · `kl_indexer.update_video_metadata` · `dashboard/server.py`(4 엔드포인트) · `dashboard/index.html`(✏️ 버튼 4곳) | channels.yaml·output/·meta·playlists.json·chroma metadata |
 | FR32.1 | `extractor.Extractor._ydl_opts` (`extractor_args.youtube.lang`) | 스캔·추출 전 경로 공통 |
 | FR32.2~32.3 | `channel_registry.ChannelRegistry.resolve_name`(신규) · `dashboard/jobs.py`(`_do_scan`·`_entry_channel`·`_run_single`) | 레지스트리 역조회, 폴백은 `extract_handle` |

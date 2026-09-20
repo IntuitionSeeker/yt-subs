@@ -527,6 +527,50 @@ def test_segments_to_srt():
     assert "안녕하세요" in blocks[0] and "본문입니다" in blocks[1]
 
 
+# ─── V-U17: Whisper 전사 진행률 (FR30.6) ────────────────────────────────────
+def test_transcribe_progress_percent():
+    from transcriber import progress_percent
+    assert progress_percent(30, 60) == 50
+    assert progress_percent(60, 60) == 100
+    assert progress_percent(90, 60) == 100          # 상한 클램프
+    assert progress_percent(10, 0) == 0             # duration 미상 → 0 (나눗셈 금지)
+    assert progress_percent(None, 60) == 0
+    assert progress_percent("x", 60) == 0
+
+
+def test_transcribe_progress_stream():
+    """진행률을 내면서도 SRT 조립이 그대로 되는지 (세그먼트 1회 소비)."""
+    from transcriber import with_progress, segments_to_srt
+    segs = [{"start": 0.0, "end": 30.0, "text": "앞부분"},
+            {"start": 30.0, "end": 60.0, "text": "뒷부분"}]
+
+    seen = []
+    srt = segments_to_srt(with_progress(segs, 60.0, seen.append))
+    assert seen == [50, 100]
+    assert "앞부분" in srt and "뒷부분" in srt
+
+    # duration 미상이어도 전사는 정상 진행 (콜백은 0, 로그만 생략)
+    seen2 = []
+    srt2 = segments_to_srt(with_progress(segs, 0, seen2.append))
+    assert seen2 == [0, 0]
+    assert "앞부분" in srt2
+
+
+def test_transcribe_progress_consumes_generator_once():
+    """faster-whisper 세그먼트는 지연 생성자 — 1회 소비가 계약이다 (두 번 돌면 재전사)."""
+    from transcriber import with_progress
+    consumed = []
+
+    def lazy():
+        for end in (10.0, 20.0):
+            consumed.append(end)
+            yield {"start": end - 10, "end": end, "text": f"seg{end}"}
+
+    out = list(with_progress(lazy(), 20.0))
+    assert len(out) == 2
+    assert consumed == [10.0, 20.0]
+
+
 # ─── V-U15: RSS 피드 파싱 (FR29.2) ──────────────────────────────────────────
 def test_rss_fetch_feed(monkeypatch):
     import rss_monitor

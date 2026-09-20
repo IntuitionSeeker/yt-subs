@@ -11,7 +11,7 @@ import datetime
 import importlib
 import threading
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import unquote, quote_plus, unquote_plus
 
 import config
 from channel_registry import ChannelRegistry
@@ -48,8 +48,26 @@ SCAN_TTL_SEC = 600          # 스캔 캐시 TTL 10분 (DQ-13)
 # 영상 URL 패턴 — 프론트(index.html:575)와 동일 (FR17.1)
 _VIDEO_RE   = re.compile(r"(?:watch\?v=|youtu\.be/|/shorts/|/live/)([\w-]{11})")
 _PLAYLIST_RE = re.compile(r"/playlist\?list=([\w-]+)")    # FR24.1
+_SEARCH_RE  = re.compile(r"/results\?\S*search_query=([^&\s]*)")   # FR34.1
 _HANDLE_RE  = re.compile(r"@[^/?&\s]+")
 _CHANNEL_RE = re.compile(r"/channel/(UC[\w-]+)")
+
+# ─── 검색 추출 (FR34) ────────────────────────────────────────────────────────
+# `sp`는 YouTube 검색 필터의 base64url protobuf다 (_workspace/17b 실측 레시피).
+#   outer field2(0x12) = 필터 그룹 · inner field1(0x08) = 업로드 날짜 · field2(0x10) = 유형
+# `type=video`(inner field2=1)를 **항상** 포함한다 — 재생목록·채널 엔트리 혼입이 사라져
+# uploader_id·duration 커버리지가 100%가 된다. 6종 전부 실측 확인됨 (2026-09-20).
+SP_PRESETS = {
+    "all":   "EgIQAQ",       # 동영상 필터만 (기간 무관)
+    "hour":  "EgQIARAB",     # 지난 1시간 + 동영상
+    "today": "EgQIAhAB",     # 오늘 + 동영상
+    "week":  "EgQIAxAB",     # 이번 주 + 동영상
+    "month": "EgQIBBAB",     # 이번 달 + 동영상
+    "year":  "EgQIBRAB",     # 올해 + 동영상
+}
+SEARCH_LIMIT_DEFAULT = 20        # ⓐ 개수 상한 기본 (FR34.2)
+SEARCH_LIMIT_MAX = 50
+SEARCH_MIN_DURATION_DEFAULT = 180   # ⓑ N초 미만 제외 기본 (FR34.3 — "쇼츠"가 아니다)
 
 # 스캔 엔트리의 availability 중 멤버십 전용으로 볼 값 (FR17.6)
 _MEMBERS_AVAILABILITY = ("subscriber_only", "needs_auth", "premium_only")
@@ -70,10 +88,12 @@ class JobBusyError(Exception):
 # ─── URL 분류 (FR17.1) ───────────────────────────────────────────────────────
 def classify_url(url: str) -> tuple:
     """
-    URL을 영상/재생목록/채널로 분류. 판별 불가 시 ValueError.
-      ("video", video_id) | ("playlist", url) | ("channel", url)
-    우선순위: 영상 → 재생목록 → 채널 (FR24.1)
+    URL을 영상/재생목록/검색/채널로 분류. 판별 불가 시 ValueError.
+      ("video", video_id) | ("playlist", url) | ("search", url) | ("channel", url)
+    우선순위: 영상 → 재생목록 → 검색 → 채널 (FR24.1·FR34.1)
     — `watch?v=…&list=…`는 단일 영상으로 처리 (기존 동작 유지).
+    — **순수 텍스트는 검색으로 승격하지 않는다.** 검색 진입은 요청 본문의 `q` 필드
+      전용이다 — 오타 URL이 조용히 검색으로 둔갑하면 엉뚱한 채널 수십 개가 등록된다 (DQ-27).
     """
     raw = (url or "").strip()
     if not raw:
@@ -85,9 +105,59 @@ def classify_url(url: str) -> tuple:
         return ("video", m.group(1))
     if _PLAYLIST_RE.search(decoded):
         return ("playlist", raw)
+    if _SEARCH_RE.search(raw) or _SEARCH_RE.search(decoded):     # FR34.1
+        return ("search", raw)
     if _HANDLE_RE.search(decoded) or _CHANNEL_RE.search(decoded):
         return ("channel", raw)
-    raise ValueError(f"영상·재생목록·채널 URL로 판별할 수 없습니다: {raw[:80]}")
+    raise ValueError(f"영상·재생목록·검색·채널 URL로 판별할 수 없습니다: {raw[:80]}")
+
+
+def search_query_from_url(url: str) -> str:
+    """`/results?search_query=…` URL에서 검색어 복원. FR34.1"""
+    m = _SEARCH_RE.search((url or "").strip())
+    q = unquote_plus(m.group(1)) if m else ""
+    if not q.strip():
+        raise ValueError("검색 URL에서 검색어를 찾을 수 없습니다.")
+    return q.strip()
+
+
+def _build_search_url(q: str, period: str = "all") -> str:
+    """
+    검색 URL 조립 — yt-dlp `youtube:search_url` 추출기가 받는다. FR34.1·34.4
+
+    `ytsearchN:` 구문도 동작하지만 `sp` 필터를 실을 수 없어 쓰지 않는다.
+    알 수 없는 period는 400이 아니라 `all` 폴백 (조건 완화는 안전 방향).
+    """
+    sp = SP_PRESETS.get(str(period or "all").strip().lower(), SP_PRESETS["all"])
+    return f"https://www.youtube.com/results?search_query={quote_plus(q)}&sp={sp}"
+
+
+def _search_opts(limit: int) -> dict:
+    """
+    검색 flat 스캔용 옵션. FR34.2
+
+    `playlist_items: "1-N"`으로 ⓐ개수 상한을 **스캔 단계에서** 절단한다.
+    `_flat_opts()`를 반드시 경유해야 `extractor_args.youtube.lang`(DQ-20)이 적용된다.
+    """
+    return {**_flat_opts(), "playlist_items": f"1-{int(limit)}"}
+
+
+def normalize_search_params(limit=None, min_duration=None, period=None,
+                            folder=None, q: str = "") -> dict:
+    """검색 조건 정규화·검증 (위반은 ValueError → 400). FR34.2~34.6"""
+    limit = SEARCH_LIMIT_DEFAULT if limit is None else int(limit)
+    if not 1 <= limit <= SEARCH_LIMIT_MAX:
+        raise ValueError(f"개수 상한(limit)은 1~{SEARCH_LIMIT_MAX} 사이여야 합니다.")
+    min_duration = (SEARCH_MIN_DURATION_DEFAULT if min_duration is None
+                    else int(min_duration))
+    if min_duration < 0:
+        raise ValueError("최소 길이(min_duration)는 0 이상이어야 합니다.")
+    period = str(period or "all").strip().lower()
+    if period not in SP_PRESETS:            # 미지 값은 400이 아니라 all 폴백
+        period = "all"
+    folder = (folder or "").strip() or (q or "").strip()
+    return {"limit": limit, "min_duration": min_duration,
+            "period": period, "folder": folder}
 
 
 # ─── 조건 필터 (FR17.4) ──────────────────────────────────────────────────────
@@ -212,6 +282,52 @@ def _merged_pl_map(channel: str, vids: list, title: str) -> dict:
     return mapping
 
 
+def _group_flat_entries(entries: list, min_duration: int = None) -> tuple:
+    """
+    flat 엔트리 목록 → (videos_view, by_channel). 재생목록(FR24.2)·검색(FR34.5) 공용.
+
+    - 진행 중/예약 라이브 제외 (FR16.3 준용). 검색 flat에는 `live_status` 키 자체가
+      없어(실측 0/15) 이 분기가 동작하지 않는다 — 처리 시 FR16.5 가드가 최종 방어선 (DQ-26).
+    - `min_duration`이 주어지면 **`duration`이 있고 임계 미만인 것만** 제외한다.
+      **결측은 통과시킨다** — 판정 불가를 제외 근거로 쓰면 신호 없는 영상이 조용히 사라진다 (DQ-23).
+    - 채널 해석은 등록명 역조회(FR32.3, DQ-19), `extracted`는 원채널 state 기준 (DQ-18).
+    """
+    from state_manager import StateManager
+    videos_view, by_channel, states = [], {}, {}
+    reg = ChannelRegistry()
+    for e in entries:
+        if e.get("live_status") in ("is_live", "is_upcoming"):
+            continue
+        dur = e.get("duration")
+        dur = dur if isinstance(dur, (int, float)) else None
+        if min_duration and dur is not None and dur < min_duration:
+            continue                       # ⓑ N초 미만 제외 (FR34.3)
+        ch = _entry_channel(e, reg)
+        if not ch:
+            log.warning(f"  ⚠ 채널 불명 → 제외: {e.get('id')}")
+            continue
+        name, ch_url = ch
+        e["content_type"] = e.get("content_type") or "video"
+        by_channel.setdefault(name, {"url": ch_url, "entries": []})["entries"].append(e)
+        if name not in states:
+            states[name] = (StateManager(name).state
+                            if config.channel_dir(name).exists() else {})
+        st = states[name].get(e["id"]) or {}
+        sub_type = st.get("sub_type")
+        videos_view.append({
+            "id": e["id"],
+            "title": e.get("title") or e["id"],
+            "channel": name,
+            "content_type": e["content_type"],
+            "playlists": [],
+            "members_only": bool(_is_members_availability(e.get("availability"))
+                                 or sub_type == "members_only"),
+            "extracted": sub_type in ("manual", "auto", "whisper"),   # DQ-18
+            "duration": int(dur) if dur is not None else None,        # FR34.5·FR20.5
+        })
+    return videos_view, by_channel
+
+
 # ─── 작업 관리자 (FR17.7·FR18) ───────────────────────────────────────────────
 class JobManager:
     """단일 uvicorn 프로세스 전제의 모듈 싱글턴. 동시 1작업."""
@@ -263,6 +379,10 @@ class JobManager:
         kind, _ = classify_url(url)          # 판별 불가 → ValueError(400)
         if kind == "video":
             raise ValueError("영상 URL은 /extract 로 바로 추출하세요.")
+        if kind == "search":                 # 검색 결과 페이지 URL 붙여넣기 (FR34.1)
+            # URL의 `sp`는 그대로 쓰지 않고 기본 조건으로 다시 조립한다 —
+            # 조건은 대시보드 UI가 단일 출처여야 미리보기와 실제가 어긋나지 않는다.
+            return self.scan_search(search_query_from_url(url))
         self._acquire()
         try:
             if kind == "playlist":
@@ -325,42 +445,13 @@ class JobManager:
     def _do_scan_playlist(self, url: str) -> dict:
         import yt_dlp
         _app_extractor()                     # sys.path 정상화 (섀도잉 방어)
-        from state_manager import StateManager
 
         log.info(f"🔍 재생목록 스캔: {url[:70]}")
         with yt_dlp.YoutubeDL(_flat_opts()) as ydl:
             info = ydl.extract_info(url, download=False)
         title = (info.get("title") or "").strip() or "재생목록"
         entries = [e for e in (info.get("entries") or []) if e.get("id")]
-
-        videos_view, by_channel, states = [], {}, {}
-        reg = ChannelRegistry()                  # 등록명 역조회용 (FR32.3)
-        for e in entries:
-            # 진행 중/예약 라이브는 자막 미완성 → 제외 (FR16.3 준용)
-            if e.get("live_status") in ("is_live", "is_upcoming"):
-                continue
-            ch = _entry_channel(e, reg)
-            if not ch:
-                log.warning(f"  ⚠ 채널 불명 → 제외: {e.get('id')}")
-                continue
-            name, ch_url = ch
-            e["content_type"] = e.get("content_type") or "video"
-            by_channel.setdefault(name, {"url": ch_url, "entries": []})["entries"].append(e)
-            if name not in states:
-                states[name] = (StateManager(name).state
-                                if config.channel_dir(name).exists() else {})
-            st = states[name].get(e["id"]) or {}
-            sub_type = st.get("sub_type")
-            videos_view.append({
-                "id": e["id"],
-                "title": e.get("title") or e["id"],
-                "channel": name,
-                "content_type": e["content_type"],
-                "playlists": [],
-                "members_only": bool(_is_members_availability(e.get("availability"))
-                                     or sub_type == "members_only"),
-                "extracted": sub_type in ("manual", "auto", "whisper"),   # DQ-18
-            })
+        videos_view, by_channel = _group_flat_entries(entries)
 
         scan_id = uuid.uuid4().hex[:12]
         with self._lock:
@@ -378,6 +469,59 @@ class JobManager:
                  f"채널 {len(by_channel)}개 (scan_id={scan_id})")
         return {"scan_id": scan_id, "kind": "playlist", "playlist": title,
                 "channel": title, "videos": videos_view, "playlists": []}
+
+    # ── 검색 사전 스캔 (FR34.1~34.5) ─────────────────────────────────────────
+    def scan_search(self, q: str, limit: int = None, min_duration: int = None,
+                    period: str = None, folder: str = None) -> dict:
+        """검색어 → 후보 목록 + scan_id. 조건 위반은 ValueError(400). FR34.1"""
+        q = (q or "").strip()
+        if not q:
+            raise ValueError("검색어가 비어 있습니다.")
+        p = normalize_search_params(limit, min_duration, period, folder, q)
+        self._acquire()
+        try:
+            return self._do_scan_search(q, **p)
+        finally:
+            self._release()
+
+    def _do_scan_search(self, q: str, limit: int, min_duration: int,
+                        period: str, folder: str) -> dict:
+        """
+        `_do_scan_playlist`와 같은 골격 — 소스만 검색으로 치환 (FR34.5).
+
+        차이 ① ⓑduration 필터(결측 통과, DQ-23) ② `live_status` 선제외가 동작하지
+        않음(검색 flat에 키 부재 — DQ-26) ③ 캐시가 `kind:"search"`·`query`·`folder`를 갖는다.
+        """
+        import yt_dlp
+        _app_extractor()                     # sys.path 정상화 (섀도잉 방어)
+
+        url = _build_search_url(q, period)
+        log.info(f"🔍 검색 스캔: '{q}' · 최대 {limit}개 · "
+                 f"{min_duration}초 미만 제외 · 기간 {period}")
+        with yt_dlp.YoutubeDL(_search_opts(limit)) as ydl:
+            info = ydl.extract_info(url, download=False)
+        entries = [e for e in (info.get("entries") or []) if e.get("id")]
+        videos_view, by_channel = _group_flat_entries(entries,
+                                                      min_duration=min_duration)
+
+        scan_id = uuid.uuid4().hex[:12]
+        with self._lock:
+            self._scans[scan_id] = {
+                "scan_id": scan_id,
+                "kind": "search",
+                "query": q,
+                "folder": folder,
+                "channel": q,                # 표시용 (프론트 condChannel)
+                "url": url,
+                "videos_view": videos_view,
+                "by_channel": by_channel,
+                "created_at": time.time(),
+            }
+        log.info(f"  ✅ 검색 '{q}' 후보 {len(videos_view)}개 · "
+                 f"채널 {len(by_channel)}개 (scan_id={scan_id})")
+        return {"scan_id": scan_id, "kind": "search", "query": q,
+                "folder": folder, "channel": q,
+                "videos": videos_view, "playlists": []}
 
     # ── 추출 시작 (FR17.2·17.4·17.7) ─────────────────────────────────────────
     def start(self, req: dict) -> dict:
@@ -401,7 +545,10 @@ class JobManager:
             worker, args = self._run_single, (job, url, vid, index)
         else:
             entry = self._get_scan(scan_id)            # 만료·부재 → ValueError(400)
-            if entry.get("kind") == "playlist":        # FR24.3
+            if entry.get("kind") == "search":          # FR34.9
+                job = self._new_job("search_run", entry["channel"], entry["url"])
+                worker, args = self._run_search, (job, entry, filters, index)
+            elif entry.get("kind") == "playlist":      # FR24.3
                 job = self._new_job("playlist_run", entry["channel"], entry["url"])
                 worker, args = self._run_playlist, (job, entry, filters, index)
             else:
@@ -514,7 +661,8 @@ class JobManager:
     def _run_channel(self, job: dict, entry: dict, filters: dict, index: bool):
         channel = entry["channel"]
         try:
-            Extractor = _app_extractor().Extractor
+            _ext_mod = _app_extractor()
+            Extractor = _ext_mod.Extractor
 
             # 대상 선정 — 캐시된 view에 조건 적용 후 원본 entries를 같은 순서로 필터
             selected = apply_filters(entry["videos_view"], filters)
@@ -540,8 +688,12 @@ class JobManager:
 
             self._update(job, phase="extracting")
             ext = Extractor(ch_cfg)
+            # 단일 채널은 run() 1회라 휴식 누적은 문제없다. 취소 중 긴 휴식에
+            # 갇히지 않도록 cancel_check만 붙인다 (FR14.2 · FR18.2)
             stats = ext.run(entries=target_entries, pl_map=entry["pl_map"],
-                            date_range=date_range, progress=self._make_cb(job))
+                            date_range=date_range, progress=self._make_cb(job),
+                            rest_state=_ext_mod.BatchRest(
+                                cancel_check=self._cancel.is_set))
             self._merge_stats(job, stats)
 
             cancelled = bool((stats or {}).get("cancelled")) or self._cancel.is_set()
@@ -553,10 +705,30 @@ class JobManager:
 
     # ── 재생목록 워커 (FR24.3~24.5) ──────────────────────────────────────────
     def _run_playlist(self, job: dict, entry: dict, filters: dict, index: bool):
+        """재생목록 추출 — 제목을 카테고리로 병합한다 (FR24.4)."""
+        self._run_grouped(job, entry, filters, index,
+                          group_title=entry["playlist_title"],
+                          merge_categories=True, auto_run=True)
+
+    # ── 검색 워커 (FR34.9) ───────────────────────────────────────────────────
+    def _run_search(self, job: dict, entry: dict, filters: dict, index: bool):
+        """
+        검색 추출 — 재생목록 워커와 **동일 계약**이고 두 가지만 다르다 (FR34.6·34.10).
+          ① 신규 등록 채널을 `folder`로 묶고 `auto_run: false`를 기록한다 (FR34.7)
+          ② 검색어를 카테고리로 병합하지 않는다 (`merge_categories=False`, DQ-28)
+        """
+        self._run_grouped(job, entry, filters, index,
+                          group_title=entry.get("folder") or entry.get("query"),
+                          merge_categories=False, auto_run=False)
+
+    def _run_grouped(self, job: dict, entry: dict, filters: dict, index: bool,
+                     group_title: str = None, merge_categories: bool = True,
+                     auto_run: bool = True):
         """채널별 그룹 순차 실행 — 결과물은 각 영상의 원채널 폴더에 저장."""
-        pl_title = entry["playlist_title"]
+        pl_title = group_title
         try:
-            Extractor = _app_extractor().Extractor
+            _ext_mod = _app_extractor()
+            Extractor = _ext_mod.Extractor
 
             selected = apply_filters(entry["videos_view"], filters)
             ids = {v["id"] for v in selected}
@@ -573,6 +745,10 @@ class JobManager:
             date_range = {"since": since, "until": until} if (since or until) else None
 
             reg = ChannelRegistry()
+            # 배치 휴식 상태는 그룹 경계를 넘어 공유한다 (FR14.2).
+            # 그룹마다 run()을 새로 부르므로 run() 지역 카운터로 두면 매번 0으로
+            # 리셋돼 휴식이 오지 않는다 — 검색은 영상당 채널이 달라 특히 치명적이다.
+            rest_state = _ext_mod.BatchRest(cancel_check=self._cancel.is_set)
             agg = {k: 0 for k in _STAT_KEYS}     # 완료 그룹 누계 (진행 콜백이 합산)
             base_done = 0
             changed = []                          # new+updated>0 채널 → 인덱싱 대상
@@ -581,12 +757,16 @@ class JobManager:
                 if self._cancel.is_set():
                     cancelled = True
                     break
-                # 미등록 채널은 추출 시점에 자동 등록 + 재생목록 폴더 지정 (FR25.7)
-                # (기존 등록 채널의 폴더는 건드리지 않는다)
+                # 미등록 채널은 추출 시점에 자동 등록 + 폴더 지정 (FR25.7·FR34.6)
+                # (기존 등록 채널의 group·auto_run은 둘 다 건드리지 않는다)
                 if name not in reg.names():
                     reg.add(ch_url, lang=config.DEFAULT_LANG)
-                    reg.set_group(name, pl_title)
-                    log.info(f"✅ 채널 등록: {name} (폴더: {pl_title})")
+                    if pl_title:
+                        reg.set_group(name, pl_title)
+                    if not auto_run:            # 검색 유입 채널 (FR34.7, DQ-25)
+                        reg.set_auto_run(name, False)
+                    log.info(f"✅ 채널 등록: {name} (폴더: {pl_title})"
+                             + ("" if auto_run else " · run 전체 순회 제외"))
                 try:
                     ch_cfg = reg.get(name)
                 except KeyError:                 # pragma: no cover - 방어적 폴백
@@ -594,11 +774,17 @@ class JobManager:
                               "url": ChannelRegistry.normalize_url(ch_url),
                               "lang": config.DEFAULT_LANG}
 
-                pl_map = _merged_pl_map(name, [e["id"] for e in g_entries], pl_title)
+                # 검색어는 카테고리로 병합하지 않는다 (FR34.10·DQ-28).
+                # `{}`를 넘기는 이유: `run(pl_map=None)`은 scan_playlists()를 **호출**해
+                # 채널마다 추가 요청이 나가고 _backfill_meta까지 돈다 — DQ-28이 말하는
+                # "병합 없음"은 빈 맵으로만 성립한다. 빈 맵은 `if pl_map:`이 거짓이라
+                # 백필도 생략되고, playlists는 다음 전체 run 백필(FR15.5)로 채워진다.
+                pl_map = (_merged_pl_map(name, [e["id"] for e in g_entries], pl_title)
+                          if merge_categories and pl_title else {})
                 self._update(job, phase="extracting")
                 ext = Extractor(ch_cfg)
                 stats = ext.run(entries=g_entries, pl_map=pl_map,
-                                date_range=date_range,
+                                date_range=date_range, rest_state=rest_state,
                                 progress=self._make_group_cb(job, agg, base_done,
                                                              total, channel=name)
                                 ) or {}

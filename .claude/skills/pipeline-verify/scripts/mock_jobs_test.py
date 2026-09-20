@@ -229,7 +229,7 @@ calls = {}
 
 class RunExtractor(FakeExtractor):
     def run(self, force_vid=None, limit=None, progress=None,
-            entries=None, pl_map=None, date_range=None):
+            entries=None, pl_map=None, date_range=None, rest_state=None):
         calls["entries"] = entries
         calls["pl_map"] = pl_map
         calls["date_range"] = date_range
@@ -280,7 +280,7 @@ print("✓ _maybe_index: on_progress 콜백 → index_stage/done/total, 추출 d
 # 취소면 인덱싱 생략 (사용자 확정 ①)
 class CancelExtractor(FakeExtractor):
     def run(self, force_vid=None, limit=None, progress=None,
-            entries=None, pl_map=None, date_range=None):
+            entries=None, pl_map=None, date_range=None, rest_state=None):
         mgr._cancel.set()
         assert progress({"phase": "extracting", "done": 1, "total": 2,
                          "stats": {"new": 1}}) is False, "취소 시 콜백 False"
@@ -443,9 +443,10 @@ runs9 = []
 
 class PlaylistExtractor(FakeExtractor):
     def run(self, force_vid=None, limit=None, progress=None,
-            entries=None, pl_map=None, date_range=None):
+            entries=None, pl_map=None, date_range=None, rest_state=None):
         runs9.append({"name": self.cfg["name"],
-                      "ids": [e["id"] for e in entries], "pl_map": pl_map})
+                      "ids": [e["id"] for e in entries], "pl_map": pl_map,
+                      "rest": rest_state})
         if self.cfg["name"] == "chanA":
             assert progress({"phase": "extracting", "done": 1, "total": len(entries),
                              "current_title": "영상A", "stats": {"new": 1},
@@ -491,6 +492,202 @@ assert [c.args[0] for c in idx9.call_args_list] == ["chanA"], \
 assert job9["events"] == [{"id": "p1", "title": "영상A", "kind": "new",
                            "reason": "신규 추출", "channel": "chanA"}], \
     "재생목록 이벤트에 원채널 부가 (FR26.2)"
+# 배치 휴식 상태는 그룹 경계를 넘어 **같은 인스턴스**로 공유된다 (FR14.2)
+assert all(r["rest"] is runs9[0]["rest"] for r in runs9) and runs9[0]["rest"] is not None, \
+    "그룹마다 새 rest_state면 휴식 카운터가 0으로 리셋된다"
+assert isinstance(runs9[0]["rest"], _extractor_mod.BatchRest)
 print("✓ _run_playlist: 그룹 순차·진행율 합산·병합 pl_map·자동 등록·조건부 인덱싱 (FR24.3~24.5)")
 
 print("\n모든 dashboard/jobs.py 로직 검증 통과")
+
+# ── 10. 검색 스캔·워커 (FR34) ───────────────────────────────────────────────
+from jobs import _build_search_url, _search_opts, SP_PRESETS, search_query_from_url
+
+# classify_url: 검색 결과 URL 인식 · 순수 텍스트는 승격하지 않음 (DQ-27)
+SEARCH_URL = "https://www.youtube.com/results?search_query=AI+%EC%97%90%EC%9D%B4%EC%A0%84%ED%8A%B8"
+assert classify_url(SEARCH_URL) == ("search", SEARCH_URL)
+assert search_query_from_url(SEARCH_URL) == "AI 에이전트"
+for bad in ("AI 에이전트", "그냥문자열"):
+    try:
+        classify_url(bad)
+        raise AssertionError(f"검색으로 승격하면 안 됨: {bad!r}")
+    except ValueError:
+        pass
+assert _build_search_url("AI 에이전트", "month").endswith("&sp=EgQIBBAB")
+assert _build_search_url("q", "없는프리셋").endswith("&sp=EgIQAQ"), "미지 period → all 폴백"
+assert SP_PRESETS["week"] == "EgQIAxAB" and SP_PRESETS["hour"] == "EgQIARAB"
+print("✓ classify_url/search: results URL 인식 · 순수 텍스트 ValueError · sp 프리셋 6종 (FR34.1·34.4)")
+
+# _do_scan_search: playlist_items 상한 · duration 필터(결측 통과) · 캐시 kind/query/folder
+search_info = {"entries": [
+    {"id": "g1", "title": "긴 영상", "uploader_id": "@chanA", "duration": 600},
+    {"id": "g2", "title": "짧은 영상", "uploader_id": "@chanA", "duration": 60},
+    {"id": "g3", "title": "길이 결측", "uploader_id": "@chanC"},
+    {"id": "g4", "title": "타채널", "channel_id": "UCyyyyyyyyyyyyyyyyyyyyyy", "duration": 900},
+]}
+scan_opts = {}
+
+class FakeSearchYDL(FakeYDL):
+    def __init__(self, opts):
+        scan_opts.update(opts)
+        super().__init__(opts)
+    def extract_info(self, url, download=False):
+        scan_opts["_url"] = url
+        return search_info
+
+sys.modules["yt_dlp"].YoutubeDL = FakeSearchYDL
+res10 = mgr.scan_search("AI 에이전트", limit=4, min_duration=180,
+                        period="month", folder="AI 묶음")
+assert scan_opts["playlist_items"] == "1-4", scan_opts
+assert scan_opts["extract_flat"] is True and scan_opts["_url"].endswith("&sp=EgQIBBAB")
+assert res10["kind"] == "search" and res10["query"] == "AI 에이전트"
+assert res10["folder"] == "AI 묶음" and res10["playlists"] == []
+assert [v["id"] for v in res10["videos"]] == ["g1", "g3", "g4"], "60초만 제외, 결측 통과"
+assert [v["duration"] for v in res10["videos"]] == [600, None, 900]
+entry10 = mgr._get_scan(res10["scan_id"])
+assert entry10["kind"] == "search" and entry10["folder"] == "AI 묶음"
+assert set(entry10["by_channel"]) == {"chanA", "chanC", "UCyyyyyyyyyyyyyyyyyyyyyy"}
+assert mgr._busy is False, "스캔 종료 후 점유 해제"
+print("✓ _do_scan_search: 1-N 상한 · sp 실림 · duration 필터(결측 통과) · 캐시 kind/query/folder")
+
+# 조건 위반은 ValueError(400)이고 점유를 남기지 않는다
+for bad_kw in ({"q": "  "}, {"q": "x", "limit": 0}, {"q": "x", "limit": 51},
+               {"q": "x", "min_duration": -1}):
+    try:
+        mgr.scan_search(**bad_kw)
+        raise AssertionError(f"400이어야 함: {bad_kw}")
+    except ValueError:
+        pass
+assert mgr._busy is False, "400 요청이 점유를 남기면 안 된다"
+print("✓ scan_search: q 공백·limit 범위 밖·min_duration 음수 → ValueError(400), 점유 누수 없음")
+
+# start(): 검색 캐시 → search_run 워커 배선
+runs10 = []
+
+class SearchExtractor(FakeExtractor):
+    def run(self, force_vid=None, limit=None, progress=None,
+            entries=None, pl_map=None, date_range=None, rest_state=None):
+        runs10.append({"name": self.cfg["name"],
+                       "ids": [e["id"] for e in entries], "pl_map": pl_map,
+                       "date_range": date_range, "rest": rest_state})
+        if self.cfg["name"] == "chanA":
+            assert progress({"phase": "extracting", "done": 1, "total": len(entries),
+                             "current_title": "긴 영상", "stats": {"new": 1},
+                             "event": {"id": "g1", "title": "긴 영상",
+                                       "kind": "new", "reason": "신규 추출"}}) is True
+            return {"new": 1, "updated": 0, "skip": 0, "no_sub": 0,
+                    "members_only": 0, "error": 0, "date_skip": 0, "live_wait": 0}
+        return {"new": 0, "updated": 0, "skip": 0, "no_sub": 0, "members_only": 0,
+                "error": 0, "date_skip": 0, "live_wait": 1}
+
+reg10 = mock.MagicMock()
+reg10.names.return_value = ["chanA"]          # chanC·UC…는 미등록 → 자동 등록
+reg10.get.side_effect = lambda n: {"name": n,
+                                   "url": f"https://www.youtube.com/@{n}/videos",
+                                   "lang": "ko"}
+idx10 = mock.MagicMock()
+with mock.patch.object(_extractor_mod, "Extractor", SearchExtractor), \
+     mock.patch.object(jobs, "ChannelRegistry",
+                       mock.MagicMock(return_value=reg10, extract_handle=str,
+                                      normalize_url=lambda u: u)), \
+     mock.patch.dict(sys.modules, {"kl_indexer": mock.MagicMock(KLIndexer=idx10)}):
+    job10 = mgr._new_job("search_run", "AI 에이전트", SEARCH_URL)
+    mgr._job = job10
+    mgr._cancel.clear()
+    mgr._run_search(job10, entry10,
+                    {"include_members": True, "since": "20260101"}, True)
+
+assert [r["name"] for r in runs10] == ["chanA", "chanC", "UCyyyyyyyyyyyyyyyyyyyyyy"]
+assert runs10[0]["ids"] == ["g1"] and runs10[1]["ids"] == ["g3"]
+assert all(r["pl_map"] == {} for r in runs10), \
+    "검색어는 카테고리로 병합하지 않는다 — 빈 맵이어야 scan_playlists()도 백필도 돌지 않는다 (DQ-28)"
+assert runs10[0]["date_range"] == {"since": "20260101", "until": None}, "ⓒ 2층 전달 (DQ-24)"
+# 신규 등록 채널만 폴더 + auto_run:false (기존 chanA는 불변, FR25.7·FR34.6~34.7)
+assert sorted(c.args[0] for c in reg10.set_group.call_args_list) == \
+    ["UCyyyyyyyyyyyyyyyyyyyyyy", "chanC"]
+assert all(c.args[1] == "AI 묶음" for c in reg10.set_group.call_args_list)
+assert sorted(c.args for c in reg10.set_auto_run.call_args_list) == \
+    [("UCyyyyyyyyyyyyyyyyyyyyyy", False), ("chanC", False)]
+assert job10["status"] == "done" and job10["total"] == 3 and job10["done"] == 3
+# 등식: total(3) == new(1) + live_wait(2) — 검색 경로는 live_wait를 포함한다 (DQ-26)
+assert job10["stats"]["new"] == 1 and job10["stats"]["live_wait"] == 2, job10["stats"]
+assert job10["total"] == sum(job10["stats"][k] for k in jobs._STAT_KEYS)
+assert [c.args[0] for c in idx10.call_args_list] == ["chanA"]
+assert job10["events"] == [{"id": "g1", "title": "긴 영상", "kind": "new",
+                            "reason": "신규 추출", "channel": "chanA"}]
+# 429 방어: 검색은 영상당 채널이 달라 그룹이 잘게 쪼개진다 → 휴식 상태 공유가 필수
+assert all(r["rest"] is runs10[0]["rest"] for r in runs10) and runs10[0]["rest"] is not None, \
+    "검색 그룹마다 rest_state가 새로 생기면 배치 휴식이 영영 오지 않는다 (FR14.2)"
+assert runs10[0]["rest"]._cancel_check == mgr._cancel.is_set, "취소 중 휴식 조기 종료 배선"
+print("✓ _run_search: 그룹 순차·진행율 합산·pl_map={} ·신규만 폴더+auto_run:false·조건부 인덱싱 (FR34.6~34.10)")
+
+# start()가 검색 캐시를 search_run 워커로 라우팅하는지 (배선 확인)
+entry10["created_at"] = time.time()
+with mock.patch.object(mgr, "_run_search") as spy:
+    job11 = mgr.start({"scan_id": res10["scan_id"], "filters": {}})
+    for _ in range(200):
+        if mgr.status()["status"] != "running" and not mgr._busy:
+            break
+        time.sleep(0.01)
+assert job11["kind"] == "search_run" and spy.called, job11
+print("✓ start(): kind=search 캐시 → search_run job + _run_search 워커 (FR34.9)")
+
+print("\n검색 추출(FR34) 로직 검증 통과")
+
+# ── 11. 배치 휴식이 그룹 경계를 넘어 누적된다 (FR14.2 · QA 결함 B) ───────────
+# 검색 결과는 "영상 1개 = 채널 1개"로 흩어진다. 그룹마다 run()을 새로 부르므로
+# 휴식 카운터가 run() 지역 변수면 batch_size(8~12)에 영영 도달하지 못한다.
+config.BATCH_SIZE_RANGE = (3, 3)        # 결정적 검증용 (실제 기본값 (8,12))
+config.BATCH_REST_RANGE = (45, 45)      #              (실제 기본값 (45,90))
+
+def _mk_search_entry(n):
+    vids = [{"id": f"s{i}", "title": f"영상{i}", "content_type": "video"} for i in range(n)]
+    return {"kind": "search", "query": "휴식테스트", "folder": None,
+            "videos_view": [dict(v, playlists=[], members_only=False, extracted=False)
+                            for v in vids],
+            "by_channel": {f"rch{i}": {"url": f"https://www.youtube.com/@rch{i}/videos",
+                                       "entries": [vids[i]]} for i in range(n)}}
+
+sleep11 = []
+reg11 = mock.MagicMock()
+reg11.names.return_value = [f"rch{i}" for i in range(9)]   # 전부 등록 → 등록 부작용 배제
+reg11.get.side_effect = lambda n: {"name": n,
+                                   "url": f"https://www.youtube.com/@{n}/videos",
+                                   "lang": "ko"}
+with mock.patch.object(_extractor_mod.Extractor, "process_video",
+                       lambda self, vid, action="new", **kw: "ok"), \
+     mock.patch.object(_extractor_mod.time, "sleep", lambda s: sleep11.append(s)), \
+     mock.patch.object(jobs, "ChannelRegistry",
+                       mock.MagicMock(return_value=reg11, extract_handle=str,
+                                      normalize_url=lambda u: u)):
+    job12 = mgr._new_job("search_run", "휴식테스트", "u")
+    mgr._job = job12
+    mgr._cancel.clear()
+    mgr._run_grouped(job12, _mk_search_entry(9), {"include_members": True}, False,
+                     group_title=None, merge_categories=False, auto_run=False)
+
+assert job12["status"] == "done" and job12["stats"]["new"] == 9, job12
+# 9영상·배치 3 → 4·7번째 영상 직전에 2회 휴식(45초). 취소 감시 때문에 1초씩 쪼개 잔다
+assert set(sleep11) == {1}, f"휴식은 1초 단위로 쪼개져야 취소에 응답한다: {set(sleep11)}"
+assert sum(sleep11) == 90, f"그룹이 9개로 쪼개져도 휴식 2회(45×2)가 와야 한다: {sum(sleep11)}"
+
+# 대조군: rest_state를 공유하지 않으면(=결함 상태) 휴식이 한 번도 오지 않는다
+sleep11b = []
+with mock.patch.object(_extractor_mod.Extractor, "process_video",
+                       lambda self, vid, action="new", **kw: "ok"), \
+     mock.patch.object(_extractor_mod.time, "sleep", lambda s: sleep11b.append(s)):
+    for i in range(9):
+        _extractor_mod.Extractor(
+            {"name": f"nrch{i}", "url": f"https://www.youtube.com/@nrch{i}/videos"}
+        ).run(entries=[{"id": f"n{i}", "title": f"영상{i}"}], pl_map={})
+assert sleep11b == [], f"대조군(비공유)은 휴식 0회여야 결함 재현이 성립한다: {sleep11b}"
+
+# 취소 중에는 남은 휴식을 끊는다 (FR18.2 응답성)
+cancelled_rest = _extractor_mod.BatchRest(cancel_check=lambda: True)
+sleep11c = []
+with mock.patch.object(_extractor_mod.time, "sleep", lambda s: sleep11c.append(s)):
+    assert cancelled_rest.take() == 0
+assert sleep11c == [], "취소 상태에서 45초를 자면 안 된다"
+print("✓ 배치 휴식: 그룹 경계를 넘어 누적(45×2) · 비공유 대조군 0회 · 취소 시 즉시 중단 (FR14.2)")
+
+print("\n429 배치 휴식(FR14.2) 크로스 그룹 검증 통과")

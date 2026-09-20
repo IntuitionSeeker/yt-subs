@@ -21,11 +21,22 @@ def cmd_add(args):
     Extractor(reg.get(name)).run()
 
 
+def bulk_targets(reg: ChannelRegistry, channel: str = None) -> list:
+    """
+    일괄 명령(run·transcribe)의 대상 채널 산출. FR34.7 (DQ-25)
+
+    채널을 명시하면 플래그와 무관하게 그 채널만, 인자가 없으면 `auto_run: false`
+    (검색 추출로 유입된 채널)를 제외한 전체를 순회한다.
+    **run·transcribe 두 곳이 이 헬퍼를 공유한다** — 한쪽만 고쳐지는 드리프트를 막는다.
+    """
+    return [channel] if channel else reg.names(auto_only=True)
+
+
 def cmd_run(args):
     """전체 또는 특정 채널 업데이트. FR7.3"""
     from extractor import Extractor
     reg = ChannelRegistry()
-    targets = [args.channel] if args.channel else reg.names()
+    targets = bulk_targets(reg, args.channel)
     if not targets:
         log.info("등록된 채널이 없습니다. './yt.sh add URL' 로 추가하세요.")
         return
@@ -37,7 +48,7 @@ def cmd_transcribe(args):
     """무자막(sub_type=none) 영상 Whisper 전사. FR30.1"""
     from transcriber import Transcriber
     reg = ChannelRegistry()
-    targets = [args.channel] if args.channel else reg.names()
+    targets = bulk_targets(reg, args.channel)
     if not targets:
         log.info("등록된 채널이 없습니다. './yt.sh add URL' 로 추가하세요.")
         return

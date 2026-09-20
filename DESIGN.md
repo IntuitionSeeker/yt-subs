@@ -1,8 +1,8 @@
 # DESIGN — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v4.5  
+> **버전:** v5.5  
 > **작성일:** 2026-08-09  
-> **연계 문서:** REQUIREMENTS.md v4.5 (FR1~FR23)  
+> **연계 문서:** REQUIREMENTS.md v5.5 (FR1~FR34)  
 > **주요 변경:** 질의 인터페이스(FR9)·질의 하네스(FR10)·웹 대시보드(FR11~12) 설계 편입,
 > 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20) 설계 추가,
@@ -27,6 +27,8 @@
 > **v5.2 (버그 수정):** 스캔 정합성(FR32) — `_ydl_opts`에 `extractor_args.youtube.lang` 주입(DQ-20), `ChannelRegistry.resolve_name` 신설 후 `_do_scan`·`_entry_channel`이 레지스트리 역조회 사용(DQ-19). 신규 결정 DQ-19·DQ-20
 > **v5.4:** Whisper 전사 진행률(FR30.6) — `transcriber.progress_percent`(t/duration → 0~100, 비정상 입력은 0)와 `with_progress(segments, duration, on_progress)` 제너레이터 신설. faster-whisper의 segments는 지연 생성자라 **통과시키며** 보고한다(따로 순회하면 재전사·빈 결과). 진행률은 자막 시각 기준이라 단조 증가하지만 VAD가 건너뛴 무음 때문에 경과 시간과 정비례하지는 않는다. CLI는 10% 단위 로그, `on_progress`는 대시보드 접점으로만 열어두고 배선은 하지 않는다(FR30.5 유지)
 > **v5.0 (v3):** 챕터(FR27) — `meta_collector.save`가 info.chapters를 `[{start,end,title}]`로 정규화 저장, `/subtitle` 응답 확장, 상세 패널 챕터 링크. Markdown(FR28) — `/export/markdown` 서버 조립 + 프론트 Blob 다운로드. RSS(FR29) — 신규 `rss_monitor.py`(channel_id 해석 1회 캐시 → channels.yaml, 피드 파싱은 표준 xml.etree), `/channels/new`, 추출 탭 🔔 버튼(수동 트리거 — NFR3 유지). Whisper(FR30) — 신규 `transcriber.py`(faster-whisper CPU int8, 오디오 bestaudio 임시 다운로드, 세그먼트→SRT→기존 txt 경로), `sub_type="whisper"` 도입(stats.extracted 포함·decide 스킵), CLI `transcribe` 명령. 신규 결정 DQ-18(whisper sub_type 취급)
+> **v5.5:** 검색 기반 일괄 추출(FR34, §2.1·§2.10·§3.9·§5.1·§5.7·§5.9) — `classify_url` search 분기, `_build_search_url`(검색어+`sp` 프리셋+`playlist_items` 상한), `_do_scan_search`(flat 스캔·duration 필터·원채널 state 조회), `_run_search`(`_run_playlist` 재사용, `pl_map={}`), `ChannelRegistry.set_auto_run`·`names(auto_only=)`와 공통 헬퍼 `main.bulk_targets`로 검색 유입 채널을 `cmd_run`·`cmd_transcribe` 전체 순회에서 제외. 신규 결정 DQ-23~DQ-29, 검증 V-U18~20·V-D14~16. 검증 중 드러난 **기존 결함**(배치 휴식 카운터가 `run()` 지역 변수라 그룹 전환마다 리셋 → 검색 경로에서 FR14.2가 무력화, 다채널 재생목록도 동일)을 `extractor.BatchRest` + `run(rest_state=)`로 수정하고 공통 워커 `_run_grouped`가 그룹 루프 바깥에서 공유한다 — 신규 결정 DQ-30, 검증 V-U21, FR14.2에 "휴식은 작업 단위 누적·채널 경계에서 리셋하지 않는다" 명시. 쇼츠 전용 라벨 부재 실측(DQ-23)에 따라 **영상 길이 노출**(FR20.5~20.6) 동반 — `list_videos`가 meta.json의 `duration`·`duration_string`을 그대로 내려보내고(백필 없음, DQ-29) 라이브러리·검색 미리보기가 공유 포맷터로 표시  
+> **v5.5 정합 정정 (2026-09-20, 문서 전용):** §9.1을 전면 재정렬해 V-U 번호 충돌·누락을 해소했다 — **정본은 `tests/test_unit.py`**(실행되는 것이 진실). 구 목록의 `V-U12 reflow_sentences`·`V-U13 live guard`는 테스트 파일이 쓰는 `V-U12 채널 폴더(FR25.1)`·`V-U13 챕터 정규화(FR27.1)`에 자리를 내주고 번호를 폐기(검증 자체는 §9.1b에 존치), 누락돼 있던 V-U14(Whisper SRT 조립)·V-U15(RSS 파싱)·V-U16(이름 변경)·V-U11b(재생목록 URL 분류)를 편입했다. 코드·FR 변경 없음
 
 ---
 
@@ -79,6 +81,10 @@ channels.yaml│
 | `normalize_url(url)` | 디코드 + `/videos` 부착 정규화 |
 | `add(url, lang)` | channels.yaml 등록, 채널명 반환 |
 | `remove(name)` / `list()` / `get(name)` / `names()` | 등록 해제·조회 |
+| `resolve_name(url)` | URL → **등록명 역조회** (`extract_handle` 값 일치, 대소문자 무시). 실패 시 `extract_handle` 폴백 (FR32.2·DQ-19) |
+| `rename(old,new)` / `set_group(name,group)` / `set_channel_id(name,id)` | 이름 변경(FR31.1)·폴더 지정(FR25.1)·RSS channel_id 캐시(FR29.1) |
+| `set_auto_run(name, flag)` | `auto_run` 플래그 기록 (FR34.7). **`True`이면 필드를 제거**한다 — 기본값이 `True`이므로 참값을 쓰면 yaml에 의미 없는 잡음이 쌓인다(`set_group`의 빈 값 처리와 동일 패턴). 미등록 채널은 `KeyError` |
+| `names(auto_only=False)` | 기본 동작(전체 반환)은 **바꾸지 않는다** — `names()`는 `cmd_*` 대상 산출 외에 `jobs.py`의 등록 여부 확인(`name not in reg.names()`)에도 쓰이므로, 기본값을 바꾸면 검색 유입 채널이 "미등록"으로 오판돼 매번 재등록·폴더 재지정된다. `auto_only=True`일 때만 `auto_run is False`인 채널을 제외하며, 이 인자를 쓰는 곳은 **`main.bulk_targets`(채널 인자 없음) 한 곳뿐**이고 `cmd_run`·`cmd_transcribe`가 그 헬퍼를 공유한다 (FR34.7·DQ-25) |
 
 ### 2.2 Extractor (`extractor.py`) — FR1·2·13~17
 
@@ -95,7 +101,7 @@ channels.yaml│
 | `_out_of_range(upload_date, date_range)` | 기간 조건(`{"since","until"}`, YYYYMMDD, 경계 포함) 판정. 범위 밖이면 자막을 받지 않고 `extract_log.csv`에 `status="date_skip"` 1행만 기록하고 **state.json에는 기록하지 않는다**(조건을 바꾼 다음 실행에서 다시 대상이 되어야 하므로). `upload_date`가 없거나 `"00000000"`이면 판정 불가 → 통과 (FR2.6과 같은 보수 원칙) |
 | `_fetch_vtt(url)` | 자막 직접 다운로드: 자체 딜레이 + 쿠키 + 브라우저 UA (FR13.4) |
 | `_report(progress, phase, done, total, current_title, stats)` | 진행 콜백 호출 헬퍼(FR18.1~2). `progress=None`이면 즉시 `True` 반환(CLI 경로 무영향), 콜백 내부 예외는 삼키고 "계속"으로 간주. `stats`는 얕은 복사본으로 전달(폴링 스레드의 직렬화 레이스 방지) |
-| `run(force_vid, limit, progress, entries, pl_map, date_range)` | 채널 루프: 429 지수 백오프(FR14.3)·배치 휴식(FR14.2)·연속 429 중단(FR13.5)·카나리아 `--limit`(FR14.5)·멤버십 감지 스킵. **신규 4인자가 모두 None이면 기존 CLI 동작과 완전 동일**(FR18.1, 반환 dict에 `date_skip:0` 키만 추가). `entries`/`pl_map`이 주어지면 `scan_channel()`/`scan_playlists()`를 건너뛰고 대시보드 스캔 캐시를 그대로 사용(DQ-13). `date_range`는 해석 없이 `process_video`로 전달(DQ-12). `progress`가 False를 반환하면 우아한 취소 — 루프 break → `finishing` 보고 → `state.save()` → (`pl_map` 있으면) `_backfill_meta()` → 최종 로그 → `stats["cancelled"]=True`로 반환 (FR18.2). 인덱싱은 이 함수 범위 밖(DQ-14) |
+| `run(force_vid, limit, progress, entries, pl_map, date_range, rest_state)` | 채널 루프: 429 지수 백오프(FR14.3)·배치 휴식(FR14.2)·연속 429 중단(FR13.5)·카나리아 `--limit`(FR14.5)·멤버십 감지 스킵. **신규 4인자가 모두 None이면 기존 CLI 동작과 완전 동일**(FR18.1, 반환 dict에 `date_skip:0` 키만 추가). `entries`/`pl_map`이 주어지면 `scan_channel()`/`scan_playlists()`를 건너뛰고 대시보드 스캔 캐시를 그대로 사용(DQ-13). `date_range`는 해석 없이 `process_video`로 전달(DQ-12). `rest_state`(`BatchRest`)를 주면 배치 휴식 카운터를 **호출 경계를 넘어 공유**한다 — 그룹 추출은 채널마다 `run()`을 새로 부르므로 지역 카운터로는 휴식이 오지 않는다(FR14.2, 검색은 영상당 채널이 달라 치명적). None이면 이 호출 전용 상태를 새로 만든다(기존 CLI 동작). `progress`가 False를 반환하면 우아한 취소 — 루프 break → `finishing` 보고 → `state.save()` → (`pl_map` 있으면) `_backfill_meta()` → 최종 로그 → `stats["cancelled"]=True`로 반환 (FR18.2). 인덱싱은 이 함수 범위 밖(DQ-14) |
 
 #### progress 콜백 계약 (FR18.1~18.2 — extractor ↔ jobs 경계)
 
@@ -152,7 +158,7 @@ dict 단일 인자 규약이라 필드를 추가해도 시그니처가 깨지지
 |---|---|
 | `search(query, top_k, since, until, collection, category)` | 벡터 검색 + 날짜 where 필터. **category는 여유분(4×) 조회 후 클라이언트 측 부분일치 필터** (ChromaDB 문자열 contains 미지원) |
 | `get_full(video_id|basename)` | txt/ 전문 로드 (RAG 미사용 경로) |
-| `list_videos(since, until)` | meta/ 순회 → video_id·title·upload_date·basename·tickers·playlists·content_type·**sub_type**·url (날짜 역순). `sub_type`은 라이브러리 뷰의 📝수동/🤖자동 뱃지용 (FR20.2) |
+| `list_videos(since, until)` | meta/ 순회 → video_id·title·upload_date·basename·tickers·playlists·content_type·**sub_type**·**duration**·**duration_string**·url (날짜 역순). `sub_type`은 📝수동/🤖자동 뱃지용(FR20.2), `duration`(초 int)·`duration_string`(표기용 str)은 길이 표시용(FR20.5). **meta.json에 이미 저장된 값을 그대로 읽는다 — 백필 없음.** 키가 없는 과거 meta는 `duration=None`·`duration_string=""`로 내린다(0으로 채우지 않음, DQ-23b) |
 | `ask(query, ...)` | search → 컨텍스트 주입 → LLM 답변 + 출처 (FR9.1·9.5) |
 | `summarize(video_id)` | 전문 로드 → LLM 구조 요약 (FR9.2) |
 
@@ -191,7 +197,7 @@ dict 단일 인자 규약이라 필드를 추가해도 시그니처가 깨지지
 
 | 항목 | 설계 |
 |---|---|
-| `classify_url(url)` | 영상(watch?v=·youtu.be·/shorts/·/live/에서 11자 ID) vs 채널(@핸들·/channel/UC), 판별 불가 시 `ValueError`→400 (FR17.1). 퍼센트 인코딩 핸들도 디코드 후 판별 |
+| `classify_url(url)` | 영상(watch?v=·youtu.be·/shorts/·/live/에서 11자 ID) → 재생목록(`/playlist?list=`) → **검색(`/results?search_query=`)** → 채널(@핸들·/channel/UC), 판별 불가 시 `ValueError`→400 (FR17.1·24.1·34.1). 퍼센트 인코딩 핸들도 디코드 후 판별. **순수 텍스트는 검색으로 승격하지 않는다** — 검색 진입은 요청 본문의 `q` 필드 전용이다 (DQ-27) |
 | `JobManager` | 모듈 싱글턴(단일 uvicorn 프로세스 전제). `threading.Thread(daemon=True)` 1개, `threading.Event` 취소, `RLock` 하 job dict 갱신. **점유 플래그(`_busy`) 1개를 추출·스캔이 공유** — 추출 중 `POST /extract/scan`도, 스캔 중 `POST /extract`도 409다(스캔은 1+N회 요청이라 결코 가볍지 않고, 동시 호출은 429 위험을 키운다). `start()`는 **요청 검증(400) → 점유 획득(409)** 순서라 잘못된 요청이 점유를 남기지 않는다 |
 | 스캔 캐시 | `scan_id → {channel, url, videos_view, entries, pl_map, created_at}` TTL 10분 (FR17.3·DQ-13). API 응답용 `videos_view`뿐 아니라 **원본 flat `entries`와 `pl_map`을 함께 보관**하는 것이 핵심이다 — 추출 시 `Extractor.run(entries=, pl_map=)`으로 그대로 넘겨 재스캔(1+N회 요청 중복)을 없앤다. 만료·부재 시 `ValueError`→400 |
 | `apply_filters(videos, f)` | ⓒ카테고리(OR·재생목록 제목 완전일치, 카테고리 선택 시 재생목록 없는 영상 제외) → ⓓ멤버십(`include_members=false`면 제외) → ⓔ키워드(소문자 부분일치) 를 AND로 적용한 뒤 **마지막에 `out[:latest]`**. ⓑ기간은 여기서 적용하지 않는다(DQ-12). 프론트 `applyFilters()`와 동일 순서가 계약이다 (DQ-15) |
@@ -201,6 +207,22 @@ dict 단일 인자 규약이라 필드를 추가해도 시그니처가 깨지지
 | 후처리 | `index` 옵션이 켜져 있고 **취소가 아니며** 신규+수정 > 0일 때만 같은 스레드에서 `KLIndexer.index_all()` (FR17.9·DQ-14) |
 | 지연 임포트 가드 (F-6) | `extractor` 모듈은 `_app_extractor()` 헬퍼로만 로드한다. yt-dlp 실행이 legacy 플러그인 탐색으로 site-packages의 `ytdlp_plugins` 경로를 등록하면 이후의 맨 `import extractor`가 그 서브패키지로 **섀도잉**된다 — 실증: 첫 스캔은 200, 같은 프로세스의 두 번째 스캔이 ImportError (2026-08-04 발견). 헬퍼는 sys.modules 캐시에 올바른 모듈(`Extractor` 속성 보유)이 있으면 재사용하고, 오염 시 앱 루트를 sys.path 최우선으로 되돌려 재임포트한다. mock 테스트의 가짜 `extractor` 주입과도 호환 |
 | `is_busy()` (FR21.4) | `_busy` 플래그를 락 하에 읽어 반환하는 공개 헬퍼. `server.py`의 삭제 엔드포인트가 진행 중인 추출·스캔과 파일 정리가 겹치지 않도록 이 값으로 409를 판단한다(사설 속성 직접 접근 대신) |
+
+**검색 추출 (FR34) — 재생목록 경로의 소스 치환**
+
+| 항목 | 설계 |
+|---|---|
+| `SP_PRESETS` | `period` → `sp` 문자열 상수 맵. `type=video`를 반드시 포함해야 재생목록·채널 엔트리 혼입이 사라져 `uploader_id`·`duration` 커버리지가 100%가 된다. **6종 전부 실측 확정(2026-09-20, `_workspace/17b`):** `all → "EgIQAQ"`(동영상 필터만) · `hour → "EgQIARAB"` · `today → "EgQIAhAB"` · `week → "EgQIAxAB"` · `month → "EgQIBBAB"` · `year → "EgQIBRAB"`. 알 수 없는 값은 `all`로 폴백한다 (FR34.4·DQ-24) |
+| `_build_search_url(q, period)` | `https://www.youtube.com/results?search_query={quote_plus(q)}&sp={SP_PRESETS[period]}` — yt-dlp `youtube:search_url` 추출기가 받는다. `ytsearchN:` 구문도 동작하지만 **`sp` 필터를 실을 수 없어** 쓰지 않는다 (FR34.1·34.4) |
+| `_search_opts(limit)` | `{**_flat_opts(), "playlist_items": f"1-{limit}"}` — ⓐ개수 상한을 스캔 단계에서 절단한다. `_flat_opts()`를 거치므로 `extractor_args.youtube.lang`(DQ-20)이 검색 경로에도 그대로 적용된다 (FR34.2) |
+| `scan_search(q, limit, min_duration, period, folder)` | 검색 스캔 공개 진입점. `normalize_search_params()`로 조건을 정규화·검증(위반 → `ValueError`→400, 점유 획득 **전**)한 뒤 점유를 잡고 `_do_scan_search`를 돈다. `/results?search_query=` URL을 `scan(url)`로 넣으면 `search_query_from_url()`로 검색어만 복원해 **기본 조건**으로 이 경로를 탄다 — URL에 박힌 `sp`는 쓰지 않는다(조건의 단일 출처는 대시보드 UI여야 미리보기와 실제가 어긋나지 않는다) |
+| `_do_scan_search(q, limit, min_duration, period, folder)` | `_do_scan_playlist`와 **같은 골격**(엔트리 그룹핑은 공통 헬퍼 `_group_flat_entries(entries, min_duration=None)`로 추출해 두 경로가 **같은 코드**를 쓴다): flat 스캔 → 엔트리별 `_entry_channel(e, reg)`로 원채널 해석(FR32.3) → `by_channel` 그룹핑 → 채널별 `StateManager`로 `extracted` 판정 → `videos_view` 조립 → 캐시. 차이는 세 가지다. ① **ⓑduration 필터**: `e["duration"]`이 있고 `min_duration` 미만이면 제외, **`duration` 결측은 포함**(DQ-23). ② `live_status` 선제외 분기가 **동작하지 않는다**(검색 flat에 키 자체가 없음 — 실측 0/15) → 진행 중 라이브는 처리 시 FR16.5 가드가 잡는다(DQ-26). ③ 캐시 항목이 `kind:"search"`·`query`·`folder`를 갖고 `playlist_title`은 없다. `videos_view` 항목에는 **`duration`(초, int \| null)을 실어 보낸다** — 쇼츠 라벨이 없어 사용자가 길이를 직접 보고 판단해야 하기 때문이다(FR34.5·DQ-23). flat 엔트리에는 `duration_string`이 없으므로 표기는 프론트 공유 포맷터가 초에서 만든다(FR20.6) |
+| 스캔 캐시(검색) | `{scan_id, kind:"search", query, folder, channel(=표시용 검색어), url(조립된 results URL), videos_view, by_channel, created_at}` — TTL·점유 규칙은 기존과 동일(DQ-13) |
+| `_run_search(job, entry, filters, index)` | `_run_playlist`와 **동일 로직**이므로 공통 워커로 추출하고 두 인자만 달리 넘긴다: `group_title = entry["folder"]`(신규 채널 폴더 지정용, FR34.6), `merge_categories=False` → **`Extractor.run(pl_map={})`**(검색어는 카테고리로 병합하지 않음, FR34.10·DQ-28). **`None`이 아니라 빈 dict를 넘긴다** — `run(pl_map=None)`은 `scan_playlists()`를 호출해 채널마다 추가 요청이 나가고 `_backfill_meta`까지 돌아 DQ-28이 말하는 "병합 없음"이 성립하지 않는다. 빈 dict는 스캔도 백필도 건너뛴다. 신규 등록 시 `reg.add(...)` → `reg.set_group(name, group_title)` → **`reg.set_auto_run(name, False)`**(FR34.7). 기존 등록 채널은 `group`·`auto_run` 모두 건드리지 않는다 |
+| 공통 워커 `_run_grouped(job, entry, filters, index, group_title, merge_categories, auto_run)` | `_run_playlist`(재생목록: `group_title=playlist_title`·`merge_categories=True`·`auto_run=True`)와 `_run_search`(검색: `group_title=folder`·`merge_categories=False`·`auto_run=False`)가 **같은 본문**을 쓴다. 재생목록 경로의 기존 동작은 인자 기본값으로 완전히 보존된다 |
+| 빈 `pl_map`의 파급 | `Extractor.run(pl_map={})`이면 `if pl_map:`이 거짓이라 `_backfill_meta()`가 호출되지 않는다 — DQ-17이 경고한 "부분 맵으로 기존 카테고리 전멸" 사고가 **구조적으로 불가능**해진다. 검색 대상 영상의 `playlists`는 다음 전체 run의 백필(FR15.5)로 채워진다 (FR17.2 단일영상 선례와 동일) |
+| `_group_flat_entries`의 부수 효과 | 재생목록 스캔(`_do_scan_playlist`)의 `videos_view`에도 `duration`이 함께 실린다 — 공통화의 결과이며 순수 추가 필드다. 프론트는 같은 `fmtDuration`으로 재생목록 미리보기에도 길이를 표시한다(비용 0: flat 엔트리가 이미 갖고 있는 값) |
+| `apply_filters` | 변경 없음. ⓑ는 스캔 단계에서 이미 적용됐고 ⓒ카테고리 칩은 비어 있다. ⓐ최신N의 "최신"은 **검색 결과 순서**(YouTube 관련도 정렬)를 뜻한다 — 날짜순이 아니다(FR34.11·FR17.4ⓐ 비고와 같은 제약) |
 
 ### 2.11 cookie_health.py — FR19
 
@@ -248,7 +270,7 @@ scan_playlists() ─ video_id→재생목록 매핑 (FR15, 요청 1+N회)
   decide(vid, mod, up)     ─ 날짜 미제공 → skip (FR2.6)
   ├ skip                   → 통과
   ├ limit 도달             → 카나리아 종료 (FR14.5)
-  ├ 8~12개(랜덤)마다 45~90초(랜덤) 휴식 (FR14.2)
+  ├ 8~12개(랜덤)마다 45~90초(랜덤) 휴식 (FR14.2, BatchRest — 그룹 추출은 채널 간 공유)
   └ process_video(vid, action, content_type, pl_map)
       ├ 성공   → stats, 429카운터 리셋
       ├ 멤버십 → _mark_skip(members_only)
@@ -303,6 +325,29 @@ GET /cookies → present·mtime + (detected_at ≥ 쿠키 mtime ? 경고 : 해�
               단 대시보드에서 include_members=false면 대상 단계에서 제외 (FR17.4ⓓ 우선)
 ```
 
+### 3.9 검색 기반 일괄 추출 (FR34)
+
+```
+검색어 q + ⓐlimit + ⓑmin_duration + ⓒperiod + folder
+  → POST /extract/scan {q, limit, min_duration, period, folder}
+      → _build_search_url(q, period)   …/results?search_query=q&sp=<프리셋>   ← ⓒ 1층: 서버측 프리필터
+      → flat 스캔  _search_opts(limit) = {extract_flat, playlist_items:"1-N"}  ← ⓐ 상한
+      → 엔트리별: duration < min_duration ? 제외 : 통과                        ← ⓑ (결측은 통과)
+                  _entry_channel(e, reg) → 원채널 해석(DQ-19) → by_channel
+                  state 조회 → extracted / members_only(state만)
+      → scan_id 캐시 {kind:"search", query, folder, videos_view, by_channel}
+  → 조건 UI (ⓐ최신N·ⓓ멤버십·ⓔ키워드 + ⓒ임의 날짜 since/until)
+  → POST /extract {scan_id, filters, index}  → job kind="search_run"
+      → 채널 그룹 순차:
+           미등록이면 registry.add → set_group(folder) → set_auto_run(False)   ← FR34.6~34.7
+           Extractor.run(entries=g, pl_map={}, date_range=…, progress=cb)
+              └ 영상별 full info → upload_date로 ⓒ 2층 확정 → 범위 밖 date_skip (DQ-12)
+                              → is_live/is_upcoming → live_wait (FR16.5, 검색 경로의 유일한 라이브 방어)
+      → 변경 있는 채널만 index_all(on_progress=) → done
+결과: 각 영상은 원채널 폴더에 저장되고, 신규 채널들은 folder 하나로 묶여 라이브러리에 보인다.
+      그 채널들은 ./yt.sh run(인자 없음)의 순회 대상이 아니다.                   ← DQ-25
+```
+
 ---
 
 ## 4. 출력 폴더 구조
@@ -333,7 +378,13 @@ channels:
     lang: ko
     added_at: "2026-06-21"
     note: ""
+    group: "AI LLM Wiki"       # 선택 — 라이브러리 폴더 (FR25.1)
+    channel_id: "UCxxxxxxxx"   # 선택 — RSS 1회 해석 캐시 (FR29.1)
+    auto_run: false            # 선택 — ./yt.sh run·transcribe 전체 순회 제외 (FR34.7)
 ```
+
+> 선택 필드는 **값이 기본값이면 기록하지 않는다**: `group`은 빈 값이면 제거(FR25.1), `auto_run`은 `true`이면 제거.
+> 따라서 **`auto_run` 부재 = `true`**(기존 channels.yaml은 무변경으로 종전과 동일하게 동작한다).
 
 ### 5.2 state.json (채널별)
 
@@ -390,7 +441,7 @@ channels:
 ```json
 {
   "job_id": "20260802-153012",
-  "kind": "channel_run | single_video",
+  "kind": "channel_run | single_video | playlist_run | search_run",
   "channel": "두두감자", "url": "입력 URL",
   "status": "running | done | cancelled | error",
   "phase": "registering | extracting | indexing | finishing",
@@ -407,6 +458,8 @@ channels:
 - **stats 8키(`live_wait` 포함)는 job 생성 시 0으로 선점**한다 — extractor가 늦게 채워도 프론트가 `undefined`를 보지 않는다.
 - `stats["cancelled"]`(bool)은 **취소된 실행에서만** 존재하는 추가 키다. 카운터가 아니므로 집계 시 화이트리스트(위 8키)로만 합산한다.
 - `done`은 skip된 영상도 포함해 증가한다(진행률이 `total`에 도달). 따라서 **`total == new+updated+skip+no_sub+members_only+error+date_skip`**(V-D11의 등식).
+  **검색 작업(`search_run`)에서는 `live_wait`를 등식에 포함한다** — 채널·재생목록 스캔은 `live_status`로 진행 중 라이브를 사전 제외하지만
+  검색 flat에는 그 필드가 없어(실측 0/15) 진행 중 라이브가 대상에 남고 처리 시 FR16.5 가드가 `live_wait`로 집계하기 때문이다 (DQ-26).
 - `status`는 `done|cancelled|error`로 끝나며 마지막 job은 메모리에 유지된다. `{"status":"idle"}`는 프로세스 기동 후 한 번도 작업이 없었을 때만.
 
 ### 5.8 output/.cookie_status.json (FR19.2)
@@ -421,13 +474,15 @@ channels:
 
 | 메서드/경로 | 요청 | 응답(성공) | 오류 |
 |---|---|---|---|
-| `POST /extract/scan` | `{url}` | `{scan_id, channel, videos:[{id,title,content_type,playlists,members_only,extracted}], playlists:[제목…]}` | 400 판별불가·영상 URL·핸들 추출 실패 / 409 작업(추출·스캔) 실행 중 |
+| `POST /extract/scan` | `{url}` 또는 `{q, limit, min_duration, period, folder}` | `{scan_id, kind, channel, videos:[{id,title,channel?,content_type,playlists,members_only,extracted,duration?}], playlists:[제목…]}` | 400 판별불가·영상 URL·핸들 추출 실패·`url`과 `q` 동시 지정·`q` 공백·`limit` 범위 밖 / 409 작업(추출·스캔) 실행 중 |
 | `POST /extract` | `{url, index}` 또는 `{scan_id, filters:{latest,since,until,categories,include_members,keyword}, index}` | 202 `{job}` | 409 실행중 `{detail, job}` / 400 (아래 판정 규칙) |
 | `GET /extract/status` | – | `{job}` 또는 `{job:{status:"idle"}}` | – |
 | `POST /extract/cancel` | – | `{cancelled: bool}` (실행 중 작업이 없으면 `false`) | – |
 | `GET /cookies` | – | `{present, mtime, warning, warning_message, detected_at}` | – |
-| `GET /channels/stats` | – | `{channels:[{name,url,lang,added_at,extracted,members_only,no_sub,total_known,last_extracted}]}` | – |
+| `GET /channels/stats` | – | `{channels:[{name,url,lang,added_at,group,auto_run,extracted,members_only,no_sub,total_known,last_extracted}]}` | – |
+| `POST /channels/auto_run` | `{channel, auto_run}` | `{channel, auto_run}` | 404 미등록 / 409 작업 중(FR21.4 `is_busy`) |
 | `GET /subtitle` | `?channel=&basename=` | `{basename, text}` (txt 전문) | 400 경로탈출(`channel`·`basename` 양쪽 검사), 404 파일 없음 |
+| `GET /videos` | `?channel=` | `{videos:[{video_id,title,upload_date,basename,tickers,playlists,content_type,sub_type,duration,duration_string,url}]}` (날짜 역순) | 400 채널 누락·경로탈출 |
 
 **`POST /extract` 요청 판정 규칙 (전부 400 `{detail}`):**
 
@@ -436,6 +491,10 @@ channels:
 3. `url`이 채널로 분류됨 → 400 "채널 URL은 `/extract/scan`을 먼저 호출하세요." (무조건 전체 추출 폭주 방지 — 채널은 반드시 스캔·조건 단계를 거친다)
 4. `url` 판별 불가 → 400 (FR17.1)
 5. `scan_id`가 **만료(TTL 10분 초과)되었거나 존재하지 않음** → 400 "scan_id가 만료되었습니다. 다시 스캔하세요." (410 신설 없이 §5.9 오류 집합 유지)
+
+**`POST /extract/scan` 검색 요청 판정 규칙 (전부 400 `{detail}`):** `url`과 `q` 동시 지정 · 둘 다 없음 · `q`가 공백 ·
+`limit`이 1~50 밖 · `min_duration`이 음수. `period`는 알 수 없는 값이면 400이 아니라 `all`로 폴백한다(조건 완화는 안전 방향).
+`folder`는 트림 후 비면 `q`를 쓴다 (FR34.1~34.6).
 
 **409 규칙:** 추출·스캔이 점유 플래그 하나를 공유하므로 `POST /extract`와 `POST /extract/scan`은 **서로에 대해서도** 409를 낸다.
 409 본문은 `{detail, job}`이며 `job`은 직전 job 스냅샷 또는 `null`(스캔만 돌던 중이면 null일 수 있음)이다.
@@ -463,9 +522,9 @@ channels:
 yt-subs/
 ├── yt.sh                  # 래퍼 (FR8)
 ├── channels.yaml          # 채널 등록부 (FR7)
-├── main.py                # CLI 진입점
+├── main.py                # CLI 진입점 (bulk_targets = run·transcribe 대상 산출, FR34.7)
 ├── config.py              # 상수·경로·yt-dlp 옵션·429/쿠키 설정
-├── channel_registry.py    # FR7
+├── channel_registry.py    # FR7·25.1·29.1·31.1·34.7
 ├── extractor.py           # FR1·2·13~17
 ├── state_manager.py       # FR2·19.1
 ├── meta_collector.py      # FR3·12.2·15.2
@@ -477,7 +536,7 @@ yt-subs/
 ├── cookie_health.py       # FR19 (YDLLogger·상태 영속·get_status)
 ├── dashboard/
 │   ├── server.py          # FastAPI (FR11·17~20)
-│   ├── jobs.py            # JobManager·classify_url·apply_filters (FR17~18)
+│   ├── jobs.py            # JobManager·classify_url·apply_filters·재생목록/검색 워커 (FR17~18·24·34)
 │   └── index.html         # 단일 파일 UI (질의·라이브러리·추출 3탭)
 ├── tests/                 # test_unit.py · test_integration.py · conftest.py
 ├── COOKIES_GUIDE.md       # 쿠키 추출 절차 (FR13 연계)
@@ -513,33 +572,69 @@ yt-subs/
 
 ## 9. 검증 설계 (Verification Design)
 
-### 9.1 단위 테스트 (tests/test_unit.py — 네트워크 불필요)
+### 9.1 단위 검증 (V-U — 네트워크 불필요)
 
-```
-V-U1 make_basename        파일명 형식·srt/txt 동일성
-V-U2 vtt_to_srt           변환 정확성 · 자동자막 dedup 2패턴(누적형·슬라이딩형 F-7)
-V-U3 subtitle_priority    수동 우선 폴백
-V-U4 is_updated           수정 감지 + FR2.6 날짜 미제공 무변경
-V-U5 quality_rules        SUSPECT 판정
-V-U6 chunk_by_srt         120초 윈도우·start_seconds
-V-U7 extract_handle       URL→채널명
-V-U8 scan 병합·live 필터   videos+streams 병합, is_live 제외, 중복 시 video 우선 (FR16)
-V-U9 playlists 매핑·백필   복수 소속 보존, 탭 없음 빈 매핑, 백필 갱신·무변경 스킵 (FR15)
-V-U10 members 재시도       쿠키 유/무별 decide 판정 (FR19.1) — 구현됨
-V-U11 classify_url        영상/채널/판별불가 8케이스 (FR17.1) — tests/test_unit.py 편입 완료
-V-U12 reflow_sentences     문장 단위 개행 한·영/무공백 한글/소수점 보존 (FR23) — 3케이스
-V-U13 live guard           is_live/is_upcoming → live_wait + state 미기록, was_live 정상 경로 (FR16.5)
-V-U17 transcribe progress  퍼센트 계산(클램프·duration 0·비정상 입력), 진행률+SRT 동시 산출,
-                          지연 생성자 1회 소비 (FR30.6)
-                          (2026-08-04, 25 passed로 게이트 검증)
-```
+> **정본은 코드다 (2026-09-20 번호 충돌·누락 전면 해소).** 아래 ID·대상은 `tests/test_unit.py`의
+> 섹션 헤더 주석과 **1:1**로 맞춘 것이다. 목록에 없는 V-U 번호는 존재하지 않고, 테스트에 있는
+> 검증은 번호가 없더라도 §9.1b에 전부 기록한다. 신규 번호는 **V-U22**부터 잇는다.
+
+#### 9.1a 번호 부여 항목 (V-U1~V-U21)
+
+| ID | 대상 | FR·DQ | 위치 |
+|---|---|---|---|
+| V-U1 | `make_basename`·특수문자 정규화 — 파일명 형식·srt/txt 동일성 | FR1.4~1.5 | `tests/test_unit.py` §V-U1 |
+| V-U2 | `vtt_to_srt` 변환 정확성 · 자동자막 dedup 2패턴(누적형·슬라이딩형 F-7) · `srt_to_txt` | FR1.3 | `tests/test_unit.py` §V-U2 |
+| V-U3 | `subtitle_priority` 수동 우선 폴백 | FR1.2 | **테스트 미구현** (v1 설계 항목 — 검증 의도만 보존, 구현 시 이 번호 사용) |
+| V-U4 | `StateManager.decide` 수정 감지(skip/updated/new) + FR2.6 날짜 미제공 무변경 | FR2.2·FR2.6 | `tests/test_unit.py` §V-U4 |
+| V-U5 | `quality_rules` SUSPECT 판정(정상·과소·반복)·한글 비율 | FR4.2 | `tests/test_unit.py` §V-U5 |
+| V-U6 | `chunk_by_srt` 120초 윈도우·`start_seconds` · `chunk_text` | FR6.2 | `tests/test_unit.py` §V-U6 |
+| V-U7 | `extract_handle`(URL→채널명·URL 인코딩)·`normalize_url` | FR7.6 | `tests/test_unit.py` §V-U7 |
+| V-U8 | scan 병합·live 필터 — videos+streams 병합, is_live/is_upcoming 제외, 중복 시 video 우선, streams 탭 없는 채널 graceful | FR16 | `.claude/skills/pipeline-verify/scripts/mock_scan_test.py` ①② (pytest 아님) |
+| V-U9 | playlists 매핑·백필 — 복수 소속 보존, 탭 없음 → 빈 매핑, 백필 신규 필드 추가·갱신·무변경 스킵 | FR15 | `mock_scan_test.py` ③④⑤ (pytest 아님) |
+| V-U10 | members_only 재시도 — 쿠키 유/무별 `decide` 판정 | FR19.1·DQ-10 | `tests/test_unit.py` §V-U10 |
+| V-U11 | `classify_url` 영상/채널/판별불가 8케이스 | FR17.1 | `tests/test_unit.py` §V-U11 |
+| V-U11b | `classify_url` 재생목록 — `/playlist?list=` 인식 · `watch?v=…&list=` 는 영상 우선 | FR24.1 | `tests/test_unit.py` §V-U11b |
+| V-U12 | 채널 폴더 — `set_group` 지정·yaml 영속, 빈 값 → 필드 제거(해제), 미등록 채널 KeyError | FR25.1 | `tests/test_unit.py` §V-U12 |
+| V-U13 | 챕터 정규화 — `_normalize_chapters` 초 단위 내림·제목 trim·`None` 보정·비-dict 항목 제거·`None` 입력 `[]` | FR27.1 | `tests/test_unit.py` §V-U13 |
+| V-U14 | Whisper SRT 조립 — `_srt_ts` 밀리초 포맷 · `segments_to_srt` 빈 텍스트 세그먼트 제외 | FR30.2 | `tests/test_unit.py` §V-U14 |
+| V-U15 | RSS 피드 파싱 — `fetch_feed` videoId/title/published 추출 · `resolve_channel_id`(`/channel/UC…`는 무요청, `@핸들`은 HTML 해석) | FR29.2 | `tests/test_unit.py` §V-U15 |
+| V-U16 | 이름 변경 — registry rename(설정 보존·미존재 KeyError·중복 ValueError), 채널 폴더 이동, 영상 제목·카테고리 일괄(메타·playlists.json·ChromaDB 메타 동기화) | FR31 | `tests/test_unit.py` §V-U16 |
+| V-U17 | transcribe progress — 퍼센트 계산(클램프·duration 0·비정상 입력), 진행률+SRT 동시 산출, 지연 생성자 1회 소비 | FR30.6 | `tests/test_unit.py` §V-U17 |
+| V-U18 | 검색 스캔 조립·필터 — `classify_url` search 분기(results URL 인식 / 순수 텍스트는 ValueError), `_build_search_url`(quote_plus·sp 프리셋·미지 period→all), `_search_opts`(`playlist_items="1-N"`), duration 필터(임계 미만 제외 / 이상 통과 / 결측 통과) | FR34.1~34.4 | `tests/test_unit.py` §V-U18 |
+| V-U19 | auto_run 플래그 — `set_auto_run(False)` 기록·(True) 필드 제거·필드 부재는 True 간주, `names()` 기본 전체 반환(회귀)·`names(auto_only=True)`만 제외, `main.bulk_targets`(cmd_run·cmd_transcribe 공용) 인자 없으면 제외/채널 명시하면 포함, rename이 auto_run 보존 | FR34.7 | `tests/test_unit.py` §V-U19 |
+| V-U20 | 길이 노출·포맷 — `list_videos`가 meta의 `duration`/`duration_string` 통과, 키 없는 meta는 `None`/`""`(0 아님, 백필 없음 DQ-29), `fmtDuration` 초→m:ss·h:mm:ss·null→빈칸 | FR20.5~20.6·DQ-29 | `tests/test_unit.py` §V-U20 (node 미설치 시 `fmtDuration` 실행 테스트 1건 skip) |
+| V-U21 | 배치 휴식 크로스 그룹 — `BatchRest` 휴식마다 시간·배치 크기 재추첨(범위 내·고정 아님)·휴식 후 카운터 리셋 / `cancel_check` 없으면 단일 sleep(CLI 동일), 있으면 1초 틱으로 쪼개져 취소 시 중단 / **rest_state 공유 시 채널 9개×1영상 `run()` 9회에서 휴식 2회 발생, 미공유 대조군은 0회(결함 재현)** / `rest_state=None`이면 CLI 동작 불변 | FR14.2·DQ-30 | `tests/test_unit.py` §V-U21 |
+
+기준선: 2026-09-20 기준 `./yt.sh test` = **60 passed / 1 skipped** (skip 1건은 컨테이너 이미지에 node가
+없는 `fmtDuration` node 실행 테스트 — 호스트 node 22에서 통과 확인).
+
+#### 9.1b 번호 미부여 검증 (테스트는 있으나 V-U 번호 없음 — FR 헤더로 식별)
+
+테스트 파일이 V-U 번호 대신 FR 번호로만 표시한 항목들이다. 코드가 정본이므로 **문서가 번호를 새로
+만들지 않는다** — 필요해지면 그때 코드 주석과 함께 V-U22 이후를 부여한다.
+
+| 테스트 헤더 (`tests/test_unit.py`) | 대상 | 비고 |
+|---|---|---|
+| `FR23` | `reflow_sentences` 문장 단위 개행 — 한·영/무공백 한글/소수점 보존 3케이스 | **구 문서의 "V-U12 reflow_sentences"** (번호 폐기, 검증은 실재) |
+| `FR16.5` | 진행 중 라이브 가드 — is_live/is_upcoming → `live_wait` + state 미기록, was_live 정상 경로 | **구 문서의 "V-U13 live guard"** (번호 폐기, 검증은 실재) |
+| `FR13.6` | Firefox 프로필 있으면 `cookiesfrombrowser` 우선, 없으면 `cookiefile` 폴백 | |
+| `FR32.1` | 제목 언어 고정 — 채널 `lang`·기본 언어·`self` 없는 호출 경로·공유 상수 비오염 | DQ-20 |
+| `FR32.2` | URL → 등록 채널명 역조회 `resolve_name` | DQ-19 |
+| `FR33.1~33.2` | 증분 인덱싱 판정 — `_unchanged`가 기존 청크 id·본문·메타 대조 | DQ-21 |
+| `종목 추출 (FR12.2)` | `extract_tickers` 티커 추출 | |
+
+mock 스크립트(`mock_scan_test.py` ⑥~⑰ · `mock_jobs_test.py` ①~⑪)에도 번호 없는 검증이 다수 있다 —
+CLI 동작 불변(FR18.1)·우아한 취소(FR18.2)·스캔 캐시 재사용(DQ-13)·date_skip 등식(V-D11 전제)·
+`--limit` 요청 예산(F-2)·쿠키 건강(FR19.2~19.3)·`mark_invalid`(F-3)·영상별 이벤트(FR26.1)·
+JobManager 동시성/취소(FR17.7~17.8)·필터 차분 대조(V-D11 전제)·재생목록 워커(FR24)·
+검색 워커(FR34.6~34.10)·배치 휴식 크로스 그룹(FR14.2). 번호가 붙은 것은 V-U8·V-U9뿐이다.
 
 ### 9.2 통합 테스트 (tests/test_integration.py — 네트워크 필요)
 
 V-I1 등록+폴더 · V-I2 2회차 SKIP · V-I3 수정 감지 · V-I4 SUSPECT 기록 ·
 V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 재시작 영속
 
-### 9.3 대시보드·기능 검증 (V-D — FR15~20)
+### 9.3 대시보드·기능 검증 (V-D — FR15~20·24~26·34)
 
 | ID | 절차 | 합격 기준 | 현황 (2026-08-04) |
 |---|---|---|---|
@@ -556,6 +651,9 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | V-D11 | 조건 추출(ⓐ~ⓔ 조합 3종) | 미리보기 대상 수 = 실제 처리 수(기간 조건은 date_skip 합산 일치) | ✅ 통과 (프론트/백엔드 필터 랜덤 3000회 차분 불일치 0, 카나리아 등식 56 = 1+48+7) |
 | V-D12 | 영상 삭제 (`POST /videos/delete`) | srt·txt·meta·desc 제거, state.json 항목 제거, ChromaDB 두 컬렉션에서 청크 제거, 라이브러리 목록에서 즉시 사라짐, 진행 중 작업 있으면 409 | ✅ 통과 — 합성 테스트 채널(`_zztest_delfeature`, 실채널과 완전 분리)로 5항목(파일·state·playlists.json·`/videos`·ChromaDB) 전부 제거 확인 + 경로탈출 400 + 미존재 404 (2026-08-08) |
 | V-D13 | 채널 삭제 (`POST /channels/delete`) | `purge=false`: 등록 해제만, `output/` 보존, 라이브러리에서 즉시 사라짐. `purge=true`: `output/{채널}/` 완전 삭제 | ✅ 통과 — 합성 테스트 채널로 `purge=false`(등록 해제+파일 보존+목록에서 사라짐) → `purge=true`(폴더 완전 삭제) 순차 검증. 실채널(두두감자·toyoungin·한균수의주식사용설명) 데이터는 검증 내내 무변경 확인 (2026-08-08) |
+| V-D14 | 검색 추출 e2e (FR34) | 검색어 + ⓐlimit 10 + ⓑ180초 미만 제외 + ⓒ이번달 프리셋으로 스캔 → 미리보기 대상 수 = 실제 처리 수(`live_wait`·`date_skip` 포함 등식) → 각 영상이 **원채널 폴더**에 저장 → 신규 등록 채널이 전부 지정 폴더 하나로 묶임 → 신규 채널만 `auto_run: false`(기존 등록 채널의 `group`·`auto_run` 불변) → `meta.playlists`에 검색어가 들어가지 않음(FR34.10) | ✅ 통과 — 격리 컨테이너 e2e 실추출: 검색어 "클로드 코드 사용법" · limit 3(기준의 10 대신 비용 절감 값) · 180초 미만 제외 · month 프리셋 · 폴더 "QA검색묶음". 미리보기 2 = 처리 2(`total 2·done 2·new 2`) · 원채널 폴더 2개 생성·둘 다 동일 `group` · 신규만 `auto_run:false`(기존 35채널 0변경) · `meta.playlists == []` · 재생목록 스캔 0회(`pl_map={}` 실증, DQ-28) · 429·오류 0 (2026-09-20) |
+| V-D15 | `auto_run` run·transcribe 제외 (FR34.7) | 검색 유입 채널이 있는 상태에서 `./yt.sh run`·`./yt.sh transcribe`(둘 다 인자 없음) 로그에 해당 채널이 나타나지 않고 yt-dlp 요청도 발생하지 않음. `./yt.sh run <검색유입채널>`·`./yt.sh transcribe <검색유입채널>`은 정상 실행. `/channels/stats.auto_run` 노출·토글 후 즉시 반영 | ✅ 통과 — 실제 `cmd_run`·`cmd_transcribe`를 스텁으로 호출해 대상 집합 비교: 양쪽 동일하게 검색 유입 채널 제외(35→34), yt-dlp 요청 미발생. 명시 지정 시는 정상 실행. `/channels/stats.auto_run` 노출·토글 즉시 반영 확인 (2026-09-20) |
+| V-D16 | 영상 길이 노출·경계면 정합 (FR20.5~20.6) | `GET /videos` 응답에 `duration`·`duration_string`이 실제로 실리고 **프론트가 파싱하는 필드명과 정확히 일치** · 라이브러리 목록·폴더 전체 보기·내용 검색 결과 3곳 모두 길이 표시 · `duration` 키가 없는 과거 meta는 **빈칸**(0:00이 아님) · 검색 조건 미리보기 행에도 길이 표시(같은 포맷터) · **백필이 일어나지 않았음**(meta 파일 mtime 불변) | ✅ 통과 — 7개 경계면 전건 실호출 대조(`GET /videos` → `duration: 3131` / `duration_string: "52:11"`), index.html의 `fmtDuration`을 node로 그대로 추출 실행해 12케이스 검증. 결측 meta 사본 실측 → `null`/`""` → 프론트 빈칸(0:00 아님). `list_videos` 읽기 전용·meta mtime 전후 동일로 백필 부재 확인(DQ-29) (2026-09-20) |
 
 > **2026-08-08 FR21 실검증**: `POST /videos/delete`·`POST /channels/delete`를 합성 테스트 채널(등록·인덱싱까지 완료한
 > 가짜 영상 1건)로 검증 — 실채널 데이터는 전혀 건드리지 않았다. 스캔 진행 중 삭제 시도 시 409 확인(FR21.4).
@@ -604,6 +702,14 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | DQ-20 | 제목 언어는 `extractor_args.youtube.lang`으로 **고정** | 다국어 제목 채널에서 flat 스캔(browse)과 영상별 full info(player)가 서로 다른 언어 트랙을 반환해 같은 영상 제목이 화면마다 달라졌다. 후처리 정규화가 아니라 **요청 단계에서 언어를 고정**한다 — 모든 경로가 같은 옵션 빌더(`_ydl_opts`)를 지나므로 한 곳에서 계약이 성립하고, 저장된 meta.title과 스캔 제목이 같아진다. 값은 채널 `lang`(NFR4), 번역이 없으면 yt-dlp가 원제로 폴백한다 (FR32.1) |
 | DQ-21 | 증분 인덱싱 판정은 **저장된 문서 본문 비교** (해시 필드 아님) | 메타에 `srt_sig` 같은 해시를 넣으면 스키마가 바뀌어 **이미 인덱싱된 전량이 한 번은 재임베딩**돼야 혜택이 시작된다. ChromaDB는 문서 본문을 그대로 보관하므로 `col.get(where={"video_id": vid}, include=["documents","metadatas"])`로 id 집합·본문·메타를 그대로 대조하면 마이그레이션 없이 즉시 동작하고, 판정이 근사가 아니라 **정확**하다(같은 청크 수의 다른 자막도 잡아낸다). 조회 비용은 임베딩 대비 무시할 수준이다 (FR33.1~33.2) |
 | DQ-22 | 인덱싱 진행율은 **별도 필드**(`index_done`/`index_total`)로 싣는다 | 기존 `done`/`total`은 추출 대상 영상 수의 의미를 갖고 완료 후에도 결과 표시(`10/10`)로 남는다. 인덱싱 진행을 같은 필드에 덮어쓰면 추출 결과가 사라지고, 인덱싱 대상 수(채널 전체)와 추출 대상 수(조건 필터 결과)가 달라 의미도 어긋난다. 프론트는 `phase=="indexing"`일 때만 표시를 전환한다 (FR33.3) |
+| DQ-23 | 쇼츠 전용 라벨은 **존재하지 않는다** → duration 휴리스틱 + 조건명 "N초 미만 제외" + 길이 노출 | **실측(2026-09-20, `wEbizb3kF0Q` = `output/toyoungin`의 실제 `#Shorts`, 1080x1920):** 이름에 `short`가 들어간 필드 없음 · `media_type`은 full info에서 `"video"`로 일반 영상과 동일하고 flat 검색 엔트리에는 0/10으로 아예 없음 · `/shorts/{id}`로 접근해도 `webpage_url`이 `watch?v=`로 정규화 · flat url도 전부 `watch?v=`로 정규화(경로 판별 불가) · `availability`·`live_status`도 0/15. 즉 **스캔 단계에서 쇼츠를 정확히 판별할 방법이 없고** 유일한 신호가 `duration`(15/15)이다. `aspect_ratio`(쇼츠 0.56 vs 85초 일반영상 `aIUgM4daefg` 1.78)는 확실한 신호지만 **full info에만 있어** 영상당 `extract_info` 1회(429 예산)를 요구한다 → 스캔 미리보기에 쓸 수 없다(추출 시점 부가 판정으로는 가능하나 이번 범위 밖). 게다가 **그 실제 쇼츠의 duration은 185초로 쇼츠 상한 3분을 넘는 반례**다 — 180초 임계로는 걸러지지 않는다(2024년 상한이 60초→3분으로 확대된 여파). 따라서 조건을 "쇼츠 제외"라고 부르면 **사용자에게 거짓 정확도를 약속**하게 된다 → UI·API·로그 모두 **"N초 미만 제외"**(기본 180초, **임계값 사용자 조정·해제 가능**)로 명명하고, 판별 대신 **`duration`을 그대로 보여줘 사용자가 판단하게 한다**(FR20.5·FR34.5). `duration` 결측 엔트리는 **통과**시킨다 — 판정 불가를 제외 근거로 쓰면 신호 없는 영상이 조용히 사라진다 (FR34.3) |
+| DQ-24 | 기간은 **2층**(서버측 `sp` 프리필터 + 처리 시 `date_range` 확정)이고 최종 판정권은 2층에 있다 | flat 검색은 `upload_date`·`timestamp`를 주지 않는다(실측 0/15) — FR2.6·DQ-12와 **똑같은 제약**이다. 그러나 채널 스캔과 달리 검색에는 YouTube가 직접 거르는 `sp=` 프로토버프 필터가 있어 **후보 자체를 줄여 429 예산을 아낄 수 있다**(실측: `EgQIBBAB` 이번달+동영상, `EgQIBRAB` 올해+동영상). 두 층은 상충하지 않는다: 1층은 프리셋(시간/오늘/이번주/이번달/올해)만 표현 가능한 **비용 절감 장치**이고, 임의 날짜 범위는 표현할 수 없다. 정확한 경계 판정은 기존 DQ-12 경로(처리 시 full info의 `upload_date` → 범위 밖 `date_skip`)가 그대로 책임진다. 둘 다 지정되면 둘 다 적용되며, **1층만으로 date_skip이 0이 되리라 가정하지 않는다**(`sp`의 "이번 달" 경계와 사용자의 since/until은 서로 다른 기준이다) (FR34.4) |
+| DQ-25 | 검색 유입 신규 채널은 **`auto_run: false`** 로 `run`·`transcribe` 전체 순회에서 제외 | 검색 50건이면 최대 50개 채널이 `channels.yaml`에 등록되는데 `main.cmd_run`은 인자가 없으면 **등록된 전 채널을 순회**한다. 현재 이미 35채널 중 24개가 재생목록 1회 추출로 유입된 상태여서, 검색 추출을 반복하면 `./yt.sh run`이 감당 불가능한 요청 규모가 된다(429 직결). 대안 비교 — (b)그대로 등록: 운영 부담을 사용자에게 전가, (c)채널 미등록·영상만 저장: 출력 구조가 채널 폴더 기준이라 FR24.3·FR25·라이브러리·인덱싱 전반을 다시 설계해야 한다. **(a)플래그**만이 기존 자산을 보존하면서 문제를 정확히 해결한다. 플래그는 `run`·`transcribe`의 **무인자 순회에만** 작용하고(공통 헬퍼 `main.bulk_targets`, 사용자 결정 2026-09-20 — Whisper 전사는 run보다 네트워크·CPU 비용이 크다) 라이브러리·질의·인덱싱·대시보드 추출·명시적 `run 채널명`에는 영향을 주지 않는다 — "이 채널을 배제한다"가 아니라 "일괄 갱신 기본 대상에서 뺀다"는 뜻이기 때문이다. 부재를 `true`로 해석해 기존 yaml은 무변경으로 종전과 동일하게 동작한다 (FR34.7~34.8) |
+| DQ-26 | 검색 미리보기는 **재생목록보다 정확도가 낮다** — 숨기지 않고 명시하며, 등식은 `live_wait`를 포함하도록 확장 | flat 검색 엔트리에 `availability`·`live_status`가 없다(실측 0/15). 그 결과 ① 진행 중·예약 라이브가 스캔에서 걸러지지 않고(재생목록 경로는 `live_status`로 사전 제외한다), ② 멤버십 판정이 state(`sub_type=="members_only"`)에만 의존해 **처음 보는 멤버십 영상은 미리보기에서 일반 영상으로 보인다**. 최종 방어선은 처리 시점의 FR16.5 라이브 가드와 FR13·FR19.1 멤버십 감지이므로 **기능은 정상 동작하고 잘못된 파일이 생기지도 않는다** — 훼손되는 것은 "미리보기 = 실제"라는 V-D11의 전제뿐이다. 따라서 (i) 조건 UI에 "멤버십·라이브 여부는 처리 시 확정" 안내를 띄우고, (ii) `search_run`의 검증 등식을 `total == new+updated+skip+no_sub+members_only+error+date_skip+live_wait`로 확장한다. **full info로 사전 보강하지 않는다** — 후보 N개에 extract_info N회를 미리 쓰면 스캔이 flat인 이유(429 예산)가 사라지고 비용이 두 배가 된다 (FR34.5) |
+| DQ-27 | 검색 진입은 **전용 `q` 필드**로만 — 순수 텍스트를 검색으로 승격하지 않는다 | `classify_url`이 "URL로 판별 불가 → 검색어로 간주"하면, 오타 난 채널 URL·깨진 재생목록 링크가 **조용히 검색으로 둔갑해** 엉뚱한 채널 수십 개를 등록한다(DQ-25가 막으려는 바로 그 사고를 다른 문으로 들여보낸다). 판별 불가는 계속 400이고, 검색은 `POST /extract/scan {q}`라는 **명시적 의사표시**를 요구한다. 편의를 위해 `youtube.com/results?search_query=…` URL은 인식하되(사용자가 검색 결과 페이지를 복사해 오는 자연스러운 경로), 이때도 분류 우선순위는 영상 → 재생목록 → 검색 → 채널이다 (FR34.1) |
+| DQ-28 | 검색어는 **카테고리로 병합하지 않는다**(`pl_map={}`) | FR24.4는 재생목록 제목을 `meta.playlists`에 병합한다 — 재생목록은 **채널 주인이 만든 분류**라 카테고리 의미론과 일치하기 때문이다. 검색어는 사용자의 일회성 질의어이고, 같은 영상이 여러 검색으로 유입되면 태그가 무한히 늘어나 FR15.4 카테고리 필터가 무의미해진다. 검색 묶음의 정체성은 **폴더(FR25·FR34.6)** 가 책임진다. 부수 효과로 `pl_map={}`이면 `if pl_map:`이 거짓이라 `_backfill_meta()`가 호출되지 않아 DQ-17이 경고한 "부분 맵으로 기존 카테고리 전멸" 사고가 구조적으로 불가능해진다. **`None`은 반대로 `scan_playlists()`(채널마다 추가 요청 = 429 예산 소모) + 백필을 유발하므로 쓰지 않는다** — `run()` 독스트링이 명시하듯 "주어지면(빈 dict 포함) `scan_playlists()` 생략"이므로 **`{}`가 '생략'의 정식 값**이다(`extractor.py`: `if pl_map is None:` → `scan_playlists()`, `if pl_map:` → `_backfill_meta()`). 실측(2026-09-20 QA): `{}` → scan 0회·backfill 0회 / `None` → 둘 다 1회. 대상 영상의 `playlists`는 다음 전체 run의 백필(FR15.5)로 채워진다 (FR34.10) |
+| DQ-29 | 길이 노출은 **기존 meta 재사용** — 백필·재추출 없음 | `meta_collector`의 수집 필드에 `duration`·`duration_string`이 이미 들어 있어(§5.3) `output/*/meta/*.json`에 값이 **이미 저장돼 있다**. 따라서 `list_videos`의 응답 필드와 프론트 표시만 추가하면 되고, 마이그레이션·재추출을 절대 수행하지 않는다(DQ-21과 같은 취지 — 기존 데이터가 즉시 혜택을 받아야 한다). 과거 파일에 필드가 없을 수 있으므로 `null`/`""`로 내리고 프론트는 빈칸 처리한다 — **0으로 채우지 않는다**(0초 영상과 구분 불가) (FR20.5~20.6) |
+| DQ-30 | 배치 휴식 카운터는 **작업(job) 단위 상태**(`extractor.BatchRest`)로 분리해 `run()` 호출 경계를 넘어 공유한다 | **기존 결함(2026-09-20 QA 발견, FR34가 드러냈을 뿐 FR24부터 있었다).** 휴식 카운터가 `Extractor.run()`의 **지역 변수**였는데, 그룹 추출 워커 `_run_grouped`는 채널 그룹마다 `Extractor(ch_cfg).run(...)`을 **새로 호출**한다 → 그룹이 바뀔 때마다 카운터가 0으로 리셋된다. 재생목록은 보통 한 채널이라 눈에 띄지 않았지만(다채널 재생목록에는 **똑같은 구멍이 이미 있었다**), **검색은 영상당 채널이 다르다** — 실측 후보 13개 = 서로 다른 채널 13개 → 그룹당 1영상이라 `batch_size`(8~12)에 **영원히 도달하지 못한다.** 기본 `limit 20`이면 휴식 0회로 `extract_info` 20연속, 즉 FR14.2 방어가 검색 경로에서 통째로 빠진다. 대안 비교 — (a)`_run_grouped`가 그룹 **사이에서만** 세어 쉰다: 그룹 내부는 여전히 리셋된 카운터로 세므로 큰 재생목록에서 8~12개 주기가 어긋난다. (b)**상태 객체 주입**: `BatchRest`(`count()`/`due()`/`take()`)를 `run(rest_state=)`로 받아 그룹 루프 **바깥**에서 한 개 만들어 모든 `ext.run()`에 넘긴다 → 그룹 내부·그룹 경계 모두 하나의 카운터로 세어지고, **재생목록(FR24)·검색(FR34) 두 경로가 공통 워커 한 곳에서 동시에 막힌다.** (b)를 택했다. 휴식 시간·다음 배치 크기는 `take()`마다 `BATCH_SIZE_RANGE`·`BATCH_REST_RANGE`에서 **재추첨**해 FR14.2의 랜덤화 취지를 유지하고, 429 재시도의 카운터 소비(DQ-16)도 그대로다. `rest_state=None`이면 그 호출 전용 객체를 만들므로 **CLI 경로는 휴식 시점·randint 사용 횟수·`time.sleep` 호출 형태까지 완전 무영향**이다(V-U21이 고정). 부수적으로 `cancel_check`를 받은 경우에만 휴식을 1초 단위로 쪼개 자 취소 응답성이 최대 90초 → 1초가 된다(FR18.2). **실사용 영향**: 다채널 재생목록·검색 추출은 이제 실제로 쉬므로 **추출 시간이 휴식만큼 늘어난다 — 의도된 비용**이다(429 차단 1회가 24시간 대기를 부르는 것보다 싸다) (FR14.2·FR24·FR34.9) |
 
 ---
 
@@ -630,7 +736,7 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | 게이트 | 실행 주체 | 대응 검증 |
 |---|---|---|
 | 정적 | pipeline-verify ① | py_compile 전체 |
-| 단위 | pipeline-verify ② | V-U1~11 (mock, 네트워크 없음) |
+| 단위 | pipeline-verify ② | V-U1~V-U21 (§9.1a — pytest + mock 스크립트, 네트워크 없음). V-U3은 테스트 미구현, V-U8·V-U9는 mock 스크립트 |
 | 빌드 | pipeline-verify ③ | docker build |
 | 카나리아 | pipeline-verify ④⑤ | V-D2 + 회귀(스킵 수 유지·429 없음) |
 | 인덱스/스모크 | pipeline-verify ⑥⑦ | V-D9 일부 (curl /videos·/search) |

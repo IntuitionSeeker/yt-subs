@@ -85,7 +85,7 @@ class ChannelRegistry:
         return name
 
     def rename(self, old: str, new: str):
-        """채널 이름 변경 — 설정(group·channel_id 포함) 보존. FR31.1
+        """채널 이름 변경 — 설정(group·channel_id·auto_run 포함) 보존. FR31.1
         레지스트리만 변경하며 output 폴더 이동은 호출자(renamer) 책임."""
         channels = self.data.get("channels", {})
         if old not in channels:
@@ -116,6 +116,23 @@ class ChannelRegistry:
         self._save()
         return group
 
+    def set_auto_run(self, name: str, flag: bool) -> bool:
+        """
+        `./yt.sh run`·`transcribe` 전체 순회 대상 여부. FR34.7 (DQ-25)
+
+        기본값이 True이므로 **True면 필드를 제거**한다 (set_group의 빈 값 처리와 동일 패턴).
+        필드 부재 = True → 기존 channels.yaml은 무변경으로 종전과 동일하게 동작한다.
+        """
+        ch = self.data.get("channels", {}).get(name)
+        if ch is None:
+            raise KeyError(f"등록되지 않은 채널: {name}")
+        if flag:
+            ch.pop("auto_run", None)
+        else:
+            ch["auto_run"] = False
+        self._save()
+        return bool(flag)
+
     def remove(self, name: str) -> bool:
         if name in self.data.get("channels", {}):
             del self.data["channels"][name]
@@ -132,5 +149,17 @@ class ChannelRegistry:
             raise KeyError(f"등록되지 않은 채널: {name}")
         return {"name": name, **ch}
 
-    def names(self) -> list:
-        return list(self.data.get("channels", {}).keys())
+    def names(self, auto_only: bool = False) -> list:
+        """
+        등록 채널명 목록.
+
+        `auto_only=True`면 `auto_run: false` 채널을 제외한다 (FR34.7).
+        **기본 동작(전체 반환)은 바꾸지 않는다** — `names()`는 jobs.py의 등록 여부
+        확인(`name not in reg.names()`)에도 쓰이므로, 기본값을 바꾸면 검색 유입 채널이
+        매번 "미등록"으로 오판돼 재등록·폴더 재지정된다 (DQ-25).
+        """
+        channels = self.data.get("channels", {})
+        if not auto_only:
+            return list(channels.keys())
+        return [n for n, c in channels.items()
+                if (c or {}).get("auto_run", True) is not False]

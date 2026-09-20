@@ -13,7 +13,7 @@ DESIGN §9의 V-U/V-D 게이트를 실행 가능한 순서로 배열한 런북. 
 python3 -m py_compile *.py dashboard/*.py 2>/dev/null || python3 -m py_compile *.py dashboard/server.py
 ```
 
-## ② mock 단위 (V-U8~9, 네트워크·Docker 불필요)
+## ② mock 단위 (V-U8·V-U9 + 번호 미부여 mock 케이스 — 네트워크·Docker 불필요)
 
 ```bash
 python3 .claude/skills/pipeline-verify/scripts/mock_scan_test.py   # 파이프라인 코어 (16케이스)
@@ -22,7 +22,8 @@ python3 .claude/skills/pipeline-verify/scripts/mock_jobs_test.py   # 대시보�
 
 - 호스트에 yt_dlp가 없으므로 스크립트가 `sys.modules` 스텁을 사용한다. 새 로직을 추가했으면 **해당 스크립트에 케이스를 추가**한 뒤 실행하라 — 케이스 추가 없이 통과를 선언하지 않는다
 - `mock_jobs_test.py`의 필터 순서 차분 대조(프론트 `applyFilters` 참조 구현과 랜덤 입력 비교)는 V-D11의 전제다. 필터 로직을 건드렸으면 반드시 이 케이스가 통과해야 한다
-- Docker가 가능하면 `./yt.sh test`(pytest 25건, V-U1~V-U11)도 병행
+- Docker가 가능하면 `./yt.sh test`(pytest **60 passed / 1 skipped**, V-U1~V-U21 중 pytest 소관 전부 — 2026-09-20 기준선)도 병행
+- V-U 번호↔테스트 대응은 **DESIGN §9.1a(번호 부여)·§9.1b(번호 미부여)**가 정본이며, 그 정본은 `tests/test_unit.py`의 섹션 헤더 주석이다. 새 테스트에 번호를 붙일 때는 §9.1과 테스트 주석을 **같은 커밋에서** 함께 갱신하고, 다음 번호는 **V-U22**부터 잇는다 (V-U3은 테스트 미구현 자리, V-U8·V-U9는 이 ② mock 스크립트 소관)
 
 ## ③ 빌드
 

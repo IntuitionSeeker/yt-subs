@@ -1,12 +1,19 @@
 """단위 검증 — V-U1~V-U11. 외부 네트워크 불필요."""
+import re
 import sys
+import json
+import shutil
+import subprocess
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent.parent / "dashboard"))
 
+import unittest.mock as mock
+
 import pytest
 
+import config
 import subtitle_utils as su
 from channel_registry import ChannelRegistry
 from state_manager import StateManager
@@ -618,3 +625,304 @@ def test_registry_set_group(tmp_path):
     # 미등록 채널 → KeyError
     with pytest.raises(KeyError):
         reg3.set_group("없는채널", "x")
+
+
+# ─── V-U18: 검색 스캔 조립·필터 (FR34.1~34.4) ───────────────────────────────
+def test_classify_url_search():
+    """검색 결과 URL은 search로, 순수 텍스트는 계속 ValueError (DQ-27)."""
+    from jobs import classify_url, search_query_from_url
+    url = "https://www.youtube.com/results?search_query=AI+%EC%97%90%EC%9D%B4%EC%A0%84%ED%8A%B8"
+    assert classify_url(url) == ("search", url)
+    assert search_query_from_url(url) == "AI 에이전트"
+    # 검색어가 @핸들이어도 채널로 오분류하지 않는다 (우선순위: …→검색→채널)
+    assert classify_url(
+        "https://www.youtube.com/results?search_query=@두두감자")[0] == "search"
+    # 순수 텍스트는 검색으로 승격하지 않는다
+    for bad in ("AI 에이전트", "그냥 검색어", "https://example.com/results"):
+        with pytest.raises(ValueError):
+            classify_url(bad)
+
+
+def test_build_search_url_sp_presets():
+    """sp 프리셋 매핑(6종 실측값) + quote_plus + 미지 period는 all 폴백 (FR34.4)."""
+    from jobs import _build_search_url, SP_PRESETS
+    assert SP_PRESETS == {"all": "EgIQAQ", "hour": "EgQIARAB", "today": "EgQIAhAB",
+                          "week": "EgQIAxAB", "month": "EgQIBBAB", "year": "EgQIBRAB"}
+    u = _build_search_url("AI 에이전트", "month")
+    assert u == ("https://www.youtube.com/results"
+                 "?search_query=AI+%EC%97%90%EC%9D%B4%EC%A0%84%ED%8A%B8&sp=EgQIBBAB")
+    # 미지 값·None → all 폴백 (400이 아니다)
+    assert _build_search_url("q", "지난주").endswith("sp=EgIQAQ")
+    assert _build_search_url("q", None).endswith("sp=EgIQAQ")
+
+
+def test_search_opts_and_params(monkeypatch):
+    """playlist_items 상한 + _flat_opts 경유(lang 유지) + 조건 검증 (FR34.2·34.6)."""
+    import jobs
+    monkeypatch.setattr(jobs, "_flat_opts",
+                        lambda: {"extract_flat": True,
+                                 "extractor_args": {"youtube": {"lang": ["ko"]}}})
+    opts = jobs._search_opts(7)
+    assert opts["playlist_items"] == "1-7"
+    assert opts["extract_flat"] is True
+    assert opts["extractor_args"]["youtube"]["lang"] == ["ko"]   # DQ-20 유지
+
+    # 기본값·폴더 기본값(=검색어)
+    p = jobs.normalize_search_params(None, None, None, None, q="AI")
+    assert p == {"limit": 20, "min_duration": 180, "period": "all", "folder": "AI"}
+    assert jobs.normalize_search_params(5, 0, "year", " 강의 ", q="AI")["folder"] == "강의"
+    for bad in ((0, None), (51, None), (None, -1)):
+        with pytest.raises(ValueError):
+            jobs.normalize_search_params(bad[0], bad[1], "all", None, q="AI")
+
+
+def test_search_duration_filter(tmp_path, monkeypatch):
+    """ⓑ N초 미만 제외 — 미만 제외 / 이상 통과 / **결측 통과** (FR34.3·DQ-23)."""
+    import config
+    import jobs
+    monkeypatch.setattr(config, "OUTPUT_BASE", tmp_path)
+    monkeypatch.setattr(jobs, "ChannelRegistry",
+                        lambda *a, **k: ChannelRegistry(yaml_path=tmp_path / "c.yaml"))
+    entries = [
+        {"id": "s1", "title": "짧은 영상", "uploader_id": "@chanA", "duration": 60},
+        {"id": "s2", "title": "긴 영상", "uploader_id": "@chanA", "duration": 600},
+        {"id": "s3", "title": "길이 없음", "uploader_id": "@chanA"},
+        {"id": "s4", "title": "경계값", "uploader_id": "@chanA", "duration": 180},
+    ]
+    view, by_ch = jobs._group_flat_entries(entries, min_duration=180)
+    assert [v["id"] for v in view] == ["s2", "s3", "s4"], "60초만 제외, 결측·경계는 통과"
+    assert view[0]["duration"] == 600 and view[1]["duration"] is None
+    assert view[0]["channel"] == "chanA" and view[0]["extracted"] is False
+    # 임계 0(끔)이면 전량 통과
+    assert len(jobs._group_flat_entries(entries, min_duration=0)[0]) == 4
+    assert set(by_ch) == {"chanA"}
+
+
+# ─── V-U19: auto_run 플래그 (FR34.7) ────────────────────────────────────────
+def test_registry_auto_run(tmp_path):
+    """False는 기록·True는 필드 제거·부재는 True 간주 + names() 회귀 (DQ-25)."""
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@검색유입")
+    reg.add("https://youtube.com/@평범채널")
+    assert "auto_run" not in reg.get("검색유입"), "기본은 필드 없음"
+
+    assert reg.set_auto_run("검색유입", False) is False
+    reg2 = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    assert reg2.get("검색유입")["auto_run"] is False
+    # names()의 기본 동작은 불변 (jobs.py 등록 여부 확인이 이 계약에 의존)
+    assert reg2.names() == ["검색유입", "평범채널"]
+    assert reg2.names(auto_only=True) == ["평범채널"]
+
+    # True → 필드 제거 (기본값을 yaml에 남기지 않는다)
+    assert reg2.set_auto_run("검색유입", True) is True
+    reg3 = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    assert "auto_run" not in reg3.get("검색유입")
+    assert reg3.names(auto_only=True) == ["검색유입", "평범채널"]
+    with pytest.raises(KeyError):
+        reg3.set_auto_run("없는채널", False)
+
+
+def test_registry_rename_keeps_auto_run(tmp_path):
+    """이름 변경이 auto_run을 잃어버리면 검색 유입 채널이 run 순회로 복귀한다 (FR31.1)."""
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@old")
+    reg.set_group("old", "검색묶음")
+    reg.set_auto_run("old", False)
+    reg.rename("old", "new")
+    reg2 = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    assert reg2.get("new")["auto_run"] is False
+    assert reg2.get("new")["group"] == "검색묶음"
+
+
+def test_cmd_run_targets(tmp_path):
+    """대상 산출: 인자 없으면 제외 / 채널 명시하면 포함. run·transcribe 공용 (FR34.7)."""
+    import main
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@검색유입")
+    reg.add("https://youtube.com/@평범채널")
+    reg.set_auto_run("검색유입", False)
+    assert main.bulk_targets(reg, None) == ["평범채널"]
+    assert main.bulk_targets(reg, "검색유입") == ["검색유입"], "명시 지정은 플래그 무시"
+
+
+# ─── V-U20: 영상 길이 노출 (FR20.5~20.6) ────────────────────────────────────
+def test_list_videos_exposes_duration(tmp_path, monkeypatch):
+    """meta의 duration/duration_string 통과 · 키 없으면 None/""(0 아님, DQ-29)."""
+    import json
+    import config
+    from kl_query import KLQuery
+    monkeypatch.setattr(config, "OUTPUT_BASE", tmp_path)
+    meta_dir = config.channel_subdirs("ch")["meta"]
+    meta_dir.mkdir(parents=True, exist_ok=True)
+    (meta_dir / "a.json").write_text(json.dumps(
+        {"id": "v1", "title": "길이 있음", "upload_date": "20260102",
+         "duration": 610, "duration_string": "10:10"}), encoding="utf-8")
+    (meta_dir / "b.json").write_text(json.dumps(
+        {"id": "v2", "title": "옛 meta", "upload_date": "20260101"}), encoding="utf-8")
+    mtimes = {p.name: p.stat().st_mtime_ns for p in meta_dir.glob("*.json")}
+
+    vids = {v["video_id"]: v for v in KLQuery("ch").list_videos()}
+    assert vids["v1"]["duration"] == 610 and vids["v1"]["duration_string"] == "10:10"
+    assert vids["v2"]["duration"] is None, "결측을 0으로 채우면 0초 영상과 구분 불가"
+    assert vids["v2"]["duration_string"] == ""
+    # 백필·재기록이 일어나지 않는다 (DQ-29, V-D16 전제)
+    assert {p.name: p.stat().st_mtime_ns for p in meta_dir.glob("*.json")} == mtimes
+
+
+# 프론트 fmtDuration의 케이스표 — (duration, duration_string, 기대 출력).
+# 기대값은 node로 실제 JS를 실행해 확정한 값이다(아래 두 테스트가 각각 지킨다).
+FMT_DURATION_CASES = [
+    (0, None, "0:00"), (5, None, "0:05"), (61, None, "1:01"), (610, None, "10:10"),
+    (3600, None, "1:00:00"), (3725, None, "1:02:05"), (86399, None, "23:59:59"),
+    (None, None, ""), ("", None, ""), (-1, None, ""),
+    (999, "12:34", "12:34"), (None, "1:02:03", "1:02:03"),
+]
+
+# index.html의 fmtDuration 고정 사본. 프론트가 드리프트하면 아래 테스트가 깨지고,
+# 그때 node 교차 실행 테스트로 케이스표를 다시 확정해야 한다 (자기 검증 방지).
+FMT_DURATION_SRC = """function fmtDuration(sec, str) {
+  if (str) return String(str);
+  if (sec === null || sec === undefined || sec === "") return "";
+  const s = Math.floor(Number(sec));
+  if (!isFinite(s) || s < 0) return "";
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), ss = s % 60;
+  const p = n => String(n).padStart(2, "0");
+  return h ? `${h}:${p(m)}:${p(ss)}` : `${m}:${p(ss)}`;
+}"""
+
+
+def _fmt_duration_source() -> str:
+    """index.html에서 실제 fmtDuration 정의를 그대로 떼어 온다."""
+    html = (Path(__file__).parent.parent / "dashboard" / "index.html").read_text(
+        encoding="utf-8")
+    m = re.search(r"^function fmtDuration\(.*?^\}", html, re.S | re.M)
+    assert m, "index.html에서 fmtDuration 정의를 찾지 못했다"
+    return m.group(0)
+
+
+def test_fmt_duration_frontend_pinned():
+    """프론트 구현이 케이스표가 검증한 바로 그 코드인지 고정 (FR20.6).
+
+    파이썬 참조 구현을 테스트 안에 다시 쓰면 자기 자신을 검증할 뿐 index.html의
+    드리프트를 못 잡는다 → 실제 원문을 읽어 대조한다.
+    """
+    assert _fmt_duration_source() == FMT_DURATION_SRC, (
+        "index.html의 fmtDuration이 바뀌었다. "
+        "test_fmt_duration_runs_in_node(node 필요)로 케이스표를 재확정한 뒤 갱신하라.")
+
+
+def test_fmt_duration_runs_in_node():
+    """실제 JS를 실행해 케이스표와 대조 (node 없는 이미지에서는 위 고정 테스트가 가드)."""
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node 미설치 — test_fmt_duration_frontend_pinned가 드리프트를 막는다")
+    script = (_fmt_duration_source() +
+              "\nconst cs = JSON.parse(process.argv[1]);"
+              "\nconsole.log(JSON.stringify(cs.map(c => fmtDuration(c[0], c[1]))));")
+    args = json.dumps([[c[0], c[1]] for c in FMT_DURATION_CASES])
+    out = subprocess.run([node, "-e", script, args],
+                         capture_output=True, text=True, check=True)
+    assert json.loads(out.stdout) == [c[2] for c in FMT_DURATION_CASES], out.stdout
+
+
+# ─── V-U21: 배치 휴식 상태 공유 (FR14.2) ────────────────────────────────────
+def _batch_rest(monkeypatch, tmp_path):
+    """extractor 모듈을 yt_dlp 스텁으로 로드."""
+    monkeypatch.setattr(config, "OUTPUT_BASE", tmp_path)
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.MagicMock())
+    import extractor as ex
+    return ex
+
+
+def test_batch_rest_randomizes_every_time(tmp_path, monkeypatch):
+    """배치 크기·휴식 시간을 매번 재추첨한다 — 고정 주기는 차단 탐지의 기계 서명."""
+    ex = _batch_rest(monkeypatch, tmp_path)
+    slept = []
+    monkeypatch.setattr(ex.time, "sleep", lambda s: slept.append(s))
+    r = ex.BatchRest()
+    assert config.BATCH_SIZE_RANGE[0] <= r.size <= config.BATCH_SIZE_RANGE[1]
+    sizes = set()
+    for _ in range(30):
+        while not r.due():
+            r.count()
+        assert r.since == r.size
+        r.take()
+        assert r.since == 0, "휴식 후 카운터 리셋"
+        sizes.add(r.size)
+    rests = set(slept)
+    assert len(slept) == 30 and len(rests) > 1, "휴식 시간이 고정됐다"
+    assert all(config.BATCH_REST_RANGE[0] <= s <= config.BATCH_REST_RANGE[1] for s in rests)
+    assert len(sizes) > 1, "배치 크기가 고정됐다"
+    assert r.rests == 30
+
+
+def test_batch_rest_cancel_interrupts_sleep(tmp_path, monkeypatch):
+    """취소 중에는 남은 휴식을 끊는다 (FR18.2 응답성). CLI 기본값은 단일 sleep."""
+    ex = _batch_rest(monkeypatch, tmp_path)
+    monkeypatch.setattr(config, "BATCH_REST_RANGE", (60, 60))
+    slept = []
+    monkeypatch.setattr(ex.time, "sleep", lambda s: slept.append(s))
+
+    # cancel_check 없음(CLI) → 기존과 동일하게 한 번에 60초
+    ex.BatchRest().take()
+    assert slept == [60], slept
+
+    slept.clear()
+    ticks = {"n": 0}
+
+    def cancel_after_3():
+        ticks["n"] += 1
+        return ticks["n"] > 3          # 3틱 뒤 취소
+
+    assert ex.BatchRest(cancel_check=cancel_after_3).take() == 3
+    assert slept == [1, 1, 1], slept
+
+
+def test_rest_state_accumulates_across_run_calls(tmp_path, monkeypatch):
+    """그룹마다 run()을 새로 불러도 휴식 카운터가 누적된다 (FR14.2 · 검색 추출).
+
+    run() 지역 변수로 두면 '영상 1개 = 채널 1개'인 검색 결과에서 배치 크기에
+    영영 도달하지 못해 배치 휴식이 통째로 사라진다.
+    """
+    ex = _batch_rest(monkeypatch, tmp_path)
+    monkeypatch.setattr(config, "BATCH_SIZE_RANGE", (3, 3))
+    monkeypatch.setattr(config, "BATCH_REST_RANGE", (45, 45))
+    monkeypatch.setattr(ex.Extractor, "process_video",
+                        lambda self, vid, action="new", **kw: "ok")
+    slept = []
+    monkeypatch.setattr(ex.time, "sleep", lambda s: slept.append(s))
+
+    def run_group(i, rest_state):
+        ex.Extractor({"name": f"ch{i}",
+                      "url": f"https://www.youtube.com/@ch{i}/videos"}).run(
+            entries=[{"id": f"v{i}", "title": f"영상{i}"}], pl_map={},
+            rest_state=rest_state)
+
+    shared = ex.BatchRest()
+    for i in range(9):
+        run_group(i, shared)
+    assert slept == [45, 45], f"9영상·배치 3 → 휴식 2회: {slept}"
+    assert shared.rests == 2
+
+    # 대조군(공유 없음) = 결함 상태: 휴식이 한 번도 오지 않는다
+    slept.clear()
+    for i in range(100, 109):
+        run_group(i, None)
+    assert slept == [], f"비공유 경로는 휴식 0회(결함 재현): {slept}"
+
+
+def test_run_without_rest_state_keeps_cli_behaviour(tmp_path, monkeypatch):
+    """단일 채널 CLI 경로는 기존과 동일 — 배치 크기 도달 시 한 번에 휴식 (FR18.1)."""
+    ex = _batch_rest(monkeypatch, tmp_path)
+    monkeypatch.setattr(config, "BATCH_SIZE_RANGE", (3, 3))
+    monkeypatch.setattr(config, "BATCH_REST_RANGE", (45, 45))
+    monkeypatch.setattr(ex.Extractor, "process_video",
+                        lambda self, vid, action="new", **kw: "ok")
+    slept = []
+    monkeypatch.setattr(ex.time, "sleep", lambda s: slept.append(s))
+    entries = [{"id": f"c{i}", "title": f"영상{i}"} for i in range(9)]
+    stats = ex.Extractor({"name": "clich",
+                          "url": "https://www.youtube.com/@clich/videos"}).run(
+        entries=entries, pl_map={})
+    assert stats["new"] == 9
+    assert slept == [45, 45], f"쪼개지 않은 단일 sleep 2회여야 한다: {slept}"

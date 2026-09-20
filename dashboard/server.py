@@ -53,7 +53,13 @@ class SummaryRequest(BaseModel):
 
 
 class ScanRequest(BaseModel):
-    url: str
+    """`{url}`(채널·재생목록·검색 URL) 또는 `{q,…}`(검색어). FR17.3·FR24.2·FR34.1"""
+    url: str | None = None
+    q: str | None = None                  # 검색어 — 전용 필드로만 진입 (DQ-27)
+    limit: int | None = None              # ⓐ 개수 상한 (기본 20, 1~50)
+    min_duration: int | None = None       # ⓑ N초 미만 제외 (기본 180, "쇼츠" 아님)
+    period: str | None = None             # ⓒ 기간 프리셋 (all|hour|today|week|month|year)
+    folder: str | None = None             # 신규 등록 채널을 묶을 폴더 (기본 = 검색어)
 
 
 class Filters(BaseModel):
@@ -85,6 +91,11 @@ class ChannelDeleteRequest(BaseModel):
 class ChannelGroupRequest(BaseModel):
     channel: str
     group: str | None = None      # 트림 후 빈 값이면 폴더 해제 (FR25.2)
+
+
+class ChannelAutoRunRequest(BaseModel):
+    channel: str
+    auto_run: bool                # false면 run·transcribe 전체 순회 제외 (FR34.8)
 
 
 class ChannelRenameRequest(BaseModel):
@@ -166,9 +177,19 @@ def summary(req: SummaryRequest):
 # ─── 추출 (FR17·FR18) ────────────────────────────────────────────────────────
 @app.post("/extract/scan")
 def extract_scan(req: ScanRequest):
-    """채널 사전 스캔 → 후보 목록·재생목록 + scan_id (FR17.3)."""
+    """사전 스캔 → 후보 목록 + scan_id. 채널·재생목록(FR17.3·FR24.2) 또는 검색(FR34.1)."""
+    url = (req.url or "").strip()
+    q = (req.q or "").strip()
     try:
-        return MANAGER.scan(req.url)
+        if url and q:
+            raise ValueError("url과 q는 함께 지정할 수 없습니다.")
+        if not url and not q:
+            raise ValueError("url 또는 q 중 하나가 필요합니다.")
+        if q:
+            return MANAGER.scan_search(q, limit=req.limit,
+                                       min_duration=req.min_duration,
+                                       period=req.period, folder=req.folder)
+        return MANAGER.scan(url)
     except JobBusyError as exc:
         return JSONResponse(status_code=409,
                             content={"detail": exc.message, "job": exc.job})
@@ -241,6 +262,8 @@ def channels_stats():
             "lang": ch.get("lang", config.DEFAULT_LANG),
             "added_at": ch.get("added_at", ""),
             "group": ch.get("group", ""),          # 채널 폴더 (FR25.3)
+            # 필드 부재 = true (FR34.8·DQ-25) — 기존 yaml 무변경 호환
+            "auto_run": ch.get("auto_run", True) is not False,
             "extracted": extracted,
             "members_only": members_only,
             "no_sub": no_sub,
@@ -266,6 +289,20 @@ def channels_group(req: ChannelGroupRequest):
     except KeyError:
         raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
     return {"ok": True, "channel": req.channel, "group": group}
+
+
+@app.post("/channels/auto_run")
+def channels_auto_run(req: ChannelAutoRunRequest):
+    """`run`·`transcribe` 전체 순회 대상 토글. FR34.8"""
+    if MANAGER.is_busy():                  # 추출 중 registry 경합 방지 (FR21.4 준용)
+        raise HTTPException(status_code=409,
+                            detail="추출/스캔 작업 중에는 변경할 수 없습니다.")
+    reg = ChannelRegistry()
+    try:
+        flag = reg.set_auto_run(req.channel, req.auto_run)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
+    return {"ok": True, "channel": req.channel, "auto_run": flag}
 
 
 # ─── 이름 변경 (FR31) ────────────────────────────────────────────────────────

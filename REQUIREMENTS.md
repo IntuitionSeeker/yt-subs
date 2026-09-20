@@ -1,8 +1,8 @@
 # REQUIREMENTS — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v5.4  
+> **버전:** v5.5  
 > **작성일:** 2026-08-09  
-> **연계 문서:** DESIGN.md v5.4  
+> **연계 문서:** DESIGN.md v5.5  
 > **주요 변경:** 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20), 개발 거버넌스(NFR10)  
 > **v4.1 (FR17~20 백엔드 구현 확정 반영):** 조건 적용 순서·ⓐ"최신" 정의·ⓓ↔FR19.1 우선순위 비고(FR17.4),
@@ -22,6 +22,9 @@
 > **v5.2 (버그 수정):** 스캔 정합성(FR32) — 다국어 제목으로 스캔·라이브러리 제목이 어긋나던 문제(FR32.1),
 > 등록명≠URL핸들 채널에서 `extracted` 오판·중복 폴더 생성(FR32.2~32.3)  
 > **v5.4:** Whisper 전사 진행률(FR30.6) — 세그먼트 스트림에서 진행률을 계산해 CLI 로그에 노출, `on_progress` 콜백 훅 신설(대시보드 통합은 FR30.5대로 여전히 범위 외)  
+> **v5.5:** 검색 기반 일괄 추출(FR34) — 유튜브 검색어로 후보를 모아 하나의 폴더(FR25)로 묶어 일괄 추출. 제한 조건 3종(ⓐ개수 상한 ⓑN초 미만 제외 ⓒ기간 2층: `sp` 프리셋 + `date_range`), 검색 유입 신규 채널은 `channels.yaml` `auto_run: false`로 `./yt.sh run`·`transcribe` 전체 순회에서 제외; 영상 길이 노출(FR20.5~20.6) — 쇼츠 전용 라벨 부재 실측에 따른 보완, meta.json에 이미 있는 `duration`을 API·프론트에 노출(백필 불필요).  
+> **v5.5 정합 정정 (2026-09-20, 문서 전용):** 단위 검증 목록의 V-U 번호 충돌·누락을 DESIGN §9.1에서 해소했다 (정본 = `tests/test_unit.py`). 본 문서 §7.1은 v1 당시 항목만 담은 요약이며, **전체 V-U 목록은 DESIGN §9.1a·§9.1b가 정본**이다
+> 검증 중 드러난 **기존 결함** 수정: 배치 휴식(FR14.2)의 누적 경계를 "작업 단위"로 명문화 — 그룹 추출이 채널마다 추출 루프를 새로 시작해 휴식이 리셋되던 문제(검색 경로에서 방어 무력화, 다채널 재생목록도 동일)를 DQ-30으로 확정  
 > **범위:** 채널 관리 → 자막 추출 → 메타데이터 수집 → 품질 검토 → 지식층 인덱싱 → 질의·대시보드
 
 ---
@@ -52,6 +55,8 @@
 | **KL (Knowledge Layer)** | ChromaDB 기반 로컬 벡터 지식층 |
 | **modified_date** | yt-dlp가 YouTube에서 추출한 영상 최종 수정일 |
 | **yt.sh** | Docker 명령어를 감싸는 래퍼 셸 스크립트 |
+| **검색 추출** | 유튜브 검색어로 모은 후보를 하나의 폴더로 묶어 일괄 추출하는 대시보드 기능 (FR34) |
+| **auto_run** | channels.yaml 채널 항목의 선택 플래그. `false`면 `./yt.sh run`·`./yt.sh transcribe`(둘 다 인자 없음)의 전체 순회 대상에서 제외된다 (FR34.7) |
 | **질의 하네스** | 제품 내 LLM tool_use 루프 (`kl_harness.py`, FR10) |
 | **개발 하네스** | 프로젝트 개발·검증·운영용 Claude Code 에이전트/스킬 체계 (`.claude/`, NFR10, DESIGN §11) |
 
@@ -233,7 +238,7 @@
 | ID | 요구사항 | 우선순위 |
 |---|---|---|
 | FR14.1 | yt-dlp 다운로드 간 랜덤 딜레이 (8~20초) | 필수 |
-| FR14.2 | 배치 휴식 **랜덤화** — 8~12개(배치마다 재추첨) 처리 시 45~90초 랜덤 휴식. 고정 주기(구 10개/60초)는 패턴 기반 차단 탐지에 기계 서명이 됨 (2026-08 실측: 고정 60초 휴식 직후 첫 요청마다 429) | 필수 |
+| FR14.2 | 배치 휴식 **랜덤화** — 8~12개(배치마다 재추첨) 처리 시 45~90초 랜덤 휴식. 고정 주기(구 10개/60초)는 패턴 기반 차단 탐지에 기계 서명이 됨 (2026-08 실측: 고정 60초 휴식 직후 첫 요청마다 429). **누적 경계는 "추출 작업(job) 단위"다** — 휴식 카운터는 하나의 작업 안에서 **채널 경계를 넘어 계속 누적되며 채널이 바뀌어도 리셋하지 않는다**. 재생목록·검색처럼 여러 채널을 한 작업에서 도는 경로는 채널마다 내부 추출 루프를 새로 시작하므로, 경계를 규정하지 않으면 방어가 통째로 무력화된다 (2026-09-20 실측: 검색은 영상당 채널이 달라 휴식이 한 번도 오지 않았다 — DQ-30) | 필수 |
 | FR14.3 | 429 발생 시 지수 백오프 대기 후 **같은 영상을 1회 재시도**, 재시도도 429면 그 영상은 이번 run에서 포기하고 다음 영상으로 진행. 재시도도 요청 예산을 소비한다(FR14.5·DQ-16). `stats.error`는 최종 포기 영상 수 기준(일시 429 후 재시도 성공은 오류로 세지 않음), extract_log.csv에는 시도별 `error:429` 행이 남는다(감사 추적) | 필수 |
 | FR14.4 | 메타데이터 요청(`extract_info`) 간 `sleep_requests` 딜레이 | 필수 |
 | FR14.5 | `run --limit N` 카나리아 실행 — 최대 N개만 처리 후 안전 종료, 나머지는 다음 run에서 이어받기 | 필수 |
@@ -334,6 +339,8 @@
 | FR20.2 | 영상 목록: 제목 즉시 필터(클라이언트) + 자막유형(📝수동/🤖자동)·재생목록·LIVE 뱃지 + 원본 링크. 자막유형 뱃지를 위해 `GET /videos`(=`KLQuery.list_videos`)가 meta.json의 `sub_type`(`manual`\|`auto`\|`none`)을 응답 필드로 노출한다 | 필수 |
 | FR20.3 | 자막 전문 보기 (`GET /subtitle?channel=&basename=`) — basename 경로 탈출(`..`, `/`) 검증 필수 | 필수 |
 | FR20.4 | 자막 내용 벡터 검색은 기존 `POST /search`(카테고리 필터 포함) 재사용 | 필수 |
+| FR20.5 | **영상 길이 노출 (v5.5)** — `GET /videos`(=`KLQuery.list_videos`)가 meta.json의 `duration`(초, int)·`duration_string`(표기용, str)을 응답 필드로 노출하고, 라이브러리 영상 목록·폴더 전체 보기·내용 검색 결과의 각 행에 길이를 표시한다. **재추출·백필은 불필요하다** — `meta_collector`가 두 필드를 이미 저장하고 있으므로 API 응답 필드와 프론트 표시만 추가한다. 쇼츠를 식별할 라벨이 존재하지 않는다는 실측(DQ-23) 때문에 **길이가 사용자에게 유일하게 의미 있는 형태 신호**다 | 필수 |
+| FR20.6 | **길이 결측 처리** — `duration`이 없는 과거 meta는 `duration: null`·`duration_string: ""`로 내려보내고 프론트는 **빈칸(또는 `—`)** 으로 표시한다. **0으로 채우지 않는다**(0초 영상과 구분 불가). 표시 규칙: `duration_string`이 있으면 그대로 쓰고, 없고 `duration`만 있으면 초→`m:ss`/`h:mm:ss`로 포맷한다. 이 포맷터는 라이브러리와 검색 스캔(FR34.5)이 **같은 함수를 공유**한다 | 필수 |
 
 ### FR21 — 라이브러리 관리: 삭제·복사 (신규)
 
@@ -369,7 +376,7 @@
 | FR24.2 | `POST /extract/scan`이 재생목록 URL을 수용 — flat 스캔으로 후보 목록을 반환한다. 응답에 `kind:"playlist"`·`playlist`(재생목록 제목)를 추가하고 `channel`에는 표시용으로 재생목록 제목을 넣는다. 각 후보 항목에 `channel`(원채널명)을 포함한다. 진행 중/예정 라이브 제외(FR16.3 준용)·멤버십 판별(FR17.6 준용)·`extracted`는 원채널 state 조회로 판정 | 필수 |
 | FR24.3 | 추출 결과물은 각 영상의 **원채널 폴더**(`output/채널명/`)에 저장한다. 대상을 채널별로 그룹핑해 순차 실행하며, 미등록 채널은 추출 시점에 자동 등록한다(FR17.2 단일영상 선례 준용). 채널명은 엔트리의 `uploader_id`(@핸들) 우선, 없으면 `channel_id`(UC…) 폴백, 둘 다 없으면 해당 영상 스킵(경고 로그) | 필수 |
 | FR24.4 | **재생목록 제목을 카테고리로 병합** — 대상 영상의 `meta.playlists`와 채널 `playlists.json`에 재생목록 제목을 추가한다(기존 태그 보존). 라이브러리 탭 카테고리 필터에서 재생목록 이름으로 조회 가능해진다. 병합 맵은 채널의 기존 playlists.json(없으면 기존 meta에서 재구성) ∪ {대상 vid: +재생목록 제목}으로 구성한다 — `_backfill_meta`는 맵에 없는 vid를 `[]`로 덮어쓰므로 부분 맵 전달 금지 | 필수 |
-| FR24.5 | 조건 필터(FR17.4)는 동일 적용(카테고리 칩은 재생목록 스캔에서 비어 있음). 진행율은 전체 대상 기준으로 채널 그룹 경계에서 연속 합산하고, 취소는 우아한 취소(FR18.2 준용). 완료 후 자동 인덱싱은 변경(new+updated>0)이 있는 채널만 각각 수행(FR17.9 준용) | 필수 |
+| FR24.5 | 조건 필터(FR17.4)는 동일 적용(카테고리 칩은 재생목록 스캔에서 비어 있음). 진행율은 전체 대상 기준으로 채널 그룹 경계에서 연속 합산하고, 취소는 우아한 취소(FR18.2 준용). 완료 후 자동 인덱싱은 변경(new+updated>0)이 있는 채널만 각각 수행(FR17.9 준용). 배치 휴식(FR14.2)도 채널 그룹 경계를 넘어 **작업 전체로 누적**한다 — 다채널 재생목록에서 휴식이 리셋되던 기존 결함을 2026-09-20에 수정했다(DQ-30) | 필수 |
 | FR24.6 | CLI(`yt.sh add/run`)는 범위 외 — 재생목록 지원은 대시보드 전용 | 명시 |
 
 ### FR25 — 채널 폴더(그룹) (신규)
@@ -473,6 +480,43 @@
 | FR33.4 | 콜백은 선택 인자다 — CLI(`./yt.sh index`·`run`)는 콜백 없이 기존과 동일하게 동작한다(FR18.1 준용) | 필수 |
 | FR33.5 | 건너뛴 영상 수는 인덱싱 완료 로그에 남긴다(`자막 N청크(신규 M) · 건너뜀 K`) — 증분이 실제로 동작하는지 운영 중 확인 가능해야 한다 | 필수 |
 
+### FR34 — 검색 기반 일괄 추출 (신규, v4 · 대시보드 전용)
+
+유튜브 **검색어**로 후보 영상을 모아, 대시보드에서 제한 조건을 걸고, 결과를 **하나의 폴더(FR25 그룹)** 로 묶어 일괄 추출한다.
+구현은 신규 아키텍처가 아니라 **재생목록 경로(FR24)의 소스 치환**이다 — 재생목록 스캔이 이미 "여러 채널에 흩어진 flat 엔트리"를 처리하고,
+`set_group(채널, 재생목록제목)`(FR25.7)의 인자를 검색어(또는 사용자 지정 폴더명)로 바꾸면 "하나의 그룹" 요구가 그대로 성립한다.
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR34.1 | **검색 진입점** — `POST /extract/scan`이 `{q, limit, min_duration, period, folder}` 형태의 검색 요청을 수용한다. URL 분류(FR17.1·FR24.1)에 `"search"` 종류를 추가해 `youtube.com/results?search_query=…` 형태도 같은 경로로 처리한다. 판정 우선순위는 **영상 → 재생목록 → 검색 → 채널**. **URL이 아닌 순수 텍스트는 `classify_url`이 계속 400을 낸다** — 검색은 전용 `q` 필드로만 진입한다(오타 URL이 조용히 검색으로 둔갑하는 것을 막는다, DQ-27) | 필수 |
+| FR34.2 | **ⓐ 결과 개수 상한** — `limit`(기본 20, 허용 1~50). yt-dlp `playlist_items: "1-N"`으로 **스캔 단계에서 절단**한다. 추출 단계의 `--limit` 요청 예산(FR14.5·DQ-16)은 그대로 이중 가드로 동작한다. 기본값을 보수적으로 두는 이유는 검색 UI가 채널 스캔보다 남발되기 쉽고 추출 단계 비용이 후보 수에 비례하기 때문이다 | 필수 |
+| FR34.3 | **ⓑ N초 미만 제외** — flat 검색 엔트리의 `duration`(실측 15/15 확보)을 임계값과 비교해 제외한다. 기본 on·임계 180초이며 **사용자가 임계값을 조정하거나 끌 수 있어야 한다**(고정 상수 금지). **`duration`이 없는 엔트리는 포함한다**(판정 불가를 제외 근거로 쓰지 않는다). 조건 이름·UI 문구·로그 어디에도 "쇼츠"라고 쓰지 않고 **"N초 미만 제외"** 로 표기한다 — 쇼츠 전용 라벨이 **실측으로 존재하지 않음이 확인**됐고(이름에 `short`가 들어간 필드 없음, `media_type`은 일반 영상과 같은 `"video"`이며 flat에는 아예 없음, `/shorts/` 접근도 `watch?v=`로 정규화), **실제 쇼츠가 185초인 반례**가 있어 180초 임계로는 걸러지지 않기 때문이다(DQ-23) | 필수 |
+| FR34.4 | **ⓒ 기간(2층)** — ① 서버측 프리필터: `period` 프리셋을 `sp=` 파라미터로 변환해 YouTube가 직접 거른다(시간/오늘/이번주/이번달/올해/전체). ② 정밀 확정: 기존 `date_range`(since/until)를 그대로 써서 **처리 시 full info의 `upload_date`로 판정**하고 범위 밖은 `date_skip`(DQ-12). 프리셋과 임의 날짜를 동시에 지정하면 **둘 다 적용**되며 최종 판정권은 항상 ②에 있다. 임의 날짜 범위는 `sp`로 표현할 수 없으므로 그때는 ②만 동작한다(DQ-24) | 필수 |
+| FR34.5 | **스캔 응답 · 길이 노출** — `kind:"search"`·`query`(검색어)·`videos[]`를 반환한다. 항목 필드는 FR24.2와 동일(`id·title·channel·content_type·playlists(빈 배열)·members_only·extracted`)하고 **`duration`(초, int \| null)을 추가**한다. 조건 미리보기 목록의 각 행에 길이를 표시하며, 포맷은 FR20.6의 공유 포맷터를 쓴다(flat 엔트리에는 `duration_string`이 없으므로 초에서 포맷한다). 결측은 빈칸으로 두고 필터에서는 통과시킨다(FR34.3). `extracted`는 원채널 state 조회(FR32.3 `resolve_name`)로 판정한다. 단 flat 검색 엔트리에는 `availability`·`live_status`가 **전부 없으므로**(실측 0/15) `members_only`는 state 기반(`sub_type=="members_only"`)으로만 판정되고 진행 중·예약 라이브는 스캔에서 걸러지지 않는다 — 미리보기에 "멤버십·라이브 여부는 처리 시 확정" 안내를 표기한다(DQ-26) | 필수 |
+| FR34.6 | **폴더(그룹) 지정** — 요청의 `folder`(기본값 = 검색어)를 그룹명으로 쓴다. 추출 시점에 **신규 등록되는 채널만** `set_group(채널, folder)`로 폴더에 넣고, 이미 등록돼 있던 채널의 폴더는 변경하지 않는다(FR25.7과 동일 규칙) | 필수 |
+| FR34.7 | **검색 유입 채널은 `run`·`transcribe` 전체 순회 제외** — 검색 추출로 **신규 등록**되는 채널은 `channels.yaml`에 `auto_run: false`를 기록한다. `main.py`의 `cmd_run`·`cmd_transcribe`는 **채널 인자가 없을 때만** 이 플래그가 `false`인 채널을 건너뛴다(`./yt.sh run 채널명`·`./yt.sh transcribe 채널명`으로 명시 지정하면 정상 실행). 두 명령의 대상 산출은 **공통 헬퍼 `main.bulk_targets(reg, channel)`** 를 쓴다 — 한쪽만 고쳐지는 드리프트를 막는다. 이미 등록돼 있던 채널의 플래그는 변경하지 않는다. 필드가 없으면 `true`로 간주한다(기존 channels.yaml 무변경 호환). 근거: 검색 50건이면 최대 50개 채널이 등록되는데 두 명령 모두 인자가 없으면 등록 전 채널을 순회한다 — 이미 35채널 중 24개가 재생목록 1회 추출로 유입된 상태이고, Whisper 전사(FR30)는 `run`보다 네트워크·CPU 비용이 더 크다(DQ-25) | 필수 |
+| FR34.8 | **`auto_run` 노출·토글** — `GET /channels/stats` 응답 항목에 `auto_run`(bool) 포함, 라이브러리·추출 탭 채널 카드에 제외 상태 배지 표시, `POST /channels/auto_run {channel, auto_run}`으로 토글한다(미등록 채널 404, 작업 중 409 — FR21.4·FR31.5 준용) | 필수 |
+| FR34.9 | **추출 실행** — `_run_search`는 재생목록 워커(FR24.3·24.5)와 동일 계약을 따른다: 채널별 그룹 순차 실행, 결과물은 각 영상의 **원채널 폴더**에 저장, 진행율은 전체 대상 기준 그룹 경계 연속 합산, 우아한 취소(FR17.8), 영상별 이벤트 축적(FR26), 변경(new+updated>0)이 있는 채널만 증분 인덱싱(FR33), **배치 휴식(FR14.2)은 그룹 경계를 넘어 작업 전체로 누적**(DQ-30 — 검색은 영상당 채널이 달라 이 공유가 없으면 휴식이 오지 않는다) | 필수 |
+| FR34.10 | **카테고리(재생목록 태그) 병합 없음** — 검색어를 `meta.playlists`·`playlists.json`에 기록하지 않는다(`pl_map={}` — `None`은 `scan_playlists()`+백필을 유발하므로 쓰지 않는다, DQ-28). 카테고리는 채널 주인이 만든 재생목록의 의미이고(FR15), 사용자 질의어를 섞으면 의미론이 오염된다. 검색 묶음의 정체성은 폴더(FR34.6)가 책임진다(DQ-28) | 필수 |
+| FR34.11 | 조건 필터(FR17.4)의 ⓐ최신N·ⓓ멤버십·ⓔ검색어는 동일 적용한다(ⓒ카테고리 칩은 검색 스캔에서 비어 있음). **ⓑN초 미만 제외는 스캔 단계에서 이미 적용된 뒤이므로 조건 UI의 대상 수 미리보기에 다시 나타나지 않는다** | 필수 |
+| FR34.12 | CLI(`yt.sh add/run`)로 검색어를 넣는 것은 범위 외 — 검색 추출은 대시보드 전용이다(FR24.6 준용). 단 `auto_run` 플래그의 **해석 책임은 CLI(`cmd_run`·`cmd_transcribe`)에 있다**(FR34.7) | 명시 |
+
+> **FR34.4 `sp` 프리셋 매핑:** `sp`는 YouTube 검색 필터의 base64 protobuf다. `type=video`를 함께 넣어야 재생목록·채널 엔트리 혼입이 사라지고
+> 필드 커버리지가 100%가 된다(실측: `sp` 없음 → `uploader_id` 14/15·`duration` 13/15, `sp=EgQIBBAB` → 둘 다 15/15).
+> **실측 확정(2026-09-20, 프리셋 6종 전수):** 전체 기간 `EgIQAQ`(동영상 필터만) · 지난 1시간 `EgQIARAB` · 오늘 `EgQIAhAB` ·
+> 이번 주 `EgQIAxAB` · 이번 달 `EgQIBBAB` · 올해 `EgQIBRAB`. 추정값 없음 — 단일 출처는 DESIGN §2.10 `SP_PRESETS` 표다.
+
+> **FR34 실측 근거(2026-09-20, flat 스캔 2회 · full info 1회, N=15):** `upload_date` 0/15 · `timestamp` 0/15 · `live_status` 0/15 ·
+> `availability` 0/15 · `duration` 15/15. 즉 검색 flat 엔트리는 **날짜를 주지 않는다** — FR2.6·DQ-12와 정확히 같은 제약이 검색 경로에도 성립한다.
+> `extractor_args.youtube.lang=ko`(FR32.1·DQ-20)는 검색 경로에도 정상 적용된다.
+
+> **FR34.3 쇼츠 라벨 실측(2026-09-20, `wEbizb3kF0Q` = `output/toyoungin`의 실제 `#Shorts` 영상, 1080x1920 세로):**
+> 이름에 `short`가 들어간 필드 **없음** · `media_type`은 full info에서 `"video"`(일반 영상과 동일)이고 flat 검색 엔트리에는 **0/10으로 아예 없음** ·
+> `/shorts/{id}`로 접근해도 `webpage_url`이 `watch?v=`로 정규화 · `aspect_ratio`는 판별 가능하지만(쇼츠 0.56 vs 85초 일반영상 `aIUgM4daefg` 1.78)
+> **full info에만 존재**해 영상당 `extract_info` 1회를 소비하므로 스캔 단계 미리보기에 쓸 수 없다.
+> **결정적 반례: 이 실제 쇼츠의 `duration`은 185초**로 쇼츠 상한 3분을 넘는다 — 180초 임계로는 걸러지지 않는다.
+> 이 실측이 FR20.5(길이 노출)와 FR34.3(명명)의 직접 근거다.
+
 ---
 
 ## 4. 비기능 요구사항 (NFR)
@@ -499,7 +543,8 @@
 | 명령 | 동작 | 비고 |
 |---|---|---|
 | `./yt.sh add URL` | 채널 등록 + 전체 자막 추출 자동 시작 | FR7.2 |
-| `./yt.sh run` | 등록된 전체 채널 신규/수정 업데이트 | FR7.3 |
+| `./yt.sh run` | 등록된 전체 채널 신규/수정 업데이트 (`auto_run: false` 채널은 건너뜀) | FR7.3 · FR34.7 |
+| `./yt.sh transcribe` | 등록된 전체 채널 무자막 영상 Whisper 전사 (`auto_run: false` 채널은 건너뜀) | FR30.1 · FR34.7 |
 | `./yt.sh run 채널명` | 특정 채널만 업데이트 | FR7.3 |
 | `./yt.sh run --limit N` | 카나리아: 최대 N개 영상만 처리 | FR14.5 |
 | `./yt.sh review` | 전체 채널 품질 검토 (규칙 기반) | FR4 |
@@ -508,6 +553,10 @@
 | `./yt.sh index` | 전체 채널 KL 인덱싱 | FR6 |
 | `./yt.sh list` | 등록 채널 목록 조회 | FR7.5 |
 | `./yt.sh remove 채널명` | 채널 등록 해제 | FR7.5 |
+
+> **`auto_run` 적용 범위(FR34.7):** 건너뛰기는 **`run`·`transcribe`의 인자 없는 전체 순회에만** 적용된다(공통 헬퍼 `main.bulk_targets`).
+> `run 채널명`·`transcribe 채널명`으로 명시 지정하면 플래그와 무관하게 실행되고, `review`·`reextract`·`index`의 대상 산출은 이번 변경 범위가 아니다
+> (셋은 네트워크 요청을 내지 않거나 로컬 파일만 다루므로 429 위험이 없다).
 
 ---
 
@@ -529,7 +578,7 @@
 | FR12.1~12.4 | `MetaCollector.extract_tickers` · `KLQuery` | meta tickers 필드 |
 | FR13.1~13.5 | `config.resolve_cookiefile` · `Extractor._fetch_vtt` | /tmp 쿠키 작업본 |
 | FR13.6 | `config.firefox_profile_dir`·`has_auth` · `Extractor._ydl_opts`(cookiesfrombrowser)·`_fetch_vtt` · `yt.sh`(프로필 자동 감지 마운트) · `cookie_health.get_status`(source) | (Firefox 쿠키 직접 읽기) |
-| FR14.1~14.5 | `config.YTDLP_COMMON` · `Extractor.run` | (레이트리밋 방어) |
+| FR14.1~14.5 | `config.YTDLP_COMMON`(`BATCH_SIZE_RANGE`·`BATCH_REST_RANGE`) · `Extractor.run(rest_state=)` · `extractor.BatchRest`(작업 단위 휴식 카운터, DQ-30) · `dashboard/jobs.py._run_grouped`(그룹 간 공유) | (레이트리밋 방어) |
 | FR15.1~15.5 | `Extractor.scan_playlists` · `MetaCollector` · `KLIndexer` | playlists.json, meta/*.json |
 | FR16.1~16.4 | `Extractor.scan_channel` | meta/*.json (content_type) |
 | FR17.1~17.9 | `dashboard/jobs.py` (`classify_url` · `apply_filters` · `JobManager` · 스캔 캐시 · `_run_channel`/`_run_single`) · `dashboard/server.py` (`POST /extract/scan`·`/extract`·`/extract/cancel`) · `extractor.py` (`run(entries=,pl_map=,date_range=)` · `process_video(info=,date_range=)`) · `kl_indexer.KLIndexer.index_all` | (백그라운드 작업) |
@@ -537,6 +586,7 @@
 | FR18.1~18.4 | `Extractor.run(progress=)` · `Extractor._report` · `dashboard/jobs.py` (`JobManager._make_cb`·`_merge_stats`) · `dashboard/server.py` (`GET /extract/status`) | (폴링 API) |
 | FR19.1~19.4 | `StateManager.decide` (쿠키 인지) · `cookie_health.py` (`YDLLogger`·`mark_invalid`·`get_status`) · `Extractor._ydl_opts` (로거 주입) · `dashboard/server.py` (`GET /cookies`) | output/.cookie_status.json |
 | FR20.1~20.4 | `dashboard/server.py` (`GET /channels/stats`·`GET /subtitle`) · `kl_query.list_videos` (`sub_type` 노출) · `KLQuery.search` · `dashboard/index.html` (라이브러리 탭) | (라이브러리 뷰) |
+| FR20.5~20.6 | `kl_query.list_videos` (`duration`·`duration_string` 노출) · `dashboard/index.html` (`fmtDuration` 공유 포맷터 · 영상 행·폴더 병합 목록·검색 결과 표시) — **meta.json 기존 필드 재사용, 백필 없음** | (라이브러리 길이 표시) |
 | FR16.5 | `Extractor.process_video` (live_status 가드, state 미기록) · stats `live_wait` 키 | extract_log.csv `live_wait` 행 |
 | FR23.1~23.3 | `subtitle_utils.reflow_sentences` · `srt_to_txt` | txt/ (문장 단위 개행) |
 | FR24.1~24.6 | `dashboard/jobs.py` (`classify_url` playlist 분기 · `_do_scan_playlist` · `_run_playlist` · `_merged_pl_map`) · `dashboard/index.html` (kind 표시·채널 배지) | 원채널 output/ + playlists.json 병합 |
@@ -552,6 +602,10 @@
 | FR32.4 | (구현 없음 — 수동 정리) | — |
 | FR33.1~33.2·33.5 | `kl_indexer.KLIndexer._unchanged`(신규) · `index_subtitles` · `index_descriptions` | ChromaDB 조회(임베딩 없음) |
 | FR33.3~33.4 | `kl_indexer.index_all(on_progress=)` · `dashboard/jobs.py`(`_maybe_index`·`_run_playlist`) · `dashboard/index.html`(`pollJob` 진행 배지·바) | job `index_stage`/`index_done`/`index_total` |
+| FR34.1~34.5·34.11 | `dashboard/jobs.py` (`classify_url` search 분기 · `_build_search_url`(신규) · `SP_PRESETS` · `_do_scan_search`(신규) · `_search_opts`) · `dashboard/server.py` (`POST /extract/scan` `q` 수용) · `dashboard/index.html` (검색어 입력·조건 3종 UI) | 스캔 캐시 `kind="search"` |
+| FR34.6·34.9~34.10 | `dashboard/jobs.py` (`_run_search`(신규, `_run_playlist` 재사용) · `_new_job("search_run")`) · `channel_registry.set_group` | 원채널 `output/` · channels.yaml `group` |
+| FR34.7~34.8 | `channel_registry.set_auto_run`(신규) · `ChannelRegistry.names(auto_only=)`(신규 인자) · `main.py bulk_targets`(신규 공통 헬퍼) · `cmd_run`·`cmd_transcribe` · `dashboard/server.py` (`POST /channels/auto_run`·`/channels/stats.auto_run`) · `dashboard/index.html` (제외 배지·토글) | channels.yaml `auto_run` 필드 |
+| FR34.12 | (구현 없음 — 범위 명시) | — |
 | FR21.1~21.4 | `dashboard/server.py` (`POST /videos/delete`·`POST /channels/delete`·`_reject_path_traversal`) · `kl_indexer.KLIndexer.delete_video` · `dashboard/jobs.py` (`JobManager.is_busy`) · `dashboard/index.html` (`deleteVideo`·`deleteChannel`·`copySubtitle`) | output 파일·state·ChromaDB 정리 |
 | FR22.1~22.4 | `dashboard/index.html` (`loadExtChannels`·`extSelectChannel`·`switchTab`·`pollJob` 완료 훅) — 기존 `GET /channels/stats`(FR20.1)·`extStart`(FR17.3~17.4) 재사용, 신규 백엔드 없음 | (프론트 전용) |
 
@@ -563,11 +617,14 @@
 
 ### 7.1 단위 검증 (자동화 테스트)
 
+> v1 당시 항목만 담은 요약표다. **현행 전체 목록(V-U1~V-U21 + 번호 미부여 항목)은 DESIGN §9.1a·§9.1b가 정본**이며,
+> 그 정본은 `tests/test_unit.py`의 섹션 헤더와 1:1로 맞춰져 있다. 아래 V-U3만 아직 테스트 미구현이다.
+
 | 검증 ID | 대상 FR | 검증 방법 | 합격 기준 |
 |---|---|---|---|
 | V-U1 | FR1.4, FR1.5 | `make_basename()` 호출 → 파일명 형식 확인 | `YYYYMMDD_제목` 형식, srt·txt 동일 |
 | V-U2 | FR1.3 | 샘플 VTT → `vtt_to_srt()` → SRT 형식 검증 | 인덱스·타임스탬프·텍스트 3요소 존재 |
-| V-U3 | FR1.2 | 수동/자동 자막 mock → 우선순위 선택 확인 | 수동 있으면 manual, 없으면 auto |
+| V-U3 | FR1.2 | 수동/자동 자막 mock → 우선순위 선택 확인 | 수동 있으면 manual, 없으면 auto (**테스트 미구현** — DESIGN §9.1a) |
 | V-U4 | FR2.2 | modified_date 변경 mock → is_updated() | 변경 시 True 반환 |
 | V-U5 | FR4.2 | 정상/이상 자막 샘플 → 규칙 검토 | 이상 자막만 SUSPECT 판정 |
 | V-U6 | FR6.2 | SRT → `chunk_by_srt()` → 청크 검증 | 120초 윈도우, start_seconds 정확 |
@@ -608,7 +665,7 @@
 
 ### 7.5 합격 판정 기준
 
-- **단위 검증:** V-U1~V-U7 전부 통과 (100%)
+- **단위 검증:** DESIGN §9.1a의 V-U1~V-U21 전부 통과 (V-U3 제외 — 테스트 미구현). 기준선 `./yt.sh test` = 60 passed / 1 skipped (2026-09-20)
 - **통합 검증:** V-I1~V-I8 전부 통과 (100%)
 - **검색 품질:** V-Q1~V-Q3 수동 확인, 주관적 만족도 기준
 
@@ -624,3 +681,8 @@
 | DQ-04 | 청킹 전략 | ✅ SRT 타임스탬프 기준 120초 윈도우 |
 | DQ-05 | 멀티 채널 관리 | ✅ channels.yaml + 채널별 독립 폴더 |
 | DQ-06 | CLI 간소화 | ✅ yt.sh 래퍼로 Docker 은닉, add 시 추출 자동 시작 |
+
+> DQ-07 이후(현재 DQ-30까지)의 설계 결정은 **DESIGN.md §10**이 단일 출처다. 본 표는 초기 6건의 역사 기록으로만 유지한다.
+> FR34 관련 신규 결정은 DQ-23(쇼츠 duration 휴리스틱) · DQ-24(기간 2층 구조) · DQ-25(`auto_run` run·transcribe 제외) ·
+> DQ-26(검색 flat 메타 부재와 미리보기 정확도) · DQ-27(검색 진입점) · DQ-28(검색어 카테고리 미병합) ·
+> DQ-29(길이 노출은 기존 meta 재사용, 백필 없음) · **DQ-30(배치 휴식 카운터를 작업 단위 상태 `BatchRest`로 분리 — FR14.2 경계 규정)** 이다.

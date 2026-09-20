@@ -111,6 +111,10 @@ class KLQuery:
                 "playlists": meta.get("playlists", []),
                 "content_type": meta.get("content_type", "video"),
                 "sub_type": meta.get("sub_type"),   # 📝/🤖 뱃지용 (FR20.2)
+                # 영상 길이 (FR20.5) — meta.json에 이미 저장된 값을 그대로 통과시킨다.
+                # 결측은 None/"" — 0으로 채우면 0초 영상과 구분 불가 (FR20.6, DQ-29).
+                "duration": meta.get("duration"),
+                "duration_string": meta.get("duration_string") or "",
                 "url": meta.get("webpage_url"),
             })
         return sorted(videos, key=lambda v: v["upload_date"], reverse=True)

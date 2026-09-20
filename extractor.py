@@ -19,6 +19,61 @@ from meta_collector import MetaCollector
 log = logging.getLogger("extractor")
 
 
+class BatchRest:
+    """
+    배치 휴식 상태 (FR14.2). `run()` 호출 경계를 넘어 공유할 수 있는 카운터다.
+
+    `run()`의 지역 변수로만 두면 대시보드 그룹 추출(`_run_grouped`)처럼 채널마다
+    `run()`을 새로 부르는 경로에서 카운터가 매번 0으로 리셋되어 휴식이 영영 오지
+    않는다(검색 추출은 영상당 채널이 달라 특히 심각). 공유 객체로 분리해 막는다.
+
+    cancel_check : () -> bool. True면 남은 휴식을 끊는다(취소 응답성 유지, FR18.2).
+                   None이면 기존 CLI 경로와 완전히 동일하게 `time.sleep(rest)` 1회.
+    """
+
+    TICK_SEC = 1        # 취소 감시 주기(초) — cancel_check가 있을 때만 사용
+
+    def __init__(self, cancel_check=None):
+        self._cancel_check = cancel_check
+        self.since = 0                                    # 마지막 휴식 이후 시도 수
+        self.size = random.randint(*config.BATCH_SIZE_RANGE)   # 이번 배치 크기(랜덤)
+        self.rests = 0                                    # 누적 휴식 횟수(검증용)
+
+    def _cancelled(self) -> bool:
+        try:
+            return bool(self._cancel_check and self._cancel_check())
+        except Exception:                # pragma: no cover - 콜백 오류는 무시
+            return False
+
+    def count(self, n: int = 1):
+        """extract_info 시도 1회 계상 (성공·실패 무관)."""
+        self.since += n
+
+    def due(self) -> bool:
+        return self.since >= self.size
+
+    def take(self) -> int:
+        """휴식 수행. 휴식 시간·다음 배치 크기는 **매번 재추첨**한다 (FR14.2)."""
+        rest = random.randint(*config.BATCH_REST_RANGE)
+        log.info(f"  💤 {self.since}개 처리 → {rest}초 휴식 (차단 예방)")
+        slept = 0
+        if self._cancel_check is None:
+            time.sleep(rest)             # CLI 경로 — 기존 동작 그대로
+            slept = rest
+        else:
+            while slept < rest:
+                if self._cancelled():
+                    log.info(f"  ⏹ 취소 감지 → 휴식 중단 ({slept}/{rest}초)")
+                    break
+                chunk = min(self.TICK_SEC, rest - slept)
+                time.sleep(chunk)
+                slept += chunk
+        self.since = 0
+        self.size = random.randint(*config.BATCH_SIZE_RANGE)
+        self.rests += 1
+        return slept
+
+
 class Extractor:
 
     def __init__(self, channel_config: dict):
@@ -323,7 +378,7 @@ class Extractor:
     # ── 채널 전체 실행 ───────────────────────────────────────────────────────
     def run(self, force_vid: str = None, limit: int = None,
             progress=None, entries: list = None, pl_map: dict = None,
-            date_range: dict = None) -> dict:
+            date_range: dict = None, rest_state: "BatchRest" = None) -> dict:
         """
         채널 증분 추출. 신규 인자가 모두 None이면 기존 CLI 동작과 완전 동일 (FR18.1).
 
@@ -331,6 +386,8 @@ class Extractor:
         entries    : 주어지면 scan_channel() 생략 (대시보드 스캔 캐시 재사용, DQ-13)
         pl_map     : 주어지면(빈 dict 포함) scan_playlists() 생략
         date_range : {"since": "YYYYMMDD"|None, "until": "YYYYMMDD"|None} (DQ-12)
+        rest_state : 배치 휴식 카운터(FR14.2)를 호출 간 공유하고 싶을 때 주입.
+                     None이면 이 run() 전용 BatchRest를 새로 만든다(기존 동작).
         """
         log.info(f"━━━ 채널: {self.channel} ━━━")
 
@@ -361,10 +418,10 @@ class Extractor:
         # 따라서 extract_info 요청을 1회 소비한 모든 경로(성공·무자막·기간외·
         # 멤버십·429·기타 오류)가 예산을 소비해야 한다 → 시도 직전에 증가시킨다
         processed = 0         # extract_info 요청을 소비한 시도 수 — --limit 기준
-        since_rest = 0        # 마지막 배치 휴식 이후 시도 수 (실패 포함) — 휴식 기준
         done = 0              # 처리 완료 수 (스킵 포함) — 진행률 기준
-        # 배치 크기는 매 배치 재추첨 — 고정 주기는 차단 탐지의 기계 서명 (FR14.2)
-        batch_size = random.randint(*config.BATCH_SIZE_RANGE)
+        # 배치 휴식 상태(시도 수·배치 크기). 주입되면 호출 경계를 넘어 누적된다 —
+        # 대시보드 그룹 추출은 채널마다 run()을 새로 부르므로 공유가 필수다 (FR14.2)
+        rest = rest_state if rest_state is not None else BatchRest()
 
         for i, entry in enumerate(entries, 1):
             if cancelled:
@@ -398,12 +455,8 @@ class Extractor:
                 break
 
             # 배치 휴식 (FR14.2): 랜덤 개수 시도마다 랜덤 시간 쉼
-            if since_rest >= batch_size:
-                rest = random.randint(*config.BATCH_REST_RANGE)
-                log.info(f"  💤 {since_rest}개 처리 → {rest}초 휴식 (차단 예방)")
-                time.sleep(rest)
-                since_rest = 0
-                batch_size = random.randint(*config.BATCH_SIZE_RANGE)
+            if rest.due():
+                rest.take()
 
             # 영상 처리 직전 진행 보고 — False면 우아한 취소 (FR18.2)
             if not self._report(progress, "extracting", done, total,
@@ -411,7 +464,7 @@ class Extractor:
                 cancelled = True
                 break
 
-            since_rest += 1
+            rest.count()                     # 휴식 카운터 소비
             processed += 1                   # 요청 예산 소비 (성공·실패 무관)
             retried_429 = False              # 429 재시도는 영상당 1회 (FR14.3)
             event = None                     # 결과 확정 시 채워짐 (FR26.1)
@@ -467,7 +520,7 @@ class Extractor:
                         if not retried_429:
                             retried_429 = True
                             processed += 1
-                            since_rest += 1
+                            rest.count()
                             log.info(f"  🔁 같은 영상 재시도: {vid}")
                             continue
                         stats["error"] += 1      # 재시도도 실패 → 이번 run에서 포기

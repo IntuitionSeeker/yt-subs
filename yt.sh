@@ -8,6 +8,7 @@
 #       ./yt.sh ask 채널 "질문" [--multistep]
 #       ./yt.sh serve        (대시보드)
 #       ./yt.sh migrate-groups [--apply [--yes]] [--rollback] [--unlock] [--no-backup]
+#       ./yt.sh backfill-tickers [채널] [--apply]   (기본 dry-run, FR12.2)
 # ─────────────────────────────────────────────────────────────
 set -e
 

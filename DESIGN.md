@@ -1,8 +1,8 @@
 # DESIGN — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v5.8  
+> **버전:** v5.9  
 > **작성일:** 2026-08-09  
-> **연계 문서:** REQUIREMENTS.md v5.8 (FR1~FR36)  
+> **연계 문서:** REQUIREMENTS.md v5.9 (FR1~FR36)  
 > **주요 변경:** 질의 인터페이스(FR9)·질의 하네스(FR10)·웹 대시보드(FR11~12) 설계 편입,
 > 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20) 설계 추가,
@@ -31,6 +31,7 @@
 > **v5.6:** 폴더(그룹)의 **실제 디렉터리 승격**(FR35, §2.1b·§2.11c·§3.10·§4·§5.1·§5.9) — `config.channel_dir()`이 `channels.yaml`의 `group`을 해석해 `output/<폴더>/<채널>/`를 돌려준다. `config`가 `channel_registry`를 import할 수 없으므로(순환) **config 내부에 yaml 직접 파싱 읽기 전용 해석기 + `(st_mtime_ns, st_size)` 캐시**를 두고, `ChannelRegistry._save()`의 명시 무효화를 2차 안전망으로 건다(DQ-32). 그룹명은 **변환 없이 거부**하는 세그먼트 검증(DQ-33), `output/` 최상위 이름공간 유일성(DQ-34), 이동은 **`os.rename` 단일 호출 + 보상 롤백**(복사 폴백 금지, DQ-35), 마이그레이션은 **명시적 CLI·dry-run 기본·저널 자동 롤백·yaml 무변경**(DQ-36). 신규 모듈 `folder_ops.py`, 신규 CLI `migrate-groups`. 동반 결함 수정: `ChannelRegistry.add()` upsert화 + `resolve_name` 사용(FR7.7~7.9, DQ-37) — FR35 하에서 `group` 소실은 **채널 디스크 경로 변경**으로 격상된다. 신규 결정 DQ-31~DQ-37, 검증 V-U22~27·V-D17~19
 > **v5.7 (버그 수정):** 멤버십 감지 언어 비의존화(FR13.7, §2.2·§2.10) — **DQ-20(`extractor_args.youtube.lang=ko`)이 YouTube가 주는 오류 `reason` 문구까지 한국어로 번역해** 영어 키워드만 보던 `Extractor._is_members_only`가 2026-09-09 이후 모든 멤버십 영상을 조용히 `error`로 분류했다(실측 `_workspace/30`). 판정을 신규 잎 모듈 `video_access.py`로 모아 **1차 `availability`(언어 비의존)·2차 메시지(영/한)** 로 바꾸고 추출 경로와 대시보드 스캔(FR17.6)이 같은 규칙을 공유한다. 429는 멤버십 판정보다 **먼저** 확정한다(오분류 시 `_mark_skip`으로 영구 스킵). DQ-20에 **언어 결합 관계**를 명문화. 신규 결정 DQ-38, 검증 V-U29
 > **v5.8:** 채널 메모 · 추출 탭 이름 변경 · 탭 간 자동 갱신(FR36, §2.1·§2.9·§2.9b·§2.10·§5.1·§5.9) — 메모는 **신규 스키마가 아니다**: `channels.yaml`의 `note`는 `add()`가 이미 쓰고 FR7.7이 보존까지 약속하지만 **읽는 곳이 0이라 죽어 있던 필드**이며(77채널 전부 `""`), `ChannelRegistry.set_note` + `POST /channels/note` + `/channels/stats.note` 세 접점만으로 살린다(DQ-39). 표시·입력은 기존 채널 카드와 `prompt`를 재사용한다(한 줄·200자, DQ-39). 추출 탭 이름 변경은 **기존 `POST /channels/rename`을 그대로 호출**하고, 그 과정에서 드러난 기존 결함 — 옛 이름으로 캐시된 `scan_id`가 `output/<옛이름>/` **유령 폴더**를 만드는 경로 — 를 `JobManager.invalidate_scans()`로 끊는다(DQ-41, 기존 400 계약 재사용). 갱신은 **`/channels/stats` 단일 출처 + 공통 헬퍼 `refreshChannelViews({names})`**로 통일하되 비활성 탭은 무효화 플래그로 지연 로드하고, 이관은 `renameChannel` 한 곳만 한다(DQ-40). 메모 저장은 `ChannelRegistry`의 read-modify-write 특성 때문에 작업 중 409다(DQ-42). 신규 결정 DQ-39~DQ-42, 검증 V-U30·V-U31·V-D20
+> **v5.9 (버그 수정):** 종목코드 추출 문맥화(FR12.2·12.5~12.7, §2.4·§5.3) — 구 규칙 `_TICKER_KR = re.compile(r'\b(\d{6})\b')`은 **6자리 숫자면 무엇이든** 채택했고, 실측 441개 meta에서 `tickers`가 **100% 오탐**이었다(값 있는 26개 = 제목 날짜 `260819` 22종 + 계좌번호 조각 `241686`, `_workspace/34_ticker_bug.md`). 날짜·계좌·전화·사업자번호·URL 조각이 전부 같은 모양이므로 **숫자만 보는 방식 자체가 성립하지 않는다** → `extract_tickers`를 후보 스캔 + 근거/배제 판정으로 재작성한다(강한 근거 = 종목 전용 라벨·거래소 표기 / 약한 근거 = 일반 `코드:`·괄호 단독·나열 / 공통 배제 = URL·숫자 나열 / 약한 근거에만 YYMMDD 배제, DQ-43). 기존 데이터는 신규 CLI `backfill-tickers`(기본 dry-run, meta+desc 재계산이라 네트워크 불필요)로 정리한다. **정상 결과가 빈 값**임을 FR12.6에 못박았다. 검증 V-U32
 
 > **v5.5 정합 정정 (2026-09-20, 문서 전용):** §9.1을 전면 재정렬해 V-U 번호 충돌·누락을 해소했다 — **정본은 `tests/test_unit.py`**(실행되는 것이 진실). 구 목록의 `V-U12 reflow_sentences`·`V-U13 live guard`는 테스트 파일이 쓰는 `V-U12 채널 폴더(FR25.1)`·`V-U13 챕터 정규화(FR27.1)`에 자리를 내주고 번호를 폐기(검증 자체는 §9.1b에 존치), 누락돼 있던 V-U14(Whisper SRT 조립)·V-U15(RSS 파싱)·V-U16(이름 변경)·V-U11b(재생목록 URL 분류)를 편입했다. 코드·FR 변경 없음
 
@@ -158,7 +159,9 @@ dict 단일 인자 규약이라 필드를 추가해도 시그니처가 깨지지
 
 | 항목 | 기능 |
 |---|---|
-| `extract_tickers(text)` | 한국 종목코드(6자리)·미국 티커($XXX) 추출 (FR12.2) |
+| `extract_tickers(text)` | 종목코드·티커 추출 (FR12.2·12.5, DQ-43). `(?<!\d)\d{6}(?!\d)` 후보마다 앞뒤 24자 문맥을 보고 **근거가 있을 때만** 채택한다 — 강한 근거(`_LABEL_STRONG`·`_EX_PREFIX`·`_EX_SUFFIX`) / 약한 근거(`_LABEL_WEAK`·괄호 단독·직전 채택 코드와의 나열) / 공통 배제(`_URL_HINT` 토큰·`_numeric_neighbor`) / 약한 근거에만 `_is_date_like`(YYMMDD) 배제. 미국 티커 `$[A-Z]{1,5}`는 불변 |
+| `tickers_from_meta(meta, description)` | meta(제목·태그) + 설명으로 `tickers` 재계산 — `save()`와 백필이 **같은 입력 구성**을 쓰도록 한 단일 통로 (FR12.2) |
+| `backfill_tickers(channel, apply=False)` | 기존 `meta/*.json`의 `tickers` 재계산 (FR12.7). 설명은 `desc/*.txt`에서 읽으므로 **네트워크 없음**. `apply=False`(기본)면 차분만 반환하고 **쓰지 않는다**. 반환 `{scanned, changed, removed, added, samples}` |
 | `save(info, basename, sub_type, playlists, content_type)` | meta/*.json(+`tickers`·`playlists`·`content_type`) + desc/*.txt 저장 |
 
 ### 2.5 QualityChecker (`quality_checker.py`) — FR4
@@ -520,6 +523,11 @@ channels:
 }
 ```
 
+> `tickers`는 **문맥 근거가 있는 값만** 담는다(FR12.5·DQ-43). 위 예시는 "종목코드 005930"·"$TSLA"처럼
+> 근거가 붙은 경우이고, **실측 441개에서는 근거가 없어 전부 `[]`** 다 — 빈 배열이 정상이다(FR12.6).
+> 기존 파일 정리는 `./yt.sh backfill-tickers [--apply]`(기본 dry-run, FR12.7). ChromaDB 청크 메타에는
+> `tickers`가 없으므로 백필 후 **재인덱싱이 필요 없다**(소비처는 `kl_query.list_videos`·`/subtitle` 뿐).
+
 ### 5.4 ChromaDB 컬렉션 (FR6.5·15.3) — 2개 분리
 
 `subtitle_chunks` 메타데이터: `video_id · title · upload_date · sub_type · playlists(쉼표 join 문자열) · content_type · chunk_index · start_seconds · source_url(?t=Ns)`  
@@ -722,7 +730,9 @@ yt-subs/
 | V-U30 | **채널 메모 계약**(FR36) — `set_note` 트림·제어문자(개행·탭 포함)→공백 치환 / **200자 통과·201자 `ValueError`**(절삭 아님) / 빈 값 제출 시 **필드가 제거되지 않고 `note: ""`** 로 남음 / 미등록 채널 `KeyError` / 반환값 = 저장된 정규화 값 / **회귀:** `add()` 재등록이 기존 `note`를 보존(FR7.7)하고 `rename()`이 `note`를 옮긴다 / **API 계약:** `POST /channels/note` 응답 shape(`{ok, channel, note}` 정규화 값)·404 미등록·400 201자·400 경로 문자·**작업 중 409**(DQ-42)와 `/channels/stats.note` 노출 | FR36.1~36.4·36.11·DQ-39·DQ-42 | `tests/test_unit.py` §V-U30 (구현됨 — `test_set_note_normalizes_control_chars_and_trims`·`test_set_note_length_limit_rejects_not_truncates`·`test_set_note_empty_keeps_field_as_empty_string`·`test_set_note_unknown_channel`·`test_note_survives_add_upsert_and_rename`·`test_channels_note_api_contract`) |
 | V-U31 | **스캔 캐시 무효화**(FR36.8) — 채널 스캔(`entry["channel"]`)·재생목록/검색 스캔(`entry["by_channel"]` 키) 양쪽에서 대상 채널 항목만 삭제되고 **다른 채널 캐시는 남는다**(정확 일치 — 부분 문자열로 남의 캐시를 지우지 않는다) / 삭제된 `scan_id`로 `POST /extract` 시 **기존 400**("만료") / rename이 **400·409로 실패하면 캐시 무변경**(성공 후에만 무효화) / **채널 삭제도 무효화**(옛 `scan_id`로 되살아나지 않는다) / `channel=None`이면 전체 비움 / **결함 재현 대조군:** 무효화 없이 옛 이름 캐시로 `_run_channel`을 돌리면 `config.channel_dir(옛이름)`(=레지스트리에 없는 평면 경로)에 쓰려 한다 | FR36.8·DQ-41 | `tests/test_unit.py` §V-U31 (구현됨 — `test_invalidate_scans_targets_only_referencing_entries`·`test_rename_invalidates_scan_and_extract_is_400`·`test_rename_failure_keeps_scan_cache`·`test_delete_channel_invalidates_scan_cache`·`test_stale_scan_cache_targets_ghost_dir_without_invalidation`), mock_jobs_test §13 병행 |
 
-기준선: 2026-09-24 기준 `./yt.sh test` = **140 passed / 1 skipped** (skip 1건은 컨테이너 이미지에 node가
+| V-U32 | **종목코드 문맥 판정**(FR12.2·12.5~12.7) — 실측 오탐 고정: 제목 날짜 `[주식] 260819 …` 3종·계좌번호 `우리은행 /1002 763 241686 /`·사업자/전화번호·URL 숫자 조각·근거 없는 맨 6자리·`쿠폰코드 123456`·약한 근거+날짜(`인증코드: 260819`·`(260819)`) **전부 `[]`** / 채택: 강한 라벨(`종목코드:`·`단축코드`·`티커`)·거래소 표기(`KRX:`·`.KS`)·괄호 단독·일반 `코드:`·나열(`005930, 000660`)·`$AAPL` / **강한 라벨이면 날짜형 코드(`010130`)도 채택** / 백필은 dry-run에서 **파일 무변경**, `--apply`에서만 기록하고 재실행 시 변경 0(멱등) | FR12.2·12.5~12.7·DQ-43 | `tests/test_unit.py` §V-U32 (`test_extract_tickers_rejects_noise`(13케이스)·`test_extract_tickers_accepts_with_context`(10케이스)·`test_backfill_tickers_dry_run_then_apply`) |
+
+기준선: 2026-09-24 기준 `./yt.sh test` = **163 passed / 1 skipped** (skip 1건은 컨테이너 이미지에 node가
 없는 `fmtDuration` node 실행 테스트 — 호스트 node 22에서 통과 확인).
 
 
@@ -739,7 +749,6 @@ yt-subs/
 | `FR32.1` | 제목 언어 고정 — 채널 `lang`·기본 언어·`self` 없는 호출 경로·공유 상수 비오염 | DQ-20 |
 | `FR32.2` | URL → 등록 채널명 역조회 `resolve_name` | DQ-19 |
 | `FR33.1~33.2` | 증분 인덱싱 판정 — `_unchanged`가 기존 청크 id·본문·메타 대조 | DQ-21 |
-| `종목 추출 (FR12.2)` | `extract_tickers` 티커 추출 | |
 
 mock 스크립트(`mock_scan_test.py` ⑥~⑰ · `mock_jobs_test.py` ①~⑪)에도 번호 없는 검증이 다수 있다 —
 CLI 동작 불변(FR18.1)·우아한 취소(FR18.2)·스캔 캐시 재사용(DQ-13)·date_skip 등식(V-D11 전제)·
@@ -844,6 +853,7 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | DQ-40 | 뷰 갱신은 **`/channels/stats` 단일 출처 + 공통 헬퍼 `refreshChannelViews({names})`**, 비활성 탭은 **무효화 플래그로 지연 로드**하고 기존 rename 4종 중 **`renameChannel`만 이관**한다 | 현행은 호출부마다 `loadLibrary(); loadExtChannels(); loadChannels();`를 **손으로 나열**한다(`renameChannel`). 새 기능이 늘 때마다 하나를 빠뜨리면 "다른 탭에 옛 이름이 남는" 증상이 조용히 생기는 구조라, 이름·메모 변경만큼은 통로를 하나로 묶는다. **전량 이관을 기각한 이유:** 폴더·영상·카테고리 변경은 갱신해야 할 대상이 서로 다르고(영상 목록만 / 라이브러리만), 이관하면 **호출 집합이 바뀌어** 회귀 위험만 생기고 얻는 게 없다. 반면 `renameChannel`은 **이미 헬퍼와 정확히 같은 3종을 호출**하므로 이관해도 동작이 같다(유일한 차이는 라이브러리 탭이 비활성일 때 즉시 재조회 대신 무효화로 미루는 것 — fetch가 줄고 결과는 동일). **`libLoaded` 가드를 없애지 않은 이유:** 가드를 제거하면 탭 전환마다 전체 재조회가 되어 FR25.4 접기 상태·채널 선택이 매번 흔들린다. 문제는 캐시가 아니라 **무효화 신호가 없던 것**이고, 이미 `pollJob` 완료 훅이 `libLoaded = false`로 같은 수법을 쓰고 있다. **질의 탭을 `names`로 가른 이유:** `loadChannels()`는 현재 선택을 첫 채널로 되돌리고 `loadVideos()`까지 부르는 **부작용 있는 함수**라, 메모 변경처럼 이름과 무관한 갱신에서 호출하면 질의 중 화면이 튄다(FR36.9~36.10) |
 | DQ-41 | 채널 이름 변경은 **그 채널을 참조하는 스캔 캐시를 버린다** — 캐시를 새 이름으로 고쳐 쓰지 않는다 (기존 결함) | `_run_channel`은 스캔 캐시에 박힌 `entry["channel"]`(스캔 시점의 이름)을 끝까지 쓴다. 이름이 바뀌면 `channel not in reg.names()`가 참이 되어 `reg.add(url)`을 부르지만, **`add()`의 반환값을 받지 않으므로** 지역 변수 `channel`은 옛 이름 그대로이고 뒤이은 `reg.get(옛이름)`은 `KeyError` → 폴백 cfg로 진행한다. 결과적으로 `config.channel_dir(옛이름)`이 **레지스트리에 없는 평면 경로**를 만들고 자막·state·ChromaDB가 **유령 폴더**에 쌓인다(라이브러리에는 나타나지 않는다). **캐시 재작성(rewrite)을 기각한 이유:** 캐시에는 `channel` 말고도 `by_channel` 키·`url`·`entries`가 얽혀 있고, 이름 변경 중 부분 갱신은 새로운 불일치를 만든다. 반면 **폐기는 단 한 줄이고 기존 400 계약**("scan_id가 만료되었습니다. 다시 스캔하세요")에 그대로 착지한다 — 스캔 재실행 비용은 1+N회 요청이지만 이름을 바꾸는 빈도는 매우 낮다. 이 결함은 FR31(v5.1)부터 존재했으나 이름 변경이 라이브러리 탭에만 있어 드러나지 않았고, 추출 탭에 ✏️를 다는 FR36.7이 **스캔 결과 화면 바로 옆에** 방아쇠를 놓는다. **채널 삭제도 같은 계열**이다 — 삭제 뒤 옛 `scan_id`로 추출하면 `reg.add()`가 채널을 되살려 "삭제했는데 다시 생긴다"가 되므로, 한 줄짜리 같은 해법을 `/channels/delete`에도 건다 (FR36.8) |
 | DQ-42 | 메모 저장도 작업 중 **409**다 — 이유는 파일 경합이 아니라 **`channels.yaml` lost update** | "메모는 디렉터리를 건드리지 않으니 409가 과하다"는 반론이 자연스러우므로 근거를 남긴다. `ChannelRegistry`는 **생성 시 yaml 전체를 읽고 `_save()`가 전체를 덮어쓰는** read-modify-write이고, 그룹 추출 워커 `_run_grouped`는 `reg = ChannelRegistry()`를 **작업 시작 시 한 번 만들어 수십 분짜리 루프 내내 재사용**하면서 `add`·`set_auto_run`·`set_group`으로 `_save()`를 반복한다. 작업 도중 다른 요청이 메모를 쓰면 워커의 다음 `_save()`가 **그 메모를 조용히 되돌린다** — 실패도 로그도 없는 소실이다. 대안(저장 시 yaml 재읽기 후 필드만 갱신, 또는 파일 락)은 registry 전반의 동시성 모델을 바꾸는 일이라 "간단한 메모"의 범위를 넘는다. 사용자 비용은 **추출 중 몇 분간 메모를 못 적는 것**이고 이득은 소실 0이며, 이름 변경(FR31.5)·`auto_run` 토글이 이미 같은 이유로 409다 (FR36.11) |
+| DQ-43 | 종목코드는 **문맥 근거가 있을 때만** 채택한다 — 정규식을 다듬는 방식을 기각 | 구 규칙 `\b(\d{6})\b`의 실측 결과는 **오탐률 100%**(441개 meta 중 값이 있는 26개 전부 오탐: 제목 앞머리 날짜 `[주식] 260819 …` 22종 + 설명 고정문구의 계좌번호 조각 `우리은행 /1002 763 241686 /`). **정규식 보정을 기각한 이유:** 6자리 숫자라는 모양은 종목코드·YYMMDD 날짜·계좌/전화/사업자번호 조각·URL 경로가 전부 공유한다 — 문맥 없이 숫자만 보면 어떤 패턴을 써도 이 넷을 가를 수 없다. 그래서 판정을 **후보(6자리) → 근거(라벨·거래소 표기·괄호·나열) → 배제(URL·숫자 나열·날짜)** 로 재구성했다. **날짜 배제를 약한 근거에만 적용한 이유:** KRX 코드의 약 3.7%(전체 6자리 공간 기준 37,200/1,000,000)가 YYMMDD로도 읽히므로(`010130` 고려아연, `000120` CJ대한통운) 일괄 배제하면 진짜 코드를 놓친다 — `종목코드 010130`처럼 **종목 전용 라벨**이 있으면 날짜 해석보다 라벨이 강하다고 본다. **채택 규칙을 더 넓히지 않은 이유:** 이 코퍼스에는 근거 있는 코드가 한 건도 없어(실측 새 규칙 채택 0건) 넓히는 근거 자체가 없다 — 한국 주식 유튜버는 종목을 **이름**으로 부른다. 따라서 **빈 값이 정확한 결과**이며, "티커가 안 잡힌다"는 관찰은 규칙을 느슨하게 되돌릴 근거가 **아니다**(FR12.6). 종목명 기반 추출은 사전이 필요한 별개 기능이라 범위 밖이다. **백필을 dry-run 기본으로 둔 이유:** 대상이 사용자 실데이터(441개 meta)이고 `migrate-groups`(DQ-36)가 세운 선례와 같다 — 재계산은 네트워크 없이 결정적이므로 언제든 다시 돌릴 수 있고, 잘못 쓰는 쪽만 되돌리기 어렵다 (FR12.2·12.5~12.7) |
 
 ---
 

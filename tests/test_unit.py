@@ -390,14 +390,76 @@ def test_korean_ratio():
     assert qc.korean_ratio("hello world") < 0.1
 
 
-# ─── 종목 추출 (FR12.2) ──────────────────────────────────────────────────────
-def test_extract_tickers():
+# ─── V-U32: 종목 추출 — 문맥 근거 (FR12.2 · DQ-43) ──────────────────────────
+# 실측 오탐(_workspace/34_ticker_bug.md: 26/441건 = 100% 오탐)을 그대로 고정한다.
+@pytest.mark.parametrize("text", [
+    # ① 제목 앞머리 날짜 YYMMDD — 오탐 22종의 실제 문자열
+    "[주식] 260819 코스닥 - 코스피 - 다시 코스닥으로",
+    "[주식]  260703 슈퍼 변동성 시장, 들고 갈 것들",
+    "[주식] 260706 핵심만 빠르게 / 다른 건 필요 없다",
+    # ② 설명란 계좌번호 — 숫자 나열 인접
+    "🎁 후원 계좌 : 우리은행 /1002 763 241686 / 박 * *",
+    "사업자 등록번호 안내 : 123-45-67890",
+    "문의 010-1234-5678",
+    # ③ URL 안의 숫자 조각
+    "https://blog.naver.com/supersell201/221927411687",
+    "https://contents.premium.naver.com/kiwoom/thestock/contents/220531171207062rn",
+    # ④ 근거 없는 맨 6자리 (구 규칙이 채택하던 형태)
+    "삼성전자 005930 와 분석",
+    "조회수 123456 돌파",
+    # ⑤ 종목과 무관한 라벨 · 약한 근거 + 날짜
+    "쿠폰코드 123456 입력하세요",
+    "인증코드: 260819",
+    "(260819) 방송분",
+])
+def test_extract_tickers_rejects_noise(text):
+    """근거 없는 6자리는 채택하지 않는다 — 빈 값이 정확한 결과다 (FR12.2)."""
     from meta_collector import extract_tickers
-    text = "삼성전자 005930 와 $AAPL 그리고 $TSLA 분석"
-    tickers = extract_tickers(text)
-    assert "005930" in tickers
-    assert "AAPL" in tickers
-    assert "TSLA" in tickers
+    assert extract_tickers(text) == []
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("종목코드: 005930 삼성전자 분석", ["005930"]),          # 강한 라벨
+    ("단축코드 035720", ["035720"]),
+    ("티커 373220 LG에너지솔루션", ["373220"]),
+    ("종목코드는 010130 고려아연", ["010130"]),              # 날짜형이어도 강한 라벨이면 채택
+    ("KRX:005930 vs $AAPL", ["005930", "AAPL"]),
+    ("005930.KS 차트", ["005930"]),
+    ("삼성전자(005930) 목표가 상향", ["005930"]),            # 괄호 단독 표기
+    ("코드: 042700 한미반도체", ["042700"]),
+    ("종목코드 005930, 000660 두 종목", ["005930", "000660"]),  # 나열 이어받기
+    ("$TSLA $NVDA 실적", ["TSLA", "NVDA"]),                  # 미국 티커는 $ 접두가 근거
+])
+def test_extract_tickers_accepts_with_context(text, expected):
+    from meta_collector import extract_tickers
+    assert extract_tickers(text) == expected
+
+
+def test_backfill_tickers_dry_run_then_apply(tmp_path, monkeypatch):
+    """백필은 기본 dry-run(쓰기 없음), --apply에서만 meta를 갱신한다 (FR12.2)."""
+    import json as _json
+    import config as cfg
+    import meta_collector
+    monkeypatch.setattr(cfg, "OUTPUT_BASE", tmp_path)
+    monkeypatch.setattr(cfg, "CHANNELS_YAML", tmp_path / "channels.yaml")
+    dirs = cfg.channel_subdirs("테스트채널")
+    dirs["meta"].mkdir(parents=True); dirs["desc"].mkdir(parents=True)
+    meta = {"id": "v1", "title": "[주식] 260819 코스닥", "tags": [],
+            "tickers": ["260819"]}
+    mp = dirs["meta"] / "20260819_test.json"
+    mp.write_text(_json.dumps(meta, ensure_ascii=False), encoding="utf-8")
+    (dirs["desc"] / "20260819_test.txt").write_text(
+        "🎁 후원 계좌 : 우리은행 /1002 763 241686 / 박 * *", encoding="utf-8")
+
+    dry = meta_collector.backfill_tickers("테스트채널")
+    assert dry["scanned"] == 1 and dry["changed"] == 1 and dry["removed"] == 1
+    assert _json.loads(mp.read_text(encoding="utf-8"))["tickers"] == ["260819"]  # 미기록
+
+    applied = meta_collector.backfill_tickers("테스트채널", apply=True)
+    assert applied["changed"] == 1
+    assert _json.loads(mp.read_text(encoding="utf-8"))["tickers"] == []
+    # 멱등: 두 번째 호출은 변경 0
+    assert meta_collector.backfill_tickers("테스트채널", apply=True)["changed"] == 0
 
 
 # ─── V-U11: URL 분류 (FR17.1) ────────────────────────────────────────────────

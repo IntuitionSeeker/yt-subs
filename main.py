@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI 진입점 — add / run / review / reextract / index / list / remove / ask / summarize / serve."""
+"""CLI 진입점 — add / run / review / reextract / index / list / remove / ask / summarize / serve / backfill-tickers."""
 import sys
 import argparse
 import logging
@@ -260,6 +260,38 @@ def cmd_migrate_groups(args):
         log.info(f"   백업: {args.backup_path} (자동 삭제하지 않습니다 — 직접 지우세요)")
 
 
+def cmd_backfill_tickers(args):
+    """
+    기존 meta/*.json의 `tickers` 재계산 — 기본 dry-run. FR12.2 (DQ-43)
+
+    구 규칙(6자리 숫자 전부 채택)이 남긴 오탐을 네트워크 없이 걷어낸다.
+    제목·태그(meta) + 설명(desc/*.txt)만 쓰므로 재추출이 필요 없다.
+    """
+    from meta_collector import backfill_tickers
+    reg = ChannelRegistry()
+    targets = [args.channel] if args.channel else reg.names()
+    if not targets:
+        log.info("등록된 채널이 없습니다.")
+        return
+    total = {"scanned": 0, "changed": 0, "removed": 0, "added": 0}
+    for name in targets:
+        stat = backfill_tickers(name, apply=args.apply)
+        for k in total:
+            total[k] += stat[k]
+        if stat["changed"]:
+            log.info(f"▢ {name}: {stat['changed']}/{stat['scanned']}건 변경 "
+                     f"(제거 {stat['removed']} · 추가 {stat['added']})")
+            for smp in stat["samples"]:
+                log.info(f"    {smp['before']} → {smp['after']} | {smp['title'][:50]}")
+        else:
+            log.info(f"▢ {name}: 변경 없음 ({stat['scanned']}건 확인)")
+    log.info(f"\n합계 {total['changed']}/{total['scanned']}건 변경 "
+             f"(제거 {total['removed']} · 추가 {total['added']})")
+    if not args.apply:
+        log.info("※ dry-run입니다. 아무것도 쓰지 않았습니다. "
+                 "실제 반영은 `./yt.sh backfill-tickers --apply`")
+
+
 def cmd_test(args):
     """검증 실행. 섹션 7"""
     import subprocess
@@ -335,6 +367,13 @@ def build_parser():
     sp.add_argument("--backup-path", dest="backup_path",
                     help="yt.sh가 만든 백업 경로 (완료 메시지용)")
     sp.set_defaults(func=cmd_migrate_groups)
+
+    # FR12.2 — 기본 dry-run, --apply 가 있어야 meta/*.json에 쓴다
+    sp = sub.add_parser("backfill-tickers",
+                        help="기존 meta의 tickers 재계산 (FR12.2, 기본 dry-run)")
+    sp.add_argument("channel", nargs="?")
+    sp.add_argument("--apply", action="store_true", help="실제 파일 쓰기")
+    sp.set_defaults(func=cmd_backfill_tickers)
 
     sp = sub.add_parser("test", help="검증 실행")
     sp.add_argument("--integration", action="store_true"); sp.set_defaults(func=cmd_test)

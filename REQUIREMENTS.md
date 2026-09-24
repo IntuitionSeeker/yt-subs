@@ -1,8 +1,8 @@
 # REQUIREMENTS — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v5.5  
+> **버전:** v5.8  
 > **작성일:** 2026-08-09  
-> **연계 문서:** DESIGN.md v5.5  
+> **연계 문서:** DESIGN.md v5.8  
 > **주요 변경:** 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20), 개발 거버넌스(NFR10)  
 > **v4.1 (FR17~20 백엔드 구현 확정 반영):** 조건 적용 순서·ⓐ"최신" 정의·ⓓ↔FR19.1 우선순위 비고(FR17.4),
@@ -25,6 +25,10 @@
 > **v5.5:** 검색 기반 일괄 추출(FR34) — 유튜브 검색어로 후보를 모아 하나의 폴더(FR25)로 묶어 일괄 추출. 제한 조건 3종(ⓐ개수 상한 ⓑN초 미만 제외 ⓒ기간 2층: `sp` 프리셋 + `date_range`), 검색 유입 신규 채널은 `channels.yaml` `auto_run: false`로 `./yt.sh run`·`transcribe` 전체 순회에서 제외; 영상 길이 노출(FR20.5~20.6) — 쇼츠 전용 라벨 부재 실측에 따른 보완, meta.json에 이미 있는 `duration`을 API·프론트에 노출(백필 불필요).  
 > **v5.5 정합 정정 (2026-09-20, 문서 전용):** 단위 검증 목록의 V-U 번호 충돌·누락을 DESIGN §9.1에서 해소했다 (정본 = `tests/test_unit.py`). 본 문서 §7.1은 v1 당시 항목만 담은 요약이며, **전체 V-U 목록은 DESIGN §9.1a·§9.1b가 정본**이다
 > 검증 중 드러난 **기존 결함** 수정: 배치 휴식(FR14.2)의 누적 경계를 "작업 단위"로 명문화 — 그룹 추출이 채널마다 추출 루프를 새로 시작해 휴식이 리셋되던 문제(검색 경로에서 방어 무력화, 다채널 재생목록도 동일)를 DQ-30으로 확정  
+> **v5.6:** 폴더(그룹)의 **실제 디렉터리 승격**(FR35) — `channels.yaml`의 `group`이 표시용 라벨에 머물지 않고 `output/<폴더>/<채널>/` 중첩 디렉터리가 된다(그룹 미지정 채널은 `output/<채널>/` 유지). 경로 해석은 기존 단일 통로 `config.channel_dir()`이 계속 책임지며(호출부 12곳 무변경), 그룹명 검증(DQ-33)·최상위 이름공간 유일성(DQ-34)·`os.rename` 단일 호출 이동과 보상 롤백(DQ-35)·명시적 CLI 마이그레이션(`./yt.sh migrate-groups`, DQ-36)을 함께 규정한다. 동반 결함 수정: `ChannelRegistry.add()`가 기존 항목을 통째로 덮어써 `group`·`auto_run`·`channel_id`를 날리던 문제와 `extract_handle` 사용으로 개명 채널에 중복 항목을 만들던 문제(FR7.7~7.9, DQ-37) — FR35 하에서 `group` 소실은 단순 설정 손실이 아니라 **채널의 디스크 경로가 바뀌는 사고**로 격상되므로 같은 변경에 묶는다
+> **v5.7 (버그 수정):** 멤버십 감지 언어 비의존화(FR13.7) — 제목 언어 고정(FR32.1·DQ-20, `lang=ko`)이 **YouTube가 주는 오류 문구까지 한국어로 번역**하는 바람에 영어 키워드만 보던 멤버십 판정이 2026-09-09 이후 전량 실패해 모든 멤버십 영상이 조용히 "오류"로 분류됐다(실측 `_workspace/30`). 판정을 **구조화 필드 `availability` 1차 · 메시지(영/한) 2차**로 바꾸고 대시보드 스캔(FR17.6)과 같은 규칙을 공유한다. FR19.1 재시도가 성립하려면 이 판정이 먼저 성립해야 함을 명시(DQ-38)
+> **v5.8:** 채널 메모 · 추출 탭 이름 변경 · 탭 간 자동 갱신(FR36) — ⓐ 지금까지 **쓰기만 하고 아무 데서도 읽지 않던 `channels.yaml`의 `note` 필드**(등록 77채널 전부 빈 문자열)를 살려 **간단한 한 줄 메모**로 노출한다(신규 스키마 없음, DQ-39). ⓑ 채널 이름 변경(FR31.1)을 라이브러리 탭 외에 **추출 탭 채널 카드**에서도 할 수 있게 하고, 그 과정에서 드러난 **기존 결함** — 이름이 바뀐 뒤 옛 이름으로 캐시된 스캔(`scan_id`)으로 추출하면 `output/<옛이름>/`이라는 유령 폴더에 자막이 쌓이는 문제 — 를 스캔 캐시 무효화로 막는다(DQ-41). ⓒ 이름·메모 변경이 라이브러리·추출·질의 세 탭에 자동 반영되도록 **공통 갱신 헬퍼**를 규정한다(DQ-40). 메모 저장은 `channels.yaml` lost update 때문에 작업 중 409다(DQ-42)
+
 > **범위:** 채널 관리 → 자막 추출 → 메타데이터 수집 → 품질 검토 → 지식층 인덱싱 → 질의·대시보드
 
 ---
@@ -57,6 +61,7 @@
 | **yt.sh** | Docker 명령어를 감싸는 래퍼 셸 스크립트 |
 | **검색 추출** | 유튜브 검색어로 모은 후보를 하나의 폴더로 묶어 일괄 추출하는 대시보드 기능 (FR34) |
 | **auto_run** | channels.yaml 채널 항목의 선택 플래그. `false`면 `./yt.sh run`·`./yt.sh transcribe`(둘 다 인자 없음)의 전체 순회 대상에서 제외된다 (FR34.7) |
+| **폴더(그룹)** | `channels.yaml` 채널 항목의 선택 필드 `group`. **v5.6부터 실제 출력 디렉터리**(`output/<폴더>/<채널>/`, FR35.1). 채널당 0~1개이며 다단 중첩 없음. *카테고리(재생목록 태그, FR15)와 별개* — 카테고리는 물리 폴더를 만들지 않는다(DQ-08) |
 | **질의 하네스** | 제품 내 LLM tool_use 루프 (`kl_harness.py`, FR10) |
 | **개발 하네스** | 프로젝트 개발·검증·운영용 Claude Code 에이전트/스킬 체계 (`.claude/`, NFR10, DESIGN §11) |
 
@@ -151,6 +156,9 @@
 | FR7.4 | 채널별 독립 출력 폴더·상태 파일·ChromaDB 유지 | 필수 |
 | FR7.5 | 채널 목록 조회(`list`)·삭제(`remove`) 가능 | 필수 |
 | FR7.6 | 채널명은 URL의 핸들(@뒤)에서 자동 추출, 폴더명으로 사용 | 필수 |
+| FR7.7 | **채널 등록은 upsert다** — `add(url, lang, note)`는 이미 등록된 채널의 항목을 **통째로 덮어쓰지 않는다.** `url`(정규화)·`lang`만 갱신하고 `group`(FR25.1)·`auto_run`(FR34.7)·`channel_id`(FR29.1)·`added_at`은 **보존**한다(`note`는 인자가 비어 있지 않을 때만 갱신). 미등록이면 종전대로 전체 필드를 생성한다. `rename()`이 이미 명시한 "설정 보존" 계약과 동일 기준이며, 호출부 중 **가드가 없는 곳은 `main.cmd_add`(`./yt.sh add`) 하나**다 — 나머지 3곳(`jobs.py` 재생목록·검색·단일영상)은 `not in reg.names()` 가드로 우연히 보호되고 있을 뿐이므로 가드가 아니라 `add()` 자체를 고친다 | 필수 |
+| FR7.8 | **등록 시 이름 해석도 역조회 우선** — `add()`는 `extract_handle` 대신 `resolve_name(url)`(FR32.2)로 이름을 정한다. 등록명≠URL핸들 채널(개명·핸들 변경)에 `./yt.sh add`를 다시 실행하면 **핸들 이름의 두 번째 항목**이 생겨 같은 채널의 출력 폴더가 갈라지던 결함을 막는다(DQ-19가 스캔 경로에서 막은 사고가 등록 경로에는 남아 있었다). 미등록 URL이면 `resolve_name`이 `extract_handle`로 폴백하므로 **신규 등록 규칙(DQ-07)은 그대로**다 | 필수 |
+| FR7.9 | **채널명 경로 세그먼트 검증** — `add()`·`rename()`은 채널명에 FR35.4와 동일한 세그먼트 규칙을 적용하고 위반 시 `ValueError`(API는 400). `@..` 같은 핸들이 `output/` 밖을 가리키는 경로를 만드는 것을 **등록 단계에서** 차단한다. 현행 등록 70채널은 전부 통과함을 마이그레이션 사전 검증(FR35.11)에서 실증한다 | 필수 |
 
 ---
 
@@ -233,6 +241,8 @@
 | FR13.5 | 연속 429 발생 N회(기본 5) 초과 시 추출 자동 중단 (차단 악화 방지) | 필수 |
 | FR13.6 | **Firefox 쿠키 직접 읽기** — Firefox 프로필 폴더가 `/app/firefox_profile`에 마운트되어 있으면(`yt.sh`가 cookies.sqlite 있는 최신 프로필 자동 감지·ro 마운트) yt-dlp `cookiesfrombrowser`로 매 실행 최신 쿠키를 직접 읽는다. cookies.txt보다 **우선**하며, 수동 내보내기와 쿠키 회전(수 시간 내 만료) 문제를 원천 해소. 자막 VTT 직접 다운로드(FR13.4)에도 동일 적용. `/cookies` 응답에 `source`(`"firefox"`\|`"file"`\|null) 노출 | 필수 |
 
+| FR13.7 | **멤버십 전용 판별은 언어에 의존하지 않는다** — 1차 신호는 스캔 엔트리·full info의 **`availability`**(`subscriber_only`·`needs_auth`·`premium_only`)이고, 오류 메시지 키워드는 `availability`가 없는 경로(단일영상 추출 등)를 위한 **2차 폴백**이다(영어·한국어 패턴 모두 보유). 판정 규칙(상수·함수)은 **한 곳에만** 정의하고 추출 경로와 대시보드 스캔(FR17.6)이 공유한다. 멤버십 영상의 **일시적 429는 멤버십이 아니라 429로 분류**한다(멤버십으로 기록하면 `_mark_skip`으로 영구 스킵되어 다음 run에서 되살아나지 못한다). 근거: 제목 언어 고정(FR32.1)이 YouTube의 오류 문구까지 번역해 영어 전용 키워드 판정이 전량 실패했다(DQ-38) | 필수 |
+
 ### FR14 — 레이트리밋 방어 (신규 문서화)
 
 | ID | 요구사항 | 우선순위 |
@@ -286,7 +296,7 @@
 | FR17.3 | 채널 URL 입력 시 사전 스캔(`POST /extract/scan`): videos+streams 탭 병합(FR16) + 재생목록 매핑(FR15) 스캔 → 후보 영상 목록(제목·content_type·재생목록·멤버십 여부·기추출 여부)과 재생목록 목록 반환. 결과는 `scan_id`로 서버에 캐시(TTL 10분) | 필수 |
 | FR17.4 | 추출 조건 (AND 결합, `POST /extract`에 `scan_id` + 조건 전달): ⓐ 최신 업로드 N개(기본 10 — "최신"의 정의는 아래 비고) ⓑ 업로드 기간(시작~종료일) ⓒ 재생목록 카테고리(복수 선택) ⓓ 멤버십 전용 포함/제외(기본 제외, 포함 시 쿠키 필요 안내 — 제외 선택은 FR19.1 재시도보다 우선) ⓔ 제목 검색어 포함(부분일치). 조건 미지정 시 전체. **적용 순서는 아래 비고를 계약으로 한다** | 필수 |
 | FR17.5 | 조건 선택 UI는 조건 변경 시 대상 영상 수·목록을 즉시 미리보기(클라이언트 필터). 단, 기간 조건(ⓑ)은 flat 스캔이 업로드 날짜를 제공하지 않으므로(FR2.6 동일 제약) 미리보기에서 "처리 시 확정"으로 표기하고, 추출 단계에서 영상별 full info의 upload_date로 판정해 범위 밖이면 자막 다운로드 없이 스킵(`date_skip` 집계) | 필수 |
-| FR17.6 | 멤버십 전용 여부는 스캔 단계에서 flat 엔트리 availability(subscriber_only 등)로 우선 판별하고, 스캔에서 놓친 경우 처리 시 FR13 감지로 보완 | 필수 |
+| FR17.6 | 멤버십 전용 여부는 스캔 단계에서 flat 엔트리 availability(subscriber_only 등)로 우선 판별하고, 스캔에서 놓친 경우 처리 시 FR13 감지로 보완. **두 경로는 같은 판정 규칙을 공유한다**(중복 정의 금지 — 한쪽만 고쳐지는 드리프트가 실제로 발생했다, FR13.7·DQ-38) | 필수 |
 | FR17.7 | 동시 1작업 제한 — 실행 중 추가 요청은 409 + 현재 작업 상태 반환 | 필수 |
 | FR17.8 | 영상 단위 우아한 취소 (`POST /extract/cancel`) — 현재 영상 완료 후 중단, state.json 저장·meta 백필(FR15.5) 보장. **취소 시 자동 인덱싱(FR17.9)은 생략한다** — 취소는 "지금 멈춤" 신호이고 `index_all()`은 임베딩 모델 로드 + 전체 재임베딩으로 수 분이 걸리기 때문. 추출된 파일은 다음 추출 또는 `./yt.sh index`에서 upsert된다 (근거: DESIGN DQ-14) | 필수 |
 | FR17.9 | 완료 후 자동 인덱싱 (요청 옵션 `index`, 기본 on) — 라이브러리 벡터 검색에 즉시 반영. "완료"에 취소(FR17.8)는 포함하지 않으며, 신규·수정이 0건이면 생략한다 | 필수 |
@@ -319,7 +329,7 @@
 
 | ID | 요구사항 | 우선순위 |
 |---|---|---|
-| FR19.1 | state에 `sub_type=members_only`로 기록된 영상은 cookies.txt 존재 시 매 run 자동 재시도("updated" 액션). 여전히 접근 불가면 다시 members_only로 수렴 (run당 1회). 단 대시보드 조건 추출에서 `include_members=false`면 대상에서 사전 제외되어 재시도하지 않는다(FR17.4ⓓ 우선). 재시도는 요청 1회를 소비하므로 `--limit` 예산에 포함된다(FR14.5) | 필수 |
+| FR19.1 | **이 재시도는 FR13.7의 멤버십 판정이 성립해야만 발동한다** — 판정에 실패하면 `error`로 처리되어 state에 아무 기록도 남지 않고(`_mark_skip` 미호출) 재시도 대상에서 통째로 빠진다(2026-09-09~24 실제 사고, DQ-38). state에 `sub_type=members_only`로 기록된 영상은 cookies.txt 존재 시 매 run 자동 재시도("updated" 액션). 여전히 접근 불가면 다시 members_only로 수렴 (run당 1회). 단 대시보드 조건 추출에서 `include_members=false`면 대상에서 사전 제외되어 재시도하지 않는다(FR17.4ⓓ 우선). 재시도는 요청 1회를 소비하므로 `--limit` 예산에 포함된다(FR14.5) | 필수 |
 | FR19.2 | yt-dlp logger 주입으로 "cookies no longer valid" 경고 감지 → `output/.cookie_status.json`에 영속 (CLI·serve 컨테이너 간 공유) | 필수 |
 | FR19.3 | `GET /cookies` — 쿠키 존재 여부 · mtime · 만료 경고 상태 반환. 쿠키 파일이 경고 감지 시각 이후 갱신됐으면 경고 자동 해제 | 필수 |
 | FR19.4 | 라이브 영상(FR16)은 대시보드 추출 인터페이스 경유 시에도 동일 동작 (검증 항목) | 필수 |
@@ -383,7 +393,7 @@
 
 | ID | 요구사항 | 우선순위 |
 |---|---|---|
-| FR25.1 | `channels.yaml` 채널 항목에 선택 필드 `group`(폴더명) 추가. `ChannelRegistry.set_group(name, group)` — 빈 값/None이면 필드 제거(폴더 해제), 미등록 채널은 KeyError | 필수 |
+| FR25.1 | `channels.yaml` 채널 항목에 선택 필드 `group`(폴더명) 추가. `ChannelRegistry.set_group(name, group)` — 빈 값/None이면 필드 제거(폴더 해제), 미등록 채널은 KeyError. **v5.6부터 이 값은 표시 라벨이 아니라 실제 출력 디렉터리다**(`output/<group>/<채널>/`, FR35.1) — 값 검증은 FR35.4, 디스크 이동·충돌 검사는 FR35.6~35.8이 책임지고 `set_group` 자체는 **yaml만 다루는 순수 함수로 유지**한다 | 필수 |
 | FR25.2 | `POST /channels/group` `{channel, group?}` — 폴더 지정/변경/해제. 미등록 채널 404, `group`은 트림 후 빈 문자열이면 해제 | 필수 |
 | FR25.3 | `GET /channels/stats` 응답 항목에 `group` 필드 포함 (미분류는 `""`) | 필수 |
 | FR25.4 | 라이브러리 탭 — `group` 있는 채널은 📁 폴더 섹션으로 묶어 표시(접기/펼치기, 헤더에 채널 수·추출 합계). 미분류 채널은 기존대로 최상위 카드. **처음 보는 폴더는 접힌 상태로 시작**하고, 접기 상태는 세션 내 유지 | 필수 |
@@ -443,10 +453,10 @@
 
 | ID | 요구사항 | 우선순위 |
 |---|---|---|
-| FR31.1 | **채널 이름 변경** `POST /channels/rename {channel, new_name}` — channels.yaml 키 이동(설정·group·channel_id 보존) + `output/` 폴더 이동. 새 이름은 경로 검증(FR20.3 준용)·중복(레지스트리 또는 폴더 존재) 시 409. ChromaDB는 채널 폴더 내부라 함께 이동 | 필수 |
+| FR31.1 | **채널 이름 변경** `POST /channels/rename {channel, new_name}` — channels.yaml 키 이동(설정·group·channel_id 보존) + `output/` 폴더 이동(**v5.6: 이동 목적지는 `old_dir.parent / new` — FR35.9**). 새 이름은 경로 검증(FR20.3 준용)·중복(레지스트리 또는 폴더 존재) 시 409. ChromaDB는 채널 폴더 내부라 함께 이동 | 필수 |
 | FR31.2 | **영상 제목 변경** `POST /videos/rename {channel, basename, new_title}` — meta.json `title` 갱신 + ChromaDB 두 컬렉션의 해당 영상 청크 metadata.title 갱신(재임베딩 없음). **파일명(basename)은 유지** — 파일 정체성·링크 보존 | 필수 |
 | FR31.3 | **카테고리(재생목록 태그) 이름 변경** `POST /categories/rename {channels:[], old, new}` — 각 채널의 playlists.json 값·meta.playlists 배열에서 치환 + ChromaDB metadata.playlists 갱신. 폴더 전체 보기에서는 소속 채널 전체에 일괄 적용 | 필수 |
-| FR31.4 | **폴더 이름 변경** `POST /folders/rename {old, new}` — group=old인 모든 채널을 new로 변경 (`set_group` 재사용) | 필수 |
+| FR31.4 | **폴더 이름 변경** `POST /folders/rename {old, new}` — group=old인 모든 채널을 new로 변경 (`set_group` 재사용). **v5.6: 디렉터리 `output/<old>/` → `output/<new>/` 단일 `os.rename`이 선행**하며 채널별 N회 이동을 하지 않는다 (FR35.9) | 필수 |
 | FR31.5 | 모든 이름 변경은 추출/스캔 작업 중(`JobManager` 점유) 409 거부 — 파일 이동·수정과 작업의 경합 방지 (FR21.4 준용) | 필수 |
 | FR31.6 | UI — 채널 카드 ✏️(이름), 폴더 헤더 ✏️, 영상 행 ✏️(제목), 카테고리 선택 시 ✏️(선택된 카테고리 변경). 모두 prompt 입력 | 필수 |
 
@@ -456,7 +466,7 @@
 
 | ID | 요구사항 | 우선순위 |
 |---|---|---|
-| FR32.1 | **제목 언어 고정** — yt-dlp 옵션에 `extractor_args={"youtube": {"lang": [<채널 lang>]}}`를 주입한다(NFR4: 채널 `lang` 우선, 없으면 `config.DEFAULT_LANG`). 크리에이터가 다국어 제목을 등록한 채널에서 flat 스캔은 영어 트랙을, 영상별 full info는 한국어 트랙을 받아 **같은 영상의 제목이 화면마다 달라지던** 문제를 제거한다. 해당 언어 번역이 없는 영상은 원제로 폴백한다(정상) | 필수 |
+| FR32.1 | **제목 언어 고정** — yt-dlp 옵션에 `extractor_args={"youtube": {"lang": [<채널 lang>]}}`를 주입한다(NFR4: 채널 `lang` 우선, 없으면 `config.DEFAULT_LANG`). 크리에이터가 다국어 제목을 등록한 채널에서 flat 스캔은 영어 트랙을, 영상별 full info는 한국어 트랙을 받아 **같은 영상의 제목이 화면마다 달라지던** 문제를 제거한다. 해당 언어 번역이 없는 영상은 원제로 폴백한다(정상) **⚠ 이 옵션은 제목만 바꾸지 않는다 — YouTube가 주는 오류 문구도 같은 언어로 번역된다. 값을 바꾸거나 새 경로에 적용할 때는 오류 메시지 문자열로 판정하는 모든 곳(FR13.7 등)을 함께 점검해야 한다(DQ-20·DQ-38).** | 필수 |
 | FR32.2 | **스캔 시 등록 채널명 해석** — `POST /extract/scan`(채널)은 URL에서 핸들을 재추출하지 않고 **레지스트리에서 URL→등록명을 역조회**한다. 매칭 기준은 `extract_handle` 값 일치(대소문자 무시), 실패 시에만 `extract_handle` 폴백. 등록명과 URL 핸들이 다른 채널(개명·핸들 변경)에서 없는 폴더의 state.json을 읽어 **`extracted`가 전부 false**로 나오고, 이어지는 추출이 **핸들 이름의 새 폴더에 중복 저장**되던 문제를 제거한다 | 필수 |
 | FR32.3 | FR32.2의 해석은 **재생목록 스캔·추출의 원채널 해석**(FR24.3 `_entry_channel`)과 **단일영상 추출의 채널 해석**(FR17.2 `_run_single`)에도 동일 적용한다 — 핸들이 이미 등록된 채널이면 그 등록명을 쓴다(같은 채널이 핸들 이름으로 이중 등록되는 것을 막는다) | 필수 |
 | FR32.4 | 기존 오염 데이터 정리는 수동 운영 작업으로 분리한다(자동 마이그레이션 없음) — 빈 껍데기 폴더·핸들 이름으로 중복 추출된 폴더는 라이브러리 채널 삭제(FR21.1) 또는 폴더 삭제로 처리 | 명시 |
@@ -519,6 +529,70 @@
 
 ---
 
+### FR35 — 폴더(그룹)의 실제 디렉터리 승격 (신규, v4)
+
+`channels.yaml`의 `group`(FR25.1)은 지금까지 **라이브러리 화면의 표시 라벨**일 뿐이었고 디스크는 `output/<채널>/` 평면이었다.
+채널이 70개(그룹 지정 59 · 미지정 11)로 불어나 파일 탐색이 불가능해졌으므로 **`output/<폴더>/<채널>/` 중첩 구조로 승격**한다.
+그룹 미지정 채널은 `output/<채널>/`를 그대로 유지한다 — 즉 `output/` 최상위에는 "그룹 폴더"와 "그룹 미지정 채널 폴더"가 공존한다(FR35.6이 이 이름공간을 지킨다).
+
+> **이 변경이 가능한 구조적 근거(2026-09-21 조사):** ① 경로 생성 12곳이 전부 `config.channel_dir()` 단일 통로를 경유한다
+> (`state_manager:13` · `renamer:24·25·63` · `extractor:86·198` · `quality_checker:106` · `server:391·416` · `jobs:256·314` · `config:122`).
+> ② 채널 열거는 `channels.yaml`에서만 한다 — `/channels`·`/channels/stats` 모두 `reg.names()`·`reg.list()` 기반이고 **파일시스템을 훑는 코드가 없다**.
+> ③ ChromaDB가 채널 폴더 안(`channel_subdirs()["chroma"]`)이라 폴더 이동 시 따라간다.
+> ④ **저장된 절대경로가 0건**이다(chroma 메타는 `video_id`·`title`·`source_url`, meta.json은 `webpage_url`).
+> ⑤ `OUTPUT_BASE` 직접 사용은 3곳뿐(`config:117` = `channel_dir` 자신 · `cookie_health:17` · `server:417` 경로탈출 가드).
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR35.1 | **경로 규칙** — 채널 `C`의 출력 루트는 `group`이 있으면 `output/<group>/<C>/`, 없으면 `output/<C>/`다. 하위 구조(`srt/`·`txt/`·`desc/`·`meta/`·`chroma/`·`state.json`·`playlists.json`·`extract_log.csv`·`review_report.csv`)는 **전혀 바뀌지 않는다.** 중첩은 **1단계뿐**이며 그룹 안의 그룹(다단 중첩)은 지원하지 않는다 | 필수 |
+| FR35.2 | **단일 통로 유지** — 경로 해석은 `config.channel_dir(channel)` **한 곳에서만** 일어나고 기존 호출부 12곳은 **시그니처·호출 형태 모두 무변경**이다. `config`는 `channel_registry`를 import할 수 없으므로(`channel_registry → config` 의존이 이미 있어 순환) `config` 내부에 **`channels.yaml`을 직접 얕게 읽는 읽기 전용 해석기**를 둔다 — `{채널명: group}` 맵만 만들고 쓰기는 `ChannelRegistry`가 계속 독점한다(DQ-32) | 필수 |
+| FR35.3 | **캐시·무효화** — `channel_dir()`은 호출 빈도가 매우 높으므로 그룹 맵을 캐시한다. 무효화는 **`channels.yaml`의 `(st_mtime_ns, st_size)` 변화 자동 감지**를 1차로 하고(누가 yaml을 바꾸든 따라가며, CLI·serve 두 프로세스가 각자 독립적으로 정합), `ChannelRegistry._save()`가 저장 직후 `config.invalidate_group_cache()`를 호출하는 **명시 무효화를 2차 안전망**으로 둔다. 캐시 히트 경로의 I/O는 `stat()` 1회를 넘지 않는다(**호출마다 yaml 파싱 금지**). yaml이 없거나 파싱 실패면 **빈 맵**(= 전원 평면 경로)으로 폴백하고 예외를 던지지 않는다 (DQ-32) | 필수 |
+| FR35.4 | **그룹명 검증 — 변환하지 않고 거부한다** (쟁점 1). 트림 후 다음을 **전부** 만족해야 유효하다: ⓐ 1~64자(NFC 정규화 후, UTF-8 255바이트 미만) ⓑ `/`·역슬래시·NUL·제어문자(U+0000~U+001F, U+007F) 불포함 ⓒ `.`·`..` 전체 일치 아님 ⓓ 선행 `.` 아님(숨김 폴더·`output/.cookie_status.json` 계열과의 혼동 차단) ⓔ 후행 `.`·후행 공백 없음 ⓕ 절대경로·드라이브 문자·UNC 아님 ⓖ Windows 예약어(`CON`·`PRN`·`AUX`·`NUL`·`COM1~9`·`LPT1~9`, 대소문자 무시) 아님 — macOS 전용 프로젝트지만 `output/`이 백업·동기화 대상이므로 비용 0인 방어를 건다. **트림 외의 자동 치환(sanitize)은 하지 않는다**: 서로 다른 표시명이 같은 디렉터리로 붕괴하면 이름 변경·조회·마이그레이션이 전부 모호해진다(DQ-33). 저장 형태는 **NFC 정규화 문자열**이며 `channels.yaml`의 `group` 값과 디렉터리명은 **항상 1:1**이다. 위반 시 `ValueError` → `POST /channels/group`·`POST /folders/rename` **400**, 이때 **디스크에는 아무것도 만들지 않는다** | 필수 |
+| FR35.5 | **경로 봉쇄(2차 방어)** — `channel_dir()`은 yaml에서 읽은 `group`에도 FR35.4 검증을 **순수 문자열 연산으로** 적용하고(파일시스템 접근 없음 — 핫패스이므로 `resolve()` 금지), 실패하면 그 그룹을 **무시하고 평면 경로로 폴백**한 뒤 프로세스당 1회 경고 로그를 남긴다(읽기 경로에서 예외를 던지면 라이브러리 전체가 죽는다). 채널 세그먼트에도 같은 검증을 적용하되 **폴백할 곳이 없으므로 `ValueError`를 던진다** — FR7.9가 등록 단계에서 이미 막으므로 실제로는 발동하지 않는 백스톱이다. 이 두 검사로 `channel_dir()` 반환값은 **항상 `OUTPUT_BASE` 하위**임이 보장되므로 `mkdir(parents=True)`를 호출하는 8곳(`extractor:117·119·199` · `state_manager:23` · `meta_collector:79·87` · `kl_indexer:23` · `jobs:277`)은 **손대지 않는다.** `server.py:417`의 기존 `is_relative_to(OUTPUT_BASE)` 가드는 중첩 경로에서도 그대로 유효하므로 **유지**한다 | 필수 |
+| FR35.6 | **최상위 이름공간 유일성** (쟁점 2) — `output/` 최상위는 **그룹명**과 **그룹 미지정 채널명**이 공유하는 하나의 이름공간이며 중복될 수 없다. ⓐ 그룹 지정·변경(`set_group`·`/folders/rename`·마이그레이션): 새 그룹명이 **그룹 미지정 채널명 집합**과 충돌하거나, `output/<그룹명>/`이 이미 존재하면서 **채널형 디렉터리**(`state.json`·`srt/`·`meta/` 중 하나라도 보유)이면 **409 거부**. ⓑ 그룹 해제: 해제 후 목적지 `output/<채널>/`가 **기존 그룹명과 충돌**하거나 이미 존재하면 **409 거부**. ⓒ 채널 이름 변경(FR31.1)·신규 등록: 그룹 미지정 채널의 새 이름이 **기존 그룹명 집합**과 충돌하면 **409 거부**. ⓓ 그룹 `G` 안에 이름이 `G`인 채널이 들어오는 것(`output/G/G/`)은 **허용**한다 — 중첩 레벨이 달라 실제 충돌이 아니다 | 필수 |
+| FR35.7 | **이동 원자성** (쟁점 3) — 채널 폴더 이동은 **`os.rename`(=`Path.rename`) 단일 호출**로만 수행한다. `shutil.move`·복사 폴백을 **금지**하고, `EXDEV`(파일시스템 경계)가 나면 **실패로 처리하고 아무것도 옮기지 않는다** — 복사 중단이 곧 자막 유실이기 때문이다. 목적지가 이미 존재하면 rename을 시도하지 않는다(POSIX rename은 빈 디렉터리를 무음 교체할 수 있다). 순서는 **① 목적지 부모 `mkdir(parents=True)` → ② `os.rename` → ③ yaml 기록**이며, ③이 실패하면 **②를 역방향 `os.rename`으로 보상 롤백**한다. 롤백까지 실패하면 예외 메시지·로그에 **수동 복구용 `mv` 원문 경로 한 줄**을 남긴다. 이동 후 비워진 원본 그룹 폴더는 **비어 있을 때만 `rmdir`** 한다(`rmtree` 절대 금지). 출력 폴더가 아직 없는 채널(미추출)은 이동이 **no-op**이고 yaml 기록만 한다 | 필수 |
+| FR35.8 | **그룹 지정·변경·해제 시 이동** — `POST /channels/group`(FR25.2)은 yaml 기록에 더해 FR35.6 충돌 검사 → FR35.7 이동을 수행한다. `ChannelRegistry.set_group`은 **yaml만 다루는 순수 함수로 유지**하고(단위 검증 V-U12 계약 불변), 검사·이동·롤백은 **신규 모듈 `folder_ops.py`** 가 담당한다 | 필수 |
+| FR35.9 | **폴더 이름 변경은 디렉터리 1회 rename** (FR31.4 보강) — `POST /folders/rename`은 채널별로 N번 이동하지 않고 `output/<old>/` → `output/<new>/` **단일 `os.rename`** 후 소속 채널들의 yaml `group`을 일괄 갱신한다(yaml 갱신 실패 시 FR35.7 보상 롤백). 그룹 폴더 안에 미등록 잔존 폴더가 있어도 **같은 폴더이므로 함께 따라간다**(정상). 아울러 `renamer.rename_channel`(FR31.1)의 이동 목적지는 `config.channel_dir(new)`가 아니라 **`old_dir.parent / new`** 로 계산한다 — 새 이름은 아직 yaml에 없어 `channel_dir(new)`가 평면 경로를 돌려주기 때문이다(FR35가 새로 만드는 함정) | 필수 |
+| FR35.10 | **경합 차단** — 모든 이동(FR35.8·35.9·마이그레이션)은 추출/스캔 작업 중(`JobManager.is_busy()`) **409 거부**한다(FR31.5·FR21.4 재사용). 역방향으로, CLI 마이그레이션은 시작 시 `output/.migration.lock`(pid·시작시각 JSON)을 만들고 `JobManager.is_busy()`가 **이 락 파일 존재 시 `True`를 반환**하고 **스캔·추출 진입점인 `JobManager._acquire()`도 같은 락을 확인**해 마이그레이션 중 대시보드 추출·스캔·삭제·이름 변경을 막는다(`is_busy()`만으로는 삭제·이름 변경만 막히고 스캔·추출은 통과한다)(CLI 컨테이너와 serve 컨테이너가 job 상태를 공유하지 못하므로 `output/` 공유 마운트를 쓴다 — DQ-11과 같은 수법). 락은 종료(성공·실패·롤백) 시 제거하고, **mtime이 6시간 이상 지난 락은 stale로 간주해 무시하되 경고**하며 `./yt.sh migrate-groups --unlock`으로 수동 제거한다 | 필수 |
+| FR35.11 | **일회성 마이그레이션 — 명시적 CLI, dry-run 기본** (쟁점 4) — `./yt.sh migrate-groups`는 기본이 **dry-run**(이동 계획만 출력)이고 `--apply`를 줘야 실제로 옮긴다. **서버 기동 시 자동 실행은 금지**한다(NFR3 수동 실행 원칙 + 되돌릴 수 없는 사용자 데이터 이동). `--apply`는 다음 사전 검증을 **전부 통과해야** 시작하고, 하나라도 실패하면 **아무것도 옮기지 않고 중단**한다: ① 락·미완료 저널 부재(FR35.10·35.12) ② 등록 채널명·그룹명 전수 세그먼트 검증(FR35.4·FR7.9) ③ 이름공간 충돌 전수 검사(FR35.6) ④ 목적지 `output/<G>/<C>/` 부재 ⑤ 소스·목적지 동일 파일시스템(`st_dev` 일치, FR35.7) ⑥ 대화형 확인(`--yes`로 생략). ⑦ **호스트측 자동 백업** — `yt.sh`가 컨테이너를 띄우기 **전에** `cp -a output/ output_backup_YYYYMMDD_HHMMSS/`를 호스트 셸에서 수행한다(`--no-backup`으로만 해제). 백업은 반드시 **호스트에서·`output/` 바깥에** 만든다 — 컨테이너에는 `output/`과 `channels.yaml`만 마운트돼 내부에서는 형제 경로를 만들 수 없고, `output/` 안에 두면 채널 열거·`purge` `rmtree`와 섞인다. **실측 2026-09-21: `output/` 총량 244MB, 여유 1.5TB** — 복사 비용이 사실상 0이므로 저널 롤백까지 실패하는 극단을 덮는 최종 안전망으로 기본 활성화한다. 이동 대상은 **`group`이 있고 `output/<C>/`가 실재하는 등록 채널**뿐이며, 미등록 잔존 폴더·`.cookie_status.json`·이미 옮겨진 채널은 **건드리지 않고 보고서에만 나열**한다(재실행 **멱등**). 여유 공간 검사는 하지 않는다 — `os.rename`은 복사를 수반하지 않는다 | 필수 |
+| FR35.12 | **마이그레이션 저널·롤백·중단 상태** — 채널 1개를 옮길 때마다 `output/.migration_journal.json`에 `{src, dst, at}`을 append하고 **flush+fsync**한다. 중간 실패 시 **저널을 역순으로 자동 롤백**하고, 롤백까지 실패하면 저널 경로와 남은 수동 복구 명령을 출력한 뒤 비정상 종료한다. `./yt.sh migrate-groups --rollback`은 저널을 역순으로 되돌린다(평면 구조 복귀 = 기능 자체의 되돌리기 경로) — **중단분(`.migration_journal.json`)과 완료분(`.migration_journal.done.json`)을 모두 대상으로 하며 둘 다 있으면 최근 것인 중단분을 먼저 되돌리고 남은 저널을 알린다**(완료분을 먼저 되돌리면 중단분의 `dst`가 사라져 어긋난다). 되돌릴 저널이 없으면 **성공 문구를 쓰지 않고 종료코드 2**로 끝낸다. 롤백은 **락이 남아 있어도 확인(대화형 y 또는 `--yes`) 후 진행**한다 — 락 상황의 복구 수단이 락에 막히면 `--unlock`↔`--rollback` 순환에 갇힌다. 롤백 대상 중 하나라도 복구 위치가 이미 점유돼 있으면 **한 건도 움직이지 않고 중단**한다. 저널이 남은 상태로 다시 실행하면 **"미완료 마이그레이션 감지"로 즉시 중단**하고 `--rollback`을 요구한다. 성공 완료 시 저널을 `output/.migration_journal.done.json`으로 보관한다. **마이그레이션은 `channels.yaml`을 수정하지 않는다** — `group` 값은 그대로이고 해석 규칙만 바뀌므로 순수 디렉터리 이동이며, 롤백도 디렉터리 되돌리기만으로 완결된다 | 필수 |
+| FR35.13 | **자동 폴더 지정 경로는 거부 대신 회피** — 재생목록(FR25.7)·검색(FR34.6) 추출에서 신규 채널에 폴더를 자동 지정할 때 FR35.6 충돌이 나면 **409로 작업 전체를 죽이지 않고** 해당 채널의 그룹 지정만 **건너뛴다**(채널은 최상위에 남는다). 건너뛴 사실은 로그와 job 경고로 노출한다 — 배치 추출 중간에 이름 충돌 하나로 수십 개 영상 추출이 무산되는 것이 더 큰 손해다 | 필수 |
+| FR35.14 | **범위 명시(하지 않는 것)** — ⓐ 채널 **열거는 계속 `channels.yaml` 기준**이다. 파일시스템을 훑어 채널을 발견하는 로직을 **도입하지 않는다**(현행 구조의 최대 이점). ⓑ 대시보드 UI·API 응답 스키마는 **무변경**이다 — 폴더 섹션(FR25.4·25.9)·전체 보기(FR25.5)·`/channels/stats.group`은 지금도 yaml 기준이라 그대로 동작한다. ⓒ `output/.cookie_status.json`의 위치는 **`output/` 최상위 그대로**다(`cookie_health:17`, DQ-11). ⓓ ChromaDB 메타·meta.json에 **절대경로를 새로 저장하지 않는다**(현재 0건 — 이 성질이 이동을 안전하게 만든다). ⓔ 그룹 다단 중첩·채널의 복수 그룹 소속은 범위 밖이다 | 명시 |
+
+> **쟁점별 결정 요약:** 쟁점1 = FR35.4·35.5(거부 우선·변환 없음·핫패스 재검증) · 쟁점2 = FR35.6(최상위 이름공간 유일성) ·
+> 쟁점3 = FR35.7(단일 `os.rename` + 보상 롤백, 복사 폴백 금지) · 쟁점4 = FR35.11~35.12(명시적 CLI·dry-run 기본·저널 롤백·yaml 무변경) ·
+> 쟁점5 = FR7.7~7.9(`add()` upsert + `resolve_name` + 이름 검증). 근거는 각각 DQ-33·DQ-34·DQ-35·DQ-36·DQ-37에 있다.
+
+> **확정(2026-09-21, `_workspace/26_fr35_decisions.md`):** 이름공간 충돌 판정은 **`casefold()` + NFC 기준**이고 **저장은 원문**이다 — 호스트 APFS·컨테이너 마운트 `output/` 둘 다 대소문자 무시임을 실측했다(`mkdir .__casetest__` → `.__CASETEST__` 존재). 대소문자만 다른 두 그룹을 yaml이 허용하면 디스크에서 한 폴더로 붕괴해 FR35.4의 `group` 값 = 디렉터리명 1:1 불변식이 즉시 깨진다. 케이스 구분 FS로 옮겨가도 casefold 판정은 더 엄격할 뿐 잘못 허용하지 않는다. 그 밖의 확정: `purge` 후 빈 그룹 폴더는 **빈 경우만 `rmdir`**(`rmtree` 금지), `output_backup_<ts>/`는 **자동 삭제하지 않고** 완료 메시지에 경로를 출력한다, `/channels/stats`의 실제 경로 노출은 이번 범위 제외.
+
+---
+
+### FR36 — 채널 메모 · 추출 탭 이름 변경 · 탭 간 자동 갱신 (신규, v4)
+
+세 요구가 하나의 접점(**채널 카드**)과 하나의 데이터 출처(**`GET /channels/stats`**)를 공유하므로 한 FR로 묶는다.
+
+> **조사로 확정된 전제(2026-09-24):** `channels.yaml`의 `note` 필드는 **이미 존재한다** — `ChannelRegistry.add()`가
+> 인자로 받아 기록하고 FR7.7(upsert)이 "인자가 비어 있지 않을 때만 갱신"으로 **보존 계약까지** 갖고 있다.
+> 그런데 **읽는 코드도 노출하는 API·UI도 0**이고 등록 77채널의 값이 **전부 빈 문자열**이다. 즉 메모 기능은
+> 신규 스키마가 아니라 **죽어 있던 필드를 살리는 일**이며, 마이그레이션·백필이 전혀 필요 없다(DQ-39).
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR36.1 | **채널 메모는 `note` 필드를 재사용한다 — 새 필드를 만들지 않는다.** `ChannelRegistry.set_note(name, note)` 신설: 제어문자(U+0000~U+001F·U+007F)를 **공백으로 치환** → 트림 → **최대 200자**(초과 시 `ValueError`, 잘라내지 않는다) → 기록. 빈 값이면 필드를 **제거하지 않고 `note: ""`로 되돌린다** — `add()`가 신규 등록 시 항상 `note: ""`를 쓰고 기존 77채널도 전부 그 형태라, `group`·`auto_run`처럼 필드를 제거하면 오히려 yaml이 불균일해진다(FR25.1·FR34.7의 "기본값이면 제거" 규칙은 메모에 적용하지 않는다). 미등록 채널은 `KeyError` | 필수 |
+| FR36.2 | **"간단한"의 경계 (범위 확정)** — 메모는 **채널당 한 줄 평문 1개**다. ⓐ 줄바꿈 없음(단일 행) ⓑ 200자 상한 ⓒ 마크다운·태그·이력·첨부·다국어 필드 **없음** ⓓ 영상·폴더·카테고리 단위 메모 **없음**(채널 전용) ⓔ 입력은 기존 이름 변경과 같은 `prompt` 1회(FR31.6과 동일 상호작용 — 새 입력 위젯·모달을 도입하지 않는다). 상한 200자의 근거: `prompt`는 한 줄이고 카드 폭 한 줄(말줄임)에 담기는 분량이며, 그 이상은 "메모"가 아니라 문서다 | 필수 |
+| FR36.3 | **노출은 기존 엔드포인트 1개 확장으로 끝낸다** — `GET /channels/stats` 응답 항목에 `note`를 추가한다(필드 부재 시 `""`). 라이브러리·추출 두 탭이 **이미 이 엔드포인트 하나만** 읽으므로 조회용 신규 API를 만들지 않는다(FR20.1·FR22.1) | 필수 |
+| FR36.4 | **저장 API** `POST /channels/note {channel, note}` → `{ok, channel, note}`(정규화된 최종 값을 반환해 프론트가 서버 값을 그대로 표시한다). 미등록 404 · 200자 초과 400 · 작업 중 409(FR36.11). 경로 문자 검사는 `channel`에 기존 `_reject_path_traversal`을 적용한다 | 필수 |
+| FR36.5 | **메모 표시** — 라이브러리·추출 **양쪽** 채널 카드에 같은 형태로 표시한다: 통계 줄 아래 한 줄, 흐린 색, `text-overflow: ellipsis`, `title` 속성에 전문. **빈 메모는 줄 자체를 렌더하지 않는다** — 현행 77채널이 전부 빈 값이므로 배포 직후 화면 변화가 0이고, 메모를 적은 채널만 시각적으로 도드라진다. 📝 버튼은 빈 메모여도 **항상 노출**한다(없으면 첫 메모를 적을 수 없다). 폴더 전체 보기·영상 행·질의 탭에는 메모를 표시하지 않는다(채널 속성) | 필수 |
+| FR36.6 | **메모는 검색·필터 대상이 아니다** — 라이브러리 즉시 필터(FR20.2)는 **영상 제목** 대상이고 내용 검색(FR20.4·FR25.8)은 **ChromaDB 벡터 검색**이다. 메모를 후자에 넣으려면 채널 단위 의사(疑似) 문서를 만들어 컬렉션 스키마(DQ-03)를 오염시켜야 하고, 전자는 대상 축이 다르다. 채널 수(77)가 시각 스캔 가능한 규모이므로 **이번 범위에서 제외**한다. 필요해지면 `/channels/stats`를 이미 들고 있는 **클라이언트 측 채널 카드 필터**로 확장할 수 있다(백엔드 무변경) — 그때 별도 FR로 다룬다 | 명시 |
+| FR36.7 | **추출 탭 채널 이름 변경** — 추출 탭 채널 카드(FR22.1)에 ✏️(이름)·📝(메모) 버튼을 추가한다. 이름 변경은 **라이브러리 탭과 완전히 동일**하게 기존 `POST /channels/rename`(FR31.1)을 호출하며 검증·409·폴더 이동 규칙을 그대로 따른다 — 프론트에 별도 경로를 만들지 않는다. 카드 클릭은 스캔 시작(FR22.2)이므로 두 버튼의 클릭은 **카드 핸들러보다 먼저 처리하고 전파를 끊어야** 한다(기존 `.norun` 배지와 같은 규칙) | 필수 |
+| FR36.8 | **이름 변경은 그 채널을 참조하는 스캔 캐시를 무효화한다 (기존 결함 수정)** — `POST /channels/rename` 성공 시 `JobManager`의 스캔 캐시에서 해당 채널을 참조하는 항목(`channel` 또는 `by_channel` 키 일치)을 **모두 삭제**한다. 삭제 후 그 `scan_id`로 온 `POST /extract`는 **기존 400 "scan_id가 만료되었습니다. 다시 스캔하세요."** 로 처리된다(신규 오류 코드 없음). 이유: `_run_channel`은 캐시의 **옛 이름**을 그대로 써서 `reg.get(옛이름)`에 실패하면 폴백 설정으로 진행하고, 결과물이 `output/<옛이름>/`(레지스트리에 없는 **유령 폴더**)에 쌓인다. FR31 시점부터 잠재해 있던 결함이며 추출 탭에서 이름을 바꿀 수 있게 되는 FR36.7이 발생 확률을 크게 올린다(DQ-41). 프론트도 같은 규칙을 지킨다 — 조건 화면이 그 채널의 스캔 결과를 띄우고 있으면 **화면을 닫고 "다시 스캔하세요" 안내**를 표시한다. **비고 — 채널 삭제(`POST /channels/delete`)도 성공 후 같은 무효화를 건다**: 삭제된 채널의 옛 `scan_id`로 추출하면 `_run_channel`의 `reg.add()`가 그 채널을 **되살린다**(같은 계열·같은 해법이라 같은 커밋에서 닫는다) | 필수 |
+| FR36.9 | **탭 간 자동 갱신 계약** — 이름·메모를 바꾸는 모든 경로는 성공 직후 **공통 헬퍼 하나**(`refreshChannelViews({names})`)를 호출한다. 동작은 다음으로 고정한다: ⓐ **라이브러리** — `libLoaded = false`로 캐시를 무효화하고, 라이브러리 탭이 **현재 활성이면** 즉시 재조회한다(비활성이면 `switchTab`의 기존 `!libLoaded` 가드가 다음 진입 때 로드한다 — 갱신 누락의 원인이던 이 가드를 **없애지 않고 무효화로 다룬다**). ⓑ **추출** — 항상 재조회한다(비용은 `/channels/stats` 1회). ⓒ **질의 탭 사이드바** — **`names: true`(이름 변경)일 때만** 재조회한다. 메모는 질의 탭에 표시되지 않으므로 건드리지 않는다 | 필수 |
+| FR36.10 | **질의 탭 채널 선택 보존** — 위 ⓒ의 재조회는 현재 선택된 채널을 기억했다가 복원한다(이름이 바뀐 채널이면 **새 이름으로** 복원, 목록에 없으면 첫 채널). 선택이 실제로 달라졌을 때만 영상 목록을 다시 읽는다. 현행 `loadChannels()`는 무조건 첫 채널로 되돌리고 영상 목록까지 다시 읽으므로, 갱신 호출이 잦아지는 FR36.9 아래에서는 **질의 중 선택이 튕기는 회귀**가 된다 | 필수 |
+| FR36.11 | **동시성 — 메모 저장도 작업 중 409** (`JobManager.is_busy()`, FR21.4·FR31.5 준용). 메모가 디렉터리를 건드리지 않는 것은 **파일 이동 위험**만 없앨 뿐이고, `ChannelRegistry`는 인스턴스 생성 시 yaml 전체를 읽어 `_save()`로 전체를 덮어쓰는 read-modify-write다. 그룹 추출 워커(`_run_grouped`)는 **작업 내내 같은 레지스트리 인스턴스**를 들고 `add`·`set_group`·`set_auto_run`을 호출하므로, 작업 중 저장된 메모는 워커의 다음 `_save()`에 **조용히 덮어써진다**(lost update). 이름 변경(409)과 `auto_run` 토글(409)의 선례와도 일치한다 (DQ-42) | 필수 |
+| FR36.12 | **범위 명시(하지 않는 것)** — ⓐ CLI는 무변경이다(`./yt.sh`에 메모 명령을 만들지 않는다 — 대시보드 전용). ⓑ `add(url, lang, note)`의 기존 시그니처·FR7.7 보존 계약은 **그대로 두고** `set_note`를 병설한다. ⓒ 메모는 ChromaDB·meta.json·state.json 어디에도 복제하지 않는다(단일 출처 = `channels.yaml`). ⓓ 폴더·영상·카테고리 메모, 메모 이력·타임스탬프는 범위 밖이다. ⓔ 기존 이름 변경 4종 중 **채널 이름 변경만** 공통 헬퍼로 이관한다 — 폴더·영상·카테고리 변경은 갱신 대상이 달라(질의 탭 채널 목록과 무관하거나 영상 목록만 필요) 이관 이익이 없고 회귀 위험만 있다 | 명시 |
+
+---
+
 ## 4. 비기능 요구사항 (NFR)
 
 | ID | 요구사항 | 기준 |
@@ -553,6 +627,10 @@
 | `./yt.sh index` | 전체 채널 KL 인덱싱 | FR6 |
 | `./yt.sh list` | 등록 채널 목록 조회 | FR7.5 |
 | `./yt.sh remove 채널명` | 채널 등록 해제 | FR7.5 |
+| `./yt.sh migrate-groups` | 폴더 디렉터리화 마이그레이션 **계획만 출력(dry-run)** | FR35.11 |
+| `./yt.sh migrate-groups --apply [--yes]` | 사전 검증 통과 시 실제 이동 (저널 기록·실패 시 자동 롤백) | FR35.11~35.12 |
+| `./yt.sh migrate-groups --rollback [--yes]` | 저널(중단분·완료분)을 역순으로 되돌려 평면 구조 복귀. 되돌릴 것이 없으면 종료코드 2 | FR35.12 |
+| `./yt.sh migrate-groups --unlock` | stale `output/.migration.lock` 수동 제거 | FR35.10 |
 
 > **`auto_run` 적용 범위(FR34.7):** 건너뛰기는 **`run`·`transcribe`의 인자 없는 전체 순회에만** 적용된다(공통 헬퍼 `main.bulk_targets`).
 > `run 채널명`·`transcribe 채널명`으로 명시 지정하면 플래그와 무관하게 실행되고, `review`·`reextract`·`index`의 대상 산출은 이번 변경 범위가 아니다
@@ -571,6 +649,7 @@
 | FR5.1~5.3 | `Reprocessor` (Extractor 재사용) | srt/, txt/ 덮어쓰기 |
 | FR6.1~6.7 | `KLIndexer` | chroma/ (2개 컬렉션) |
 | FR7.1~7.6 | `ChannelRegistry` | channels.yaml |
+| FR7.7~7.9 | `channel_registry.add`(upsert·`resolve_name`·세그먼트 검증) · `main.cmd_add`(로그 구분) | channels.yaml (기존 `group`·`auto_run`·`channel_id` 보존) |
 | FR8.1~8.5 | `yt.sh` | (래퍼) |
 | FR9.1~9.6 | `KLQuery` | (질의 API) |
 | FR10.1~10.6 | `KLHarness` (질의 하네스) | (answer·trace) |
@@ -578,6 +657,7 @@
 | FR12.1~12.4 | `MetaCollector.extract_tickers` · `KLQuery` | meta tickers 필드 |
 | FR13.1~13.5 | `config.resolve_cookiefile` · `Extractor._fetch_vtt` | /tmp 쿠키 작업본 |
 | FR13.6 | `config.firefox_profile_dir`·`has_auth` · `Extractor._ydl_opts`(cookiesfrombrowser)·`_fetch_vtt` · `yt.sh`(프로필 자동 감지 마운트) · `cookie_health.get_status`(source) | (Firefox 쿠키 직접 읽기) |
+| FR13.7 | `video_access.py`(`MEMBERS_AVAILABILITY`·`is_members_availability`·`is_members_message`) · `Extractor._is_members_only(msg, availability)`·`run()` 루프(429 선판정) · `dashboard/jobs.py`(`_is_members_availability` 위임·단일영상 워커) | state.json `sub_type="members_only"` |
 | FR14.1~14.5 | `config.YTDLP_COMMON`(`BATCH_SIZE_RANGE`·`BATCH_REST_RANGE`) · `Extractor.run(rest_state=)` · `extractor.BatchRest`(작업 단위 휴식 카운터, DQ-30) · `dashboard/jobs.py._run_grouped`(그룹 간 공유) | (레이트리밋 방어) |
 | FR15.1~15.5 | `Extractor.scan_playlists` · `MetaCollector` · `KLIndexer` | playlists.json, meta/*.json |
 | FR16.1~16.4 | `Extractor.scan_channel` | meta/*.json (content_type) |
@@ -607,7 +687,20 @@
 | FR34.7~34.8 | `channel_registry.set_auto_run`(신규) · `ChannelRegistry.names(auto_only=)`(신규 인자) · `main.py bulk_targets`(신규 공통 헬퍼) · `cmd_run`·`cmd_transcribe` · `dashboard/server.py` (`POST /channels/auto_run`·`/channels/stats.auto_run`) · `dashboard/index.html` (제외 배지·토글) | channels.yaml `auto_run` 필드 |
 | FR34.12 | (구현 없음 — 범위 명시) | — |
 | FR21.1~21.4 | `dashboard/server.py` (`POST /videos/delete`·`POST /channels/delete`·`_reject_path_traversal`) · `kl_indexer.KLIndexer.delete_video` · `dashboard/jobs.py` (`JobManager.is_busy`) · `dashboard/index.html` (`deleteVideo`·`deleteChannel`·`copySubtitle`) | output 파일·state·ChromaDB 정리 |
+| FR35.1~35.3 | `config.channel_dir`(그룹 해석) · `config._group_map`·`invalidate_group_cache`(신규, yaml 직접 파싱 + mtime 캐시) · `channel_registry.ChannelRegistry._save`(명시 무효화 호출) | `output/<폴더>/<채널>/` |
+| FR35.4~35.5 | `config.validate_path_segment`(신규, 순수 문자열) · `config.channel_dir`(그룹 폴백·채널 거부) — `server.py:417` 기존 `is_relative_to` 가드 유지 | (검증·400) |
+| FR35.6~35.10 | `folder_ops.py`(신규: `check_namespace`·`is_channel_like_dir`·`move_channel_dir`·`set_channel_group`·`rename_group`·락) · `renamer.rename_channel`·`rename_folder`(위임) · `dashboard/server.py`(`POST /channels/group`·`/folders/rename` 400/409) · `dashboard/jobs.py`(`JobManager.is_busy` 락 인지) | 디렉터리 이동·`output/.migration.lock` |
+| FR35.11~35.12 | `folder_ops.plan_migration`·`apply_migration`·`rollback_migration`(신규) · `main.cmd_migrate_groups`(신규) · `yt.sh`(`migrate-groups` 명령 + **호스트측 `cp -a` 자동 백업**) | `output/.migration_journal.json`(+`.done.json`) · `output_backup_<ts>/` |
+| FR35.13 | `dashboard/jobs.py` `_run_grouped`(자동 폴더 지정 충돌 시 skip + job 경고) | job 경고 |
+| FR35.14 | (구현 없음 — 범위 명시) | — |
 | FR22.1~22.4 | `dashboard/index.html` (`loadExtChannels`·`extSelectChannel`·`switchTab`·`pollJob` 완료 훅) — 기존 `GET /channels/stats`(FR20.1)·`extStart`(FR17.3~17.4) 재사용, 신규 백엔드 없음 | (프론트 전용) |
+| FR36.1~36.2 | `channel_registry.ChannelRegistry.set_note`(신규 — 제어문자 치환·200자 상한·빈 값은 `""` 유지) | channels.yaml `note` (기존 필드 재사용, 백필 없음) |
+| FR36.3~36.4 | `dashboard/server.py` (`GET /channels/stats`에 `note` 추가 · `POST /channels/note` 신규 · `ChannelNoteRequest`) | (조회 API 1개 확장 + 저장 API 1개) |
+| FR36.5~36.7 | `dashboard/index.html` (`chanNoteHtml` 공유 조각 · `chanCardHtml`/`extCardHtml` 확장 · `setChannelNote` · `extChanCards`의 `.chan-rename`·`.chan-note` 위임을 `.chan-card`보다 **먼저** 등록) — 이름 변경은 기존 `POST /channels/rename`(FR31.1) 재사용 | (프론트 + 기존 엔드포인트) |
+| FR36.8 | `dashboard/jobs.py` `JobManager.invalidate_scans(channel=)`(신규) · `dashboard/server.py` `/channels/rename`·**`/channels/delete`** 성공 후 호출 · `dashboard/index.html`(조건 화면 초기화·안내) | 스캔 캐시 삭제 → 기존 400 계약 |
+| FR36.9~36.10 | `dashboard/index.html` (`refreshChannelViews({names})` 신규 공통 헬퍼 · `loadChannels` 선택 보존 · `renameChannel` 이관) | (프론트 전용) |
+| FR36.11 | `dashboard/server.py` `_reject_if_busy`(FR31.5 재사용, 마이그레이션 락 포함) | 409 |
+| FR36.12 | (구현 없음 — 범위 명시) | — |
 
 ---
 
@@ -665,7 +758,7 @@
 
 ### 7.5 합격 판정 기준
 
-- **단위 검증:** DESIGN §9.1a의 V-U1~V-U21 전부 통과 (V-U3 제외 — 테스트 미구현). 기준선 `./yt.sh test` = 60 passed / 1 skipped (2026-09-20)
+- **단위 검증:** DESIGN §9.1a의 V-U1~V-U31 전부 통과 (V-U3 제외 — 테스트 미구현). 기준선 `./yt.sh test` = **140 passed / 1 skipped** (2026-09-24 실측, FR36 포함)
 - **통합 검증:** V-I1~V-I8 전부 통과 (100%)
 - **검색 품질:** V-Q1~V-Q3 수동 확인, 주관적 만족도 기준
 

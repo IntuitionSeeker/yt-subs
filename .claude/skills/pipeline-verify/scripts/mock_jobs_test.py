@@ -19,6 +19,10 @@ except ImportError:
 import config
 tmp = Path(tempfile.mkdtemp())
 config.OUTPUT_BASE = tmp                       # 출력 격리
+config.CHANNELS_YAML = tmp / "channels.yaml"   # 레지스트리 격리 (실데이터 보호, FR35)
+config.invalidate_group_cache()
+
+import folder_ops
 
 import jobs
 from jobs import classify_url, apply_filters, JobManager, JobBusyError
@@ -466,10 +470,12 @@ reg9.get.side_effect = lambda n: {"name": n,
                                   "url": f"https://www.youtube.com/@{n}/videos",
                                   "lang": "ko"}
 idx9 = mock.MagicMock()
+grp9 = mock.MagicMock(return_value={"moved": True})
 with mock.patch.object(_extractor_mod, "Extractor", PlaylistExtractor), \
      mock.patch.object(jobs, "ChannelRegistry",
                        mock.MagicMock(return_value=reg9, extract_handle=str,
                                       normalize_url=lambda u: u)), \
+     mock.patch.object(folder_ops, "set_channel_group", grp9), \
      mock.patch.dict(sys.modules, {"kl_indexer": mock.MagicMock(KLIndexer=idx9)}):
     job9 = mgr._new_job("playlist_run", "퀀트 강의", PL_URL)
     mgr._job = job9
@@ -482,9 +488,13 @@ assert runs9[0]["pl_map"]["p1"] == ["기존카테고리", "퀀트 강의"], \
     "병합 full-map 전달 (DQ-17)"
 assert "퀀트 강의" in runs9[0]["pl_map"]["p2"]
 assert reg9.add.called, "미등록 채널(UC…) 자동 등록"
-assert [c.args for c in reg9.set_group.call_args_list] == \
+assert not reg9.set_group.called, \
+    "폴더 지정은 folder_ops를 경유해야 한다 — yaml만 쓰면 디렉터리가 따라오지 않는다 (FR35.8)"
+assert [c.args for c in grp9.call_args_list] == \
     [("UCzzzzzzzzzzzzzzzzzzzzzz", "퀀트 강의")], \
     "신규 등록 채널만 재생목록 폴더 자동 지정 (FR25.7)"
+assert all(c.kwargs.get("on_conflict") == "skip" for c in grp9.call_args_list), \
+    "자동 폴더 지정은 충돌 시 거부가 아니라 건너뛰기 (FR35.13)"
 assert job9["status"] == "done" and job9["total"] == 3 and job9["done"] == 3
 assert job9["stats"]["new"] == 2 and job9["stats"]["skip"] == 1
 assert [c.args[0] for c in idx9.call_args_list] == ["chanA"], \
@@ -586,10 +596,14 @@ reg10.get.side_effect = lambda n: {"name": n,
                                    "url": f"https://www.youtube.com/@{n}/videos",
                                    "lang": "ko"}
 idx10 = mock.MagicMock()
+# 첫 채널은 이름 충돌로 건너뛰기(FR35.13) — 예외 없이 job 경고로만 노출돼야 한다
+grp10 = mock.MagicMock(side_effect=[{"moved": False, "skipped": "이름 충돌"},
+                                    {"moved": True}])
 with mock.patch.object(_extractor_mod, "Extractor", SearchExtractor), \
      mock.patch.object(jobs, "ChannelRegistry",
                        mock.MagicMock(return_value=reg10, extract_handle=str,
                                       normalize_url=lambda u: u)), \
+     mock.patch.object(folder_ops, "set_channel_group", grp10), \
      mock.patch.dict(sys.modules, {"kl_indexer": mock.MagicMock(KLIndexer=idx10)}):
     job10 = mgr._new_job("search_run", "AI 에이전트", SEARCH_URL)
     mgr._job = job10
@@ -603,9 +617,12 @@ assert all(r["pl_map"] == {} for r in runs10), \
     "검색어는 카테고리로 병합하지 않는다 — 빈 맵이어야 scan_playlists()도 백필도 돌지 않는다 (DQ-28)"
 assert runs10[0]["date_range"] == {"since": "20260101", "until": None}, "ⓒ 2층 전달 (DQ-24)"
 # 신규 등록 채널만 폴더 + auto_run:false (기존 chanA는 불변, FR25.7·FR34.6~34.7)
-assert sorted(c.args[0] for c in reg10.set_group.call_args_list) == \
+assert not reg10.set_group.called, "폴더 지정은 folder_ops 경유 (FR35.8)"
+assert sorted(c.args[0] for c in grp10.call_args_list) == \
     ["UCyyyyyyyyyyyyyyyyyyyyyy", "chanC"]
-assert all(c.args[1] == "AI 묶음" for c in reg10.set_group.call_args_list)
+assert all(c.args[1] == "AI 묶음" for c in grp10.call_args_list)
+assert len(job10["warnings"]) == 1 and "건너뜀" in job10["warnings"][0], \
+    f"충돌은 job 경고로만 노출되고 배치 추출은 계속된다 (FR35.13): {job10['warnings']}"
 assert sorted(c.args for c in reg10.set_auto_run.call_args_list) == \
     [("UCyyyyyyyyyyyyyyyyyyyyyy", False), ("chanC", False)]
 assert job10["status"] == "done" and job10["total"] == 3 and job10["done"] == 3
@@ -691,3 +708,71 @@ assert sleep11c == [], "취소 상태에서 45초를 자면 안 된다"
 print("✓ 배치 휴식: 그룹 경계를 넘어 누적(45×2) · 비공유 대조군 0회 · 취소 시 즉시 중단 (FR14.2)")
 
 print("\n429 배치 휴식(FR14.2) 크로스 그룹 검증 통과")
+
+
+# ── 12. is_busy()가 마이그레이션 락을 OR 합산한다 (FR35.10) ──────────────────
+# CLI 마이그레이션 컨테이너와 serve 컨테이너는 job 상태를 공유할 수 없다.
+# output/.migration.lock 파일이 유일한 통로다 (DQ-11과 같은 수법).
+mgr12 = JobManager()
+assert mgr12.is_busy() is False
+folder_ops.lock()
+assert mgr12.is_busy() is True, "마이그레이션 중에는 추출·삭제·이름 변경이 전부 409여야 한다"
+import os as _os
+_stale = time.time() - (folder_ops.STALE_LOCK_SEC + 60)
+_os.utime(folder_ops._lock_path(), (_stale, _stale))
+assert mgr12.is_busy() is False, "6시간 초과 락은 stale로 무시(경고)"
+folder_ops.unlock()
+assert mgr12.is_busy() is False
+
+# QA F-5: is_busy()만 락을 보면 삭제·이름 변경만 막히고 **스캔·추출은 그대로 통과**한다.
+# 진입점은 _acquire()이므로 여기서도 락을 봐야 마이그레이션 중 평면 경로 재생성을 막는다.
+folder_ops.lock()
+try:
+    try:
+        mgr12._acquire()
+        raise AssertionError("마이그레이션 락 중에는 _acquire()가 JobBusyError여야 한다")
+    except JobBusyError:
+        pass
+    try:
+        mgr12.scan("https://www.youtube.com/@ch/videos")
+        raise AssertionError("마이그레이션 락 중에는 스캔이 409여야 한다")
+    except JobBusyError:
+        pass
+finally:
+    folder_ops.unlock()
+mgr12._acquire(); mgr12._release()      # 락 해제 후에는 정상 취득 (점유 누수 없음)
+print("✓ JobManager.is_busy/_acquire: 락 OR 합산 · stale 6h 무시 · 스캔 진입 차단 (FR35.10)")
+
+
+# ── 13. 스캔 캐시 무효화 (FR36.8 · DQ-41) ────────────────────────────────────
+# 이름 변경·삭제 뒤 옛 scan_id로 추출하면 `_run_channel`이 캐시의 옛 이름을 끝까지 써서
+# `output/<옛이름>/` 유령 폴더를 만들거나(rename) 채널을 되살린다(delete).
+# 캐시를 고쳐 쓰지 않고 **폐기**해 기존 400("만료")에 착지시킨다.
+mgr13 = JobManager()
+
+
+def _scan13(sid, channel=None, by_channel=None):
+    e = {"scan_id": sid, "channel": channel, "url": "https://youtube.com/@x/videos",
+         "videos_view": [], "entries": [], "pl_map": {}, "created_at": time.time()}
+    if by_channel is not None:
+        e["kind"] = "playlist"
+        e["by_channel"] = {n: {"url": "", "entries": []} for n in by_channel}
+    mgr13._scans[sid] = e
+
+
+_scan13("s_ch", channel="대상")                                   # 채널 스캔
+_scan13("s_pl", channel="재생목록제목", by_channel=["대상", "다른채널"])   # 재생목록/검색 스캔
+_scan13("s_other", channel="다른채널")
+assert mgr13.invalidate_scans(channel="대상") == 2, "channel·by_channel 양쪽 판정"
+assert set(mgr13._scans) == {"s_other"}, "다른 채널 캐시는 남는다"
+assert mgr13.invalidate_scans(channel="다른") == 0, "정확 일치 — 부분 문자열 아님"
+try:
+    mgr13.start({"scan_id": "s_ch", "filters": {}, "index": False})
+    raise AssertionError("폐기된 scan_id는 400(만료)이어야 한다")
+except ValueError as e:
+    assert "만료" in str(e), e
+assert mgr13.is_busy() is False, "400 경로에서 점유 누수 없음"
+assert mgr13.invalidate_scans() == 1 and mgr13._scans == {}, "channel=None이면 전체 비움"
+print("✓ JobManager.invalidate_scans: channel/by_channel 정확 일치 · 전체 비움 · 폐기 후 start 400 (FR36.8)")
+
+print("\n스캔 캐시 무효화(FR36) 검증 통과")

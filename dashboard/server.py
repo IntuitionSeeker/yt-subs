@@ -98,6 +98,11 @@ class ChannelAutoRunRequest(BaseModel):
     auto_run: bool                # false면 run·transcribe 전체 순회 제외 (FR34.8)
 
 
+class ChannelNoteRequest(BaseModel):
+    channel: str
+    note: str = ""                # 한 줄 메모, 200자 상한 (FR36.1)
+
+
 class ChannelRenameRequest(BaseModel):
     channel: str
     new_name: str
@@ -262,6 +267,7 @@ def channels_stats():
             "lang": ch.get("lang", config.DEFAULT_LANG),
             "added_at": ch.get("added_at", ""),
             "group": ch.get("group", ""),          # 채널 폴더 (FR25.3)
+            "note": ch.get("note", ""),            # 채널 메모 (FR36.3)
             # 필드 부재 = true (FR34.8·DQ-25) — 기존 yaml 무변경 호환
             "auto_run": ch.get("auto_run", True) is not False,
             "extracted": extracted,
@@ -282,13 +288,27 @@ def channels_new():
 
 @app.post("/channels/group")
 def channels_group(req: ChannelGroupRequest):
-    """채널 폴더 지정/변경/해제. FR25.2"""
-    reg = ChannelRegistry()
+    """
+    채널 폴더 지정/변경/해제. FR25.2·FR35.8
+
+    v5.6부터 yaml 기록에 더해 충돌 검사(409)·디렉터리 이동(`os.rename`)·보상 롤백을
+    `folder_ops`가 수행한다. 400=이름 검증 실패 / 409=충돌·작업중 / 500=이동 실패.
+    """
+    _reject_if_busy("폴더를 지정할 수 없습니다")            # FR35.10 (마이그레이션 락 포함)
+    _reject_path_traversal(req.channel)
+    import folder_ops
     try:
-        group = reg.set_group(req.channel, req.group)
+        result = folder_ops.set_channel_group(req.channel, req.group)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
-    return {"ok": True, "channel": req.channel, "group": group}
+    except ValueError as exc:                          # 그룹명 검증 실패 (FR35.4)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except folder_ops.ConflictError as exc:            # 이름공간 충돌 (FR35.6)
+        raise HTTPException(status_code=409, detail=str(exc))
+    except folder_ops.MoveError as exc:                # 이동 실패 (롤백 여부를 detail에)
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "channel": req.channel,
+            "group": result.get("group", ""), "moved": bool(result.get("moved"))}
 
 
 @app.post("/channels/auto_run")
@@ -305,12 +325,43 @@ def channels_auto_run(req: ChannelAutoRunRequest):
     return {"ok": True, "channel": req.channel, "auto_run": flag}
 
 
+@app.post("/channels/note")
+def channels_note(req: ChannelNoteRequest):
+    """
+    채널 메모 저장. FR36.4
+
+    작업 중에는 409다 (`_reject_if_busy` — 아래 FR31 섹션에 정의, 마이그레이션 락 포함).
+    이유는 파일 경합이 아니라 **channels.yaml lost update**: `ChannelRegistry`는
+    생성 시 yaml 전체를 읽고 `_save()`가 전체를 덮어쓰는 read-modify-write이고,
+    그룹 추출 워커(`_run_grouped`)는 작업 내내 같은 인스턴스를 들고 `_save()`를
+    반복하므로 작업 중 저장한 메모가 **조용히 되돌아간다** (DQ-42).
+
+    응답의 `note`는 **서버가 정규화한 최종 값**이다 — 프론트는 이 값을 그대로
+    렌더해 표시 불일치를 만들지 않는다.
+    """
+    _reject_if_busy("메모를 저장할 수 없습니다")          # FR36.11 (FR35.10 락 포함)
+    _reject_path_traversal(req.channel)
+    reg = ChannelRegistry()
+    try:
+        note = reg.set_note(req.channel, req.note)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
+    except ValueError as exc:                          # 200자 초과 (FR36.1)
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "channel": req.channel, "note": note}
+
+
 # ─── 이름 변경 (FR31) ────────────────────────────────────────────────────────
-def _reject_if_busy():
-    """추출/스캔 작업 중 이름 변경 금지 — 파일 경합 방지. FR31.5"""
+def _reject_if_busy(action: str = "이름을 변경할 수 없습니다"):
+    """
+    추출/스캔 작업 중 파일 경합 금지. FR31.5
+
+    `MANAGER.is_busy()`는 job 점유에 더해 `output/.migration.lock`을 OR 합산하므로
+    CLI 마이그레이션 중에도 409가 된다 (FR35.10).
+    """
     if MANAGER.is_busy():
         raise HTTPException(status_code=409,
-                            detail="추출/스캔 작업 중에는 이름을 변경할 수 없습니다.")
+                            detail=f"추출/스캔·마이그레이션 작업 중에는 {action}.")
 
 
 @app.post("/channels/rename")
@@ -319,12 +370,22 @@ def channels_rename(req: ChannelRenameRequest):
     _reject_if_busy()
     _reject_path_traversal(req.channel, req.new_name.strip() or req.new_name)
     import renamer
+    import folder_ops
+    try:                                             # 이름 검증 실패 = 400 (FR35.4·FR7.9)
+        config.validate_path_segment(req.new_name)   # 충돌(중복·기존 폴더)은 아래 409
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     try:
         renamer.rename_channel(req.channel, req.new_name)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
+    except folder_ops.ConflictError as exc:          # 최상위 이름공간 충돌 (FR35.6ⓒ)
+        raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    # 옛 이름이 박힌 스캔 캐시를 버린다 — 남기면 `output/<옛이름>/` 유령 폴더가
+    # 생긴다 (FR36.8·DQ-41). **성공 후에만** 호출한다(400/409면 캐시 무변경).
+    MANAGER.invalidate_scans(channel=req.channel)
     return {"ok": True, "channel": req.new_name.strip()}
 
 
@@ -358,14 +419,20 @@ def categories_rename(req: CategoryRenameRequest):
 
 @app.post("/folders/rename")
 def folders_rename(req: FolderRenameRequest):
-    """폴더(그룹) 이름 변경. FR31.4"""
-    _reject_if_busy()
+    """폴더(그룹) 이름 변경 — 디렉터리 1회 rename + yaml 일괄. FR31.4·FR35.9"""
+    _reject_if_busy("폴더 이름을 변경할 수 없습니다")
     import renamer
+    import folder_ops
+    src_existed = (config.OUTPUT_BASE / (req.old or "").strip()).is_dir()
     try:
         count = renamer.rename_folder(req.old, req.new)
-    except ValueError as exc:
+    except ValueError as exc:                          # 이름 검증 실패 (FR35.4)
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"ok": True, "channels": count}
+    except folder_ops.ConflictError as exc:            # 이름공간 충돌 (FR35.6)
+        raise HTTPException(status_code=409, detail=str(exc))
+    except folder_ops.MoveError as exc:                # 이동 실패
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "channels": count, "moved": src_existed}
 
 
 @app.post("/videos/delete")
@@ -408,15 +475,29 @@ def delete_channel(req: ChannelDeleteRequest):
     _reject_path_traversal(req.channel)
 
     reg = ChannelRegistry()
+    # ⚠️ 삭제 경로는 **yaml 항목을 지우기 전에** 잡는다 (FR35.8). `reg.remove()` 후에는
+    #    `group`이 사라져 `channel_dir()`가 평면 경로를 돌려주고, 그룹 안 채널의
+    #    `output/<G>/<C>/`가 지워지지 않은 채 `purged: false`로 조용히 끝난다.
+    #    (`renamer.rename_channel`이 `old_dir`를 rename 전에 잡는 것과 같은 패턴)
+    try:
+        ch_dir = config.channel_dir(req.channel).resolve() if req.purge else None
+    except ValueError as exc:                # 부적합 채널명 (FR35.4) — 검증 실패는 400
+        raise HTTPException(status_code=400, detail=str(exc))
+
     if not reg.remove(req.channel):
         raise HTTPException(status_code=404, detail="채널을 찾을 수 없습니다.")
+    # 삭제된 채널의 옛 scan_id로 추출하면 `_run_channel`의 `reg.add()`가 채널을
+    # **되살린다** — 이름 변경과 같은 계열의 구멍이라 같은 방식으로 닫는다 (FR36.8)
+    MANAGER.invalidate_scans(channel=req.channel)
 
     purged = False
     if req.purge:
-        ch_dir = config.channel_dir(req.channel).resolve()
         if ch_dir.is_relative_to(config.OUTPUT_BASE.resolve()) and ch_dir.exists():
             shutil.rmtree(ch_dir)
             purged = True
+            # 그룹의 마지막 채널이었다면 빈 폴더가 남는다 → **빈 경우만** rmdir (U-3)
+            import folder_ops
+            folder_ops.prune_empty_group_dir(ch_dir.parent)
     return {"deleted": True, "purged": purged}
 
 

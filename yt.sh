@@ -7,6 +7,7 @@
 #       ./yt.sh index
 #       ./yt.sh ask 채널 "질문" [--multistep]
 #       ./yt.sh serve        (대시보드)
+#       ./yt.sh migrate-groups [--apply [--yes]] [--rollback] [--unlock] [--no-backup]
 # ─────────────────────────────────────────────────────────────
 set -e
 
@@ -54,6 +55,25 @@ if [ -f "$DIR/cookies.txt" ]; then
   fi
 fi
 
+# ── migrate-groups --apply: 호스트측 자동 백업 (FR35.11⑦) ──
+# 컨테이너에는 output/·channels.yaml만 마운트돼 내부에서는 형제 경로를 만들 수 없고,
+# output/ 안에 두면 채널 열거·purge rmtree와 섞인다 → 반드시 호스트에서 output/ 바깥에.
+EXTRA_ARGS=()
+if [ "$1" = "migrate-groups" ]; then
+  HAS_APPLY=0; HAS_NOBACKUP=0
+  for a in "$@"; do
+    [ "$a" = "--apply" ] && HAS_APPLY=1
+    [ "$a" = "--no-backup" ] && HAS_NOBACKUP=1
+  done
+  if [ "$HAS_APPLY" = "1" ] && [ "$HAS_NOBACKUP" = "0" ]; then
+    BACKUP="$DIR/output_backup_$(date +%Y%m%d_%H%M%S)"
+    echo "▢ 백업 생성 중: $BACKUP"
+    cp -a "$DIR/output" "$BACKUP"
+    echo "▢ 백업 완료 (자동 삭제하지 않습니다 — 확인 후 직접 지우세요: rm -rf '$BACKUP')"
+    EXTRA_ARGS=(--backup-path "$BACKUP")
+  fi
+fi
+
 # serve 명령은 포트 노출 필요
 PORT_OPT=""
 if [ "$1" = "serve" ]; then
@@ -73,4 +93,4 @@ docker run --rm -it \
   -v "$DIR/channels.yaml:/app/channels.yaml" \
   -v "$HF_CACHE:/root/.cache/huggingface" \
   -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
-  "$IMAGE" "$@"
+  "$IMAGE" "$@" "${EXTRA_ARGS[@]}"

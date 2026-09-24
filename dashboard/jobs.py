@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import unquote, quote_plus, unquote_plus
 
 import config
+import video_access
 from channel_registry import ChannelRegistry
 
 log = logging.getLogger("jobs")
@@ -69,11 +70,20 @@ SEARCH_LIMIT_DEFAULT = 20        # ⓐ 개수 상한 기본 (FR34.2)
 SEARCH_LIMIT_MAX = 50
 SEARCH_MIN_DURATION_DEFAULT = 180   # ⓑ N초 미만 제외 기본 (FR34.3 — "쇼츠"가 아니다)
 
-# 스캔 엔트리의 availability 중 멤버십 전용으로 볼 값 (FR17.6)
-_MEMBERS_AVAILABILITY = ("subscriber_only", "needs_auth", "premium_only")
+# 멤버십 판정은 `video_access` 한 곳에서만 정의한다 — 추출 경로와 공유 (DQ-38)
+_MEMBERS_AVAILABILITY = video_access.MEMBERS_AVAILABILITY    # FR17.6 (역호환 별칭)
 
 _STAT_KEYS = ("new", "updated", "skip", "no_sub", "members_only", "error",
               "date_skip", "live_wait")
+
+
+def _migration_locked() -> bool:
+    """CLI 마이그레이션 락 존재 여부 (FR35.10). 조회 실패는 '락 없음'으로 본다."""
+    try:
+        import folder_ops
+        return folder_ops.is_locked()
+    except Exception:                     # pragma: no cover - 락 조회 실패는 무시
+        return False
 
 
 class JobBusyError(Exception):
@@ -194,9 +204,8 @@ def apply_filters(videos: list, f: dict) -> list:
 
 
 def _is_members_availability(availability) -> bool:
-    """스캔 엔트리의 availability로 멤버십 전용 판별. FR17.6"""
-    av = str(availability or "").lower()
-    return any(k in av for k in _MEMBERS_AVAILABILITY)
+    """스캔 엔트리의 availability로 멤버십 전용 판별. FR17.6 (공유 규칙, DQ-38)"""
+    return video_access.is_members_availability(availability)
 
 
 def _now_iso() -> str:
@@ -294,6 +303,7 @@ def _group_flat_entries(entries: list, min_duration: int = None) -> tuple:
     """
     from state_manager import StateManager
     videos_view, by_channel, states = [], {}, {}
+    bad_channels = set()                   # 폴더명으로 쓸 수 없는 채널 (경고 1회 후 제외)
     reg = ChannelRegistry()
     for e in entries:
         if e.get("live_status") in ("is_live", "is_upcoming"):
@@ -307,11 +317,21 @@ def _group_flat_entries(entries: list, min_duration: int = None) -> tuple:
             log.warning(f"  ⚠ 채널 불명 → 제외: {e.get('id')}")
             continue
         name, ch_url = ch
+        if name in bad_channels:
+            continue
+        # 디렉터리로 쓸 수 없는 채널명(예약어 핸들 `@con`·`@nul`·`@com1` 등)은
+        # `config.channel_dir()`가 ValueError를 던진다. 그 한 건 때문에 스캔 전체를
+        # 400으로 죽이지 말고 **해당 채널만 제외**한다 — 위의 "채널 불명 → 제외"와 같은 패턴.
+        if name not in states:
+            try:
+                ch_dir = config.channel_dir(name)
+            except ValueError as exc:
+                bad_channels.add(name)
+                log.warning(f"  ⚠ 폴더로 쓸 수 없는 채널명 → 제외: {name!r} — {exc}")
+                continue
+            states[name] = StateManager(name).state if ch_dir.exists() else {}
         e["content_type"] = e.get("content_type") or "video"
         by_channel.setdefault(name, {"url": ch_url, "entries": []})["entries"].append(e)
-        if name not in states:
-            states[name] = (StateManager(name).state
-                            if config.channel_dir(name).exists() else {})
         st = states[name].get(e["id"]) or {}
         sub_type = st.get("sub_type")
         videos_view.append({
@@ -342,6 +362,12 @@ class JobManager:
 
     # ── 점유 제어 ────────────────────────────────────────────────────────────
     def _acquire(self):
+        # FR35.10 — 마이그레이션 락도 본다. `is_busy()`만 락을 합산하면 삭제·이름 변경은
+        # 막히는데 **스캔·추출은 그대로 진행**돼(진입점이 여기다) 이동 중인 채널의 평면
+        # 경로를 `mkdir(parents=True)`가 다시 만들어 데이터가 두 곳으로 갈라질 수 있다.
+        if _migration_locked():
+            raise JobBusyError(None, "마이그레이션이 진행 중입니다"
+                                     "(output/.migration.lock) — 끝난 뒤 다시 시도하세요.")
         with self._lock:
             if self._busy:
                 raise JobBusyError(self._snapshot())
@@ -373,6 +399,36 @@ class JobManager:
         if not entry:
             raise ValueError("scan_id가 만료되었습니다. 다시 스캔하세요.")
         return entry
+
+    def invalidate_scans(self, channel: str = None) -> int:
+        """
+        채널을 참조하는 스캔 캐시를 **폐기**한다. FR36.8 (DQ-41)
+
+        캐시에는 스캔 시점의 채널명이 박혀 있고 `_run_channel`이 그것을 끝까지 쓴다.
+        이름이 바뀌거나(rename) 등록이 사라진(delete) 뒤 옛 `scan_id`로 추출하면
+        `reg.get(옛이름)`이 실패해 폴백 cfg로 진행하거나(→ `config.channel_dir(옛이름)`
+        = 레지스트리에 없는 **유령 폴더**), `reg.add()`가 삭제한 채널을 **되살린다**.
+        캐시를 새 이름으로 고쳐 쓰지 않는 이유는 `channel`·`by_channel`·`url`·`entries`가
+        얽혀 부분 갱신이 새 불일치를 만들기 때문이다 — 폐기하면 기존 400
+        ("scan_id가 만료되었습니다. 다시 스캔하세요.")에 그대로 착지한다.
+
+        판정은 **정확 일치**로 충분하다(캐시에 들어간 이름은 이미 레지스트리 표기다).
+        `channel=None`이면 전체를 비운다. 반환값은 삭제 건수(로그용).
+        """
+        with self._lock:
+            if channel is None:
+                dropped = len(self._scans)
+                self._scans.clear()
+            else:
+                drop = [sid for sid, e in self._scans.items()
+                        if e.get("channel") == channel
+                        or channel in (e.get("by_channel") or {})]
+                for sid in drop:
+                    self._scans.pop(sid, None)
+                dropped = len(drop)
+        if dropped:
+            log.info(f"🗑 스캔 캐시 {dropped}건 폐기 (채널: {channel or '전체'})")
+        return dropped
 
     # ── 사전 스캔 (FR17.3 채널 · FR24.2 재생목록) ────────────────────────────
     def scan(self, url: str) -> dict:
@@ -591,6 +647,7 @@ class JobManager:
             "index_total": 0,
             "stats": {k: 0 for k in _STAT_KEYS},
             "events": [],           # 영상별 결과 이벤트 (FR26.2, 캡 1000)
+            "warnings": [],         # 작업 경고 (폴더 자동 지정 건너뜀 등, FR35.13)
             "error": None,
             "started_at": _now_iso(),
             "finished_at": None,
@@ -602,9 +659,17 @@ class JobManager:
         return snap if snap is not None else {"status": "idle"}
 
     def is_busy(self) -> bool:
-        """추출·스캔 점유 여부 — 삭제(FR21)가 작업 중 파일 정리와 겹치지 않도록 가드."""
+        """
+        추출·스캔 점유 여부 — 삭제(FR21)가 작업 중 파일 정리와 겹치지 않도록 가드.
+
+        FR35.10: `folder_ops.is_locked()`를 **OR로 합산**한다. CLI 마이그레이션
+        컨테이너와 serve 컨테이너는 job 상태를 공유할 수 없어 `output/.migration.lock`
+        파일을 통해서만 서로를 인지한다.
+        """
         with self._lock:
-            return self._busy
+            if self._busy:
+                return True
+        return _migration_locked()
 
     def cancel(self) -> bool:
         with self._lock:
@@ -761,10 +826,26 @@ class JobManager:
                 # (기존 등록 채널의 group·auto_run은 둘 다 건드리지 않는다)
                 if name not in reg.names():
                     reg.add(ch_url, lang=config.DEFAULT_LANG)
-                    if pl_title:
-                        reg.set_group(name, pl_title)
                     if not auto_run:            # 검색 유입 채널 (FR34.7, DQ-25)
-                        reg.set_auto_run(name, False)
+                        try:
+                            reg.set_auto_run(name, False)
+                        except KeyError:        # pragma: no cover - 이름 해석 불일치
+                            log.warning(f"⚠️ auto_run 기록 생략 — 등록명 불일치: {name}")
+                    if pl_title:
+                        # FR35.13: 충돌 시 409로 작업 전체를 죽이지 않고 이 채널만 건너뛴다
+                        import folder_ops
+                        try:
+                            res = folder_ops.set_channel_group(name, pl_title,
+                                                               on_conflict="skip")
+                        except (KeyError, ValueError, folder_ops.MoveError) as exc:
+                            res = {"skipped": str(exc)}
+                            log.warning(f"⚠️ 폴더 자동 지정 실패 — {name}: {exc}")
+                        if res.get("skipped"):
+                            self._append_warning(
+                                job, f"폴더 '{pl_title}' 자동 지정 건너뜀 — "
+                                     f"{name}: {res['skipped']}")
+                        # folder_ops가 yaml을 갱신했으므로 지역 레지스트리를 재적재한다
+                        reg = ChannelRegistry()
                     log.info(f"✅ 채널 등록: {name} (폴더: {pl_title})"
                              + ("" if auto_run else " · run 전체 순회 제외"))
                 try:
@@ -908,7 +989,8 @@ class JobManager:
                                          "reason": _REASONS.get(kind, kind)})
             except Exception as exc:
                 msg = str(exc)
-                if Extractor._is_members_only(msg):
+                # full info의 availability가 1차 신호, 메시지는 폴백 (DQ-38)
+                if Extractor._is_members_only(msg, info.get("availability")):
                     log.info(f"  🔒 멤버십 전용 (스킵): {vid}")
                     ext._mark_skip(vid, "members_only")
                     self._bump(job, "members_only")
@@ -937,6 +1019,11 @@ class JobManager:
             job["stats"][key] = job["stats"].get(key, 0) + n
 
     _EVENTS_CAP = 1000
+
+    def _append_warning(self, job: dict, message: str):
+        """작업 경고 축적 (FR35.13) — 예외로 작업 전체를 죽이지 않고 노출만 한다."""
+        with self._lock:
+            job.setdefault("warnings", []).append(message)
 
     def _append_event(self, job: dict, ev: dict):
         """영상별 결과 이벤트 축적 (FR26.2). 호출자가 락을 잡지 않았을 때 사용."""

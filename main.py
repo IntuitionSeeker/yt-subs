@@ -15,8 +15,11 @@ def cmd_add(args):
     """채널 등록 + 전체 자막 추출 자동 시작. FR7.2"""
     from extractor import Extractor
     reg = ChannelRegistry()
+    existed = reg.resolve_name(args.url) in reg.names()      # FR7.7 upsert 판정
     name = reg.add(args.url, lang=args.lang)
-    log.info(f"✅ 채널 등록: {name}")
+    # add()는 upsert다 — 기존 항목의 group·auto_run·channel_id는 보존된다 (FR7.7)
+    log.info(f"✅ 기존 채널 갱신: {name} (폴더·설정 보존)" if existed
+             else f"✅ 채널 등록: {name}")
     log.info("자막 추출을 시작합니다...\n")
     Extractor(reg.get(name)).run()
 
@@ -164,6 +167,99 @@ def cmd_serve(args):
                 app_dir=str(config.BASE_DIR / "dashboard"))
 
 
+def cmd_migrate_groups(args):
+    """
+    폴더 디렉터리화 마이그레이션 — 기본 dry-run. FR35.11~35.12
+
+    `output/<채널>/` → `output/<폴더>/<채널>/`. `channels.yaml`은 한 글자도 바꾸지 않는다
+    (`group` 값은 그대로이고 해석 규칙만 달라진다) → 롤백이 디렉터리 되돌리기로 완결된다.
+    """
+    import folder_ops
+
+    if args.unlock:                                     # FR35.10 stale 락 수동 제거
+        log.info("✅ 락을 제거했습니다." if folder_ops.unlock()
+                 else "락이 없습니다 (output/.migration.lock).")
+        return
+
+    if args.rollback:                                   # FR35.12
+        # 락이 살아 있어도 롤백은 진행할 수 있어야 한다 (F-2) — 급사한 마이그레이션의
+        # 복구 수단이 락에 막히면 `--unlock`↔`--rollback` 순환에 갇힌다. 다만 정말로
+        # 다른 마이그레이션이 도는 중일 수 있으므로 **확인 후 탈취**한다.
+        takeover = bool(args.yes)
+        if not takeover and folder_ops.is_locked():
+            info = folder_ops.read_lock_info()
+            log.warning(f"⚠️ 마이그레이션 락이 있습니다 (pid={info.get('pid')} · "
+                        f"시작={info.get('started_at')}).")
+            try:
+                answer = input("다른 마이그레이션이 진행 중이 아니라면 락을 넘겨받아 "
+                               "롤백합니다. 계속할까요? [y/N] ").strip().lower()
+            except EOFError:
+                answer = ""
+            if answer not in ("y", "yes"):
+                log.info("취소했습니다 — 아무것도 되돌리지 않았습니다. "
+                         "(비대화형이면 `--rollback --yes`)")
+                sys.exit(1)
+            takeover = True
+        try:
+            result = folder_ops.rollback_migration(takeover=takeover)
+        except Exception as exc:
+            log.error(f"❌ 롤백 실패: {exc}")
+            sys.exit(1)
+        if not result["restored"]:                      # F-1: 성공이라고 말하지 않는다
+            log.error(f"⚠️ 되돌린 것이 없습니다 — {result.get('detail') or ''}\n"
+                      f"   저널이 이미 정리됐다면 호스트 백업으로 복원하세요: "
+                      f"rm -rf output && mv output_backup_<ts> output")
+            sys.exit(2)
+        log.info(f"↩️ 롤백 완료 — {result['restored']}건 원복 "
+                 f"({result['source']} 저널: {result['journal']})")
+        if result.get("remaining"):
+            log.info("   되돌릴 저널이 더 남아 있습니다 — 한 번 더 `--rollback` 하세요.")
+        return
+
+    reg = ChannelRegistry()
+    plan = folder_ops.plan_migration(reg)
+    log.info(f"▢ 이동 예정 {len(plan['moves'])}건 · 유지 {len(plan['skipped'])}건 "
+             f"· 미등록 잔존 폴더 {len(plan['unregistered'])}건(미이동)\n")
+    for mv in plan["moves"]:
+        log.info(f"  {mv['channel']:<28} output/{mv['channel']} → "
+                 f"output/{mv['group']}/{mv['channel']}")
+    if plan["skipped"]:
+        log.info("\n[유지]")
+        for sk in plan["skipped"]:
+            log.info(f"  {sk['channel']:<28} {sk['reason']}")
+    if plan["unregistered"]:
+        log.info("\n[미등록 잔존 폴더 — 건드리지 않습니다 (FR32.4 수동 정리)]")
+        for name in plan["unregistered"]:
+            log.info(f"  output/{name}")
+
+    if not args.apply:
+        log.info("\n※ dry-run입니다. 아무것도 옮기지 않았습니다. "
+                 "실제 이동은 `./yt.sh migrate-groups --apply`")
+        return
+    if not plan["moves"]:
+        log.info("\n옮길 채널이 없습니다 (멱등).")
+        return
+
+    if not args.yes:                                    # ⑥ 대화형 확인
+        try:
+            answer = input(f"\n{len(plan['moves'])}개 채널 폴더를 이동합니다. "
+                           f"계속할까요? [y/N] ").strip().lower()
+        except EOFError:
+            answer = ""
+        if answer not in ("y", "yes"):
+            log.info("취소했습니다 — 아무것도 옮기지 않았습니다.")
+            return
+
+    try:
+        result = folder_ops.apply_migration(plan, reg)
+    except Exception as exc:
+        log.error(f"\n❌ {exc}")
+        sys.exit(1)
+    log.info(f"\n✅ 완료 — {result['moved']}건 이동 (저널 보관: {result['journal']})")
+    if getattr(args, "backup_path", None):
+        log.info(f"   백업: {args.backup_path} (자동 삭제하지 않습니다 — 직접 지우세요)")
+
+
 def cmd_test(args):
     """검증 실행. 섹션 7"""
     import subprocess
@@ -223,6 +319,22 @@ def build_parser():
 
     sp = sub.add_parser("serve", help="대시보드 서버")
     sp.add_argument("--port", type=int, default=8800); sp.set_defaults(func=cmd_serve)
+
+    # FR35.11 — 기본 dry-run, --apply 가 있어야 실제로 움직인다
+    sp = sub.add_parser("migrate-groups", help="폴더 디렉터리화 마이그레이션 (기본 dry-run)")
+    sp.add_argument("--apply", action="store_true", help="실제 이동 (사전 검증 통과 시)")
+    sp.add_argument("--yes", action="store_true",
+                    help="대화형 확인 생략 (--rollback 에서는 락 탈취 동의)")
+    sp.add_argument("--rollback", action="store_true",
+                    help="저널 역순 되돌리기 (완료된 마이그레이션 .done.json 포함)")
+    sp.add_argument("--unlock", action="store_true", help="stale 락 수동 제거")
+    # --no-backup / --backup-path 는 **호스트 셸(yt.sh)** 이 처리한다 (컨테이너에는
+    # output/ 형제 경로를 만들 권한이 없다). 여기서는 인자만 수용한다.
+    sp.add_argument("--no-backup", action="store_true",
+                    help="호스트 자동 백업 생략 (yt.sh가 처리)")
+    sp.add_argument("--backup-path", dest="backup_path",
+                    help="yt.sh가 만든 백업 경로 (완료 메시지용)")
+    sp.set_defaults(func=cmd_migrate_groups)
 
     sp = sub.add_parser("test", help="검증 실행")
     sp.add_argument("--integration", action="store_true"); sp.set_defaults(func=cmd_test)

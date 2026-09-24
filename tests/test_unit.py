@@ -12,6 +12,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "dashboard"))
 import unittest.mock as mock
 
 import pytest
+import yaml
 
 import config
 import subtitle_utils as su
@@ -926,3 +927,1065 @@ def test_run_without_rest_state_keeps_cli_behaviour(tmp_path, monkeypatch):
         entries=entries, pl_map={})
     assert stats["new"] == 9
     assert slept == [45, 45], f"쪼개지 않은 단일 sleep 2회여야 한다: {slept}"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# FR35 — 폴더(그룹)의 실제 디렉터리 승격 (V-U22~V-U27)
+# ════════════════════════════════════════════════════════════════════════════
+def _isolate(tmp_path, monkeypatch):
+    """config 경로를 tmp로 격리 — 실데이터(output/·channels.yaml)를 절대 건드리지 않는다."""
+    out = tmp_path / "output"
+    out.mkdir(exist_ok=True)
+    monkeypatch.setattr(config, "OUTPUT_BASE", out)
+    monkeypatch.setattr(config, "CHANNELS_YAML", tmp_path / "channels.yaml")
+    config.invalidate_group_cache()
+    return out
+
+
+def _mkchannel(base: Path, *parts, files=("state.json",)) -> Path:
+    d = base.joinpath(*parts)
+    d.mkdir(parents=True, exist_ok=True)
+    for f in files:
+        (d / f).write_text("{}", encoding="utf-8")
+    (d / "srt").mkdir(exist_ok=True)
+    (d / "srt" / "a.srt").write_text("자막", encoding="utf-8")
+    return d
+
+
+# ─── V-U22: channel_dir 그룹 해석·캐시 (FR35.1~35.3, DQ-32) ──────────────────
+def test_channel_dir_resolves_group(tmp_path, monkeypatch):
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@chanA")
+    reg.add("https://youtube.com/@chanB")
+    # 그룹 없음 → 평면
+    assert config.channel_dir("chanA") == out / "chanA"
+    # 그룹 지정 → 1단계 중첩, _save()가 캐시를 즉시 무효화한다 (2차 안전망)
+    reg.set_group("chanA", "역배열1")
+    assert config.channel_dir("chanA") == out / "역배열1" / "chanA"
+    assert config.channel_dir("chanB") == out / "chanB"
+    # 하위 구조는 전혀 바뀌지 않는다
+    assert config.channel_subdirs("chanA")["srt"] == out / "역배열1" / "chanA" / "srt"
+    # 미등록 채널 → 평면
+    assert config.channel_dir("미등록채널") == out / "미등록채널"
+    # yaml 부재 → 빈 맵 폴백 (예외 없음)
+    (tmp_path / "channels.yaml").unlink()
+    config.invalidate_group_cache()
+    assert config.channel_dir("chanA") == out / "chanA"
+
+
+def test_group_cache_follows_yaml_mtime(tmp_path, monkeypatch):
+    """1차 무효화는 mtime+size 자동 감지 — CLI와 serve가 별개 프로세스라 필수 (DQ-32)."""
+    out = _isolate(tmp_path, monkeypatch)
+    yml = tmp_path / "channels.yaml"
+    yml.write_text("channels:\n  chanA:\n    group: 폴더하나\n", encoding="utf-8")
+    assert config.channel_dir("chanA") == out / "폴더하나" / "chanA"
+    # invalidate_group_cache()를 호출하지 않고 외부에서 yaml을 바꾼다 (다른 프로세스 모사)
+    yml.write_text("channels:\n  chanA:\n    group: 폴더둘둘둘\n", encoding="utf-8")
+    import os as _os
+    st = yml.stat()                       # 저해상도 mtime FS에서도 결정적이도록 1초 전진
+    _os.utime(yml, (st.st_atime + 1, st.st_mtime + 1))
+    assert config.channel_dir("chanA") == out / "폴더둘둘둘" / "chanA", "mtime 자동 감지 실패"
+
+
+def test_group_cache_hit_does_not_reparse(tmp_path, monkeypatch):
+    """캐시 히트 경로의 I/O는 stat() 1회 — 호출마다 yaml 파싱 금지 (FR35.3)."""
+    import yaml as _yaml
+    _isolate(tmp_path, monkeypatch)
+    (tmp_path / "channels.yaml").write_text("channels:\n  c:\n    group: G\n",
+                                            encoding="utf-8")
+    calls = []
+    orig = _yaml.safe_load
+    monkeypatch.setattr(_yaml, "safe_load", lambda *a, **k: (calls.append(1), orig(*a, **k))[1])
+    for _ in range(5):
+        config.channel_dir("c")
+    assert len(calls) == 1, f"yaml 재파싱 {len(calls)}회 — 캐시가 동작하지 않는다"
+
+
+def test_channel_dir_bad_group_falls_back_flat(tmp_path, monkeypatch):
+    """읽기 경로에서 불량 group은 예외가 아니라 평면 폴백 — 라이브러리가 죽으면 안 된다 (FR35.5)."""
+    out = _isolate(tmp_path, monkeypatch)
+    (tmp_path / "channels.yaml").write_text(
+        'channels:\n  chanA:\n    group: "../탈출"\n', encoding="utf-8")
+    assert config.channel_dir("chanA") == out / "chanA"
+    # 채널 세그먼트는 폴백할 곳이 없으므로 ValueError (FR7.9가 선행 차단하는 백스톱)
+    with pytest.raises(ValueError):
+        config.channel_dir("../탈출")
+
+
+# ─── V-U23: validate_path_segment 거부표 (FR35.4·FR7.9, DQ-33) ───────────────
+@pytest.mark.parametrize("bad", [
+    "", "   ", ".", "..", "../탈출", "a/b", "a\\b", "/절대경로", "C:", "C:\\temp",
+    "\\\\서버\\공유", ".숨김", "끝점.", "제어\x00문자", "탭\t포함", "벨\x07",
+    "삭제\x7f", "x" * 65, "CON", "con", "com1", "LPT9", "NUL", "aux",
+])
+def test_validate_path_segment_rejects(bad):
+    with pytest.raises(ValueError):
+        config.validate_path_segment(bad)
+
+
+def test_validate_path_segment_accepts_and_normalizes():
+    assert config.validate_path_segment("  역배열1  ") == "역배열1"
+    assert config.validate_path_segment("AI LLM Wiki") == "AI LLM Wiki"
+    assert config.validate_path_segment("김민겸(퀀트)") == "김민겸(퀀트)"
+    assert config.validate_path_segment("CONNECT-AI-LAB") == "CONNECT-AI-LAB"
+    assert config.validate_path_segment("a.b.c") == "a.b.c"      # 중간 점은 허용
+    # NFC 정규화 — NFD 입력도 같은 값으로 수렴한다 (디스크 1:1 불변식)
+    import unicodedata
+    nfd = unicodedata.normalize("NFD", "역배열")
+    assert nfd != "역배열"
+    assert config.validate_path_segment(nfd) == "역배열"
+
+
+def test_rejected_group_creates_nothing_on_disk(tmp_path, monkeypatch):
+    """거부 시 디스크에 아무것도 만들지 않는다 (FR35.4) — output/ 밖도 안도."""
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@chanA")
+    _mkchannel(out, "chanA")
+    before = sorted(p.name for p in out.iterdir())
+    outside_before = sorted(p.name for p in tmp_path.iterdir())
+    for bad in ("../탈출", "/etc", "a/b", ".숨김", "CON", "제어\x01문자"):
+        with pytest.raises(ValueError):
+            folder_ops.set_channel_group("chanA", bad)
+    assert sorted(p.name for p in out.iterdir()) == before
+    assert sorted(p.name for p in tmp_path.iterdir()) == outside_before
+    assert "group" not in reg.get("chanA") if "chanA" in reg.names() else True
+
+
+# ─── V-U24: 최상위 이름공간 유일성 (FR35.6, DQ-34) ───────────────────────────
+def test_check_namespace_four_directions(tmp_path, monkeypatch):
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@평면채널")
+    reg.add("https://youtube.com/@그룹채널")
+    reg.set_group("그룹채널", "묶음")
+    # ⓐ 새 그룹명 ∩ 미지정 채널명 → 충돌
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.check_namespace(new_group="평면채널")
+    # ⓒ 새 채널명 ∩ 기존 그룹명 → 충돌
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.check_namespace(new_channel="묶음")
+    # ⓐ 동명 최상위 디렉터리가 채널형(state.json/srt/meta)이면 충돌 (미등록 잔존 폴더)
+    _mkchannel(out, "잔존폴더")
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.check_namespace(new_group="잔존폴더")
+    # 채널형이 아닌 빈 디렉터리는 그룹명으로 허용
+    (out / "빈폴더").mkdir()
+    folder_ops.check_namespace(new_group="빈폴더")
+    # 충돌 없음
+    folder_ops.check_namespace(new_group="새묶음")
+    folder_ops.check_namespace(new_channel="새채널")
+
+
+def test_check_namespace_casefold_and_nfc(tmp_path, monkeypatch):
+    """APFS는 대소문자·정규화 비민감 — yaml엔 둘, 디스크엔 하나인 상태를 막는다 (U-2)."""
+    import unicodedata
+    import folder_ops
+    _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@abc")
+    reg.add("https://youtube.com/@other")
+    reg.set_group("other", "역배열1")
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.check_namespace(new_group="ABC")          # casefold 충돌
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.check_namespace(new_group="AbC")
+    with pytest.raises(folder_ops.ConflictError):            # NFD 충돌
+        folder_ops.check_namespace(new_channel=unicodedata.normalize("NFD", "역배열1"))
+
+
+def test_group_same_name_as_member_channel_allowed(tmp_path, monkeypatch):
+    """ⓓ output/G/G — 중첩 레벨이 달라 실제 충돌이 아니다 (FR35.6ⓓ)."""
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@AILLMWiki")
+    reg.add("https://youtube.com/@other")
+    reg.set_group("other", "AILLMWiki")                      # 그룹 AILLMWiki 생성
+    reg.set_group("AILLMWiki", "임시")                        # 동명 채널을 다른 그룹에
+    _mkchannel(out, "임시", "AILLMWiki")
+    res = folder_ops.set_channel_group("AILLMWiki", "AILLMWiki")
+    assert res["moved"] is True
+    assert (out / "AILLMWiki" / "AILLMWiki" / "state.json").exists()
+    assert not (out / "임시").exists(), "비워진 원본 그룹 폴더는 rmdir"
+
+
+# ─── V-U25: 이동 원자성·보상 롤백 (FR35.7~35.8, DQ-35) ───────────────────────
+def test_move_channel_dir_rejects_existing_dst(tmp_path, monkeypatch):
+    """POSIX rename은 빈 디렉터리를 무음 교체한다 → 목적지 존재 시 시도조차 하지 않는다."""
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    src = _mkchannel(out, "chanA")
+    dst = out / "G" / "chanA"
+    dst.mkdir(parents=True)
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.move_channel_dir(src, dst)
+    assert (src / "state.json").exists(), "원본 무변경"
+
+
+def test_move_channel_dir_rejects_exdev(tmp_path, monkeypatch):
+    """파일시스템 경계(EXDEV)는 복사 폴백 없이 실패 — 반쯤 옮긴 상태가 최악이다."""
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    src = _mkchannel(out, "chanA")
+    monkeypatch.setattr(folder_ops, "_dev",
+                        lambda p: 1 if Path(p) == src else 2)
+    with pytest.raises(folder_ops.MoveError):
+        folder_ops.move_channel_dir(src, out / "G" / "chanA")
+    assert (src / "state.json").exists() and not (out / "G").exists()
+
+
+def test_move_channel_dir_no_op_when_missing(tmp_path, monkeypatch):
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    assert folder_ops.move_channel_dir(out / "없음", out / "G" / "없음") is False
+    assert not (out / "G").exists()
+
+
+def test_set_channel_group_moves_and_releases(tmp_path, monkeypatch):
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@chanA")
+    _mkchannel(out, "chanA")
+    # 지정
+    res = folder_ops.set_channel_group("chanA", "역배열1")
+    assert res["moved"] is True
+    assert (out / "역배열1" / "chanA" / "srt" / "a.srt").read_text(encoding="utf-8") == "자막"
+    assert not (out / "chanA").exists()
+    assert config.channel_dir("chanA") == out / "역배열1" / "chanA"
+    # 변경
+    folder_ops.set_channel_group("chanA", "새폴더")
+    assert (out / "새폴더" / "chanA" / "state.json").exists()
+    assert not (out / "역배열1").exists(), "비워진 원본 그룹 폴더만 rmdir"
+    # 해제
+    res = folder_ops.set_channel_group("chanA", "")
+    assert res["moved"] is True and res["group"] == ""
+    assert (out / "chanA" / "state.json").exists() and not (out / "새폴더").exists()
+    assert "group" not in ChannelRegistry().get("chanA")
+    # 미추출 채널 → 이동 no-op, yaml만 기록
+    reg2 = ChannelRegistry()
+    reg2.add("https://youtube.com/@미추출")
+    res = folder_ops.set_channel_group("미추출", "폴더X")
+    assert res["moved"] is False
+    assert ChannelRegistry().get("미추출")["group"] == "폴더X"
+    with pytest.raises(KeyError):
+        folder_ops.set_channel_group("없는채널", "폴더X")
+
+
+def test_set_channel_group_compensating_rollback(tmp_path, monkeypatch):
+    """yaml 기록이 실패하면 역방향 rename으로 원상 복구한다 (DQ-35)."""
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@chanA")
+    _mkchannel(out, "chanA")
+
+    def boom(self, name, group=None):
+        raise RuntimeError("yaml 기록 실패 주입")
+    monkeypatch.setattr(ChannelRegistry, "set_group", boom)
+    with pytest.raises(RuntimeError):
+        folder_ops.set_channel_group("chanA", "역배열1")
+    assert (out / "chanA" / "srt" / "a.srt").exists(), "보상 롤백으로 원상 복구"
+    assert not (out / "역배열1").exists()
+
+
+def test_set_channel_group_conflict_and_skip(tmp_path, monkeypatch):
+    """자동 폴더 지정 경로는 거부 대신 건너뛴다 (FR35.13)."""
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@평면채널")
+    reg.add("https://youtube.com/@chanB")
+    _mkchannel(out, "chanB")
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.set_channel_group("chanB", "평면채널")
+    res = folder_ops.set_channel_group("chanB", "평면채널", on_conflict="skip")
+    assert res["skipped"] and res["moved"] is False
+    assert (out / "chanB" / "state.json").exists(), "건너뛴 채널은 최상위에 남는다"
+
+
+def test_rename_group_single_rename(tmp_path, monkeypatch):
+    import folder_ops
+    import renamer
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    for n in ("c1", "c2"):
+        reg.add(f"https://youtube.com/@{n}")
+        reg.set_group(n, "옛폴더")
+        _mkchannel(out, "옛폴더", n)
+    (out / "옛폴더" / "미등록잔존").mkdir()          # 같은 폴더이므로 함께 따라간다
+    assert renamer.rename_folder("옛폴더", "새폴더") == 2
+    assert not (out / "옛폴더").exists()
+    assert (out / "새폴더" / "c1" / "state.json").exists()
+    assert (out / "새폴더" / "미등록잔존").exists()
+    assert ChannelRegistry().get("c2")["group"] == "새폴더"
+    assert config.channel_dir("c1") == out / "새폴더" / "c1"
+    with pytest.raises(ValueError):
+        renamer.rename_folder("새폴더", "../탈출")
+
+
+def test_rename_channel_stays_inside_group(tmp_path, monkeypatch):
+    """개명 목적지는 old_dir.parent/new — channel_dir(new)는 평면 경로다 (FR35.9 함정)."""
+    import renamer
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@옛이름")
+    reg.set_group("옛이름", "역배열1")
+    _mkchannel(out, "역배열1", "옛이름")
+    renamer.rename_channel("옛이름", "새이름")
+    assert (out / "역배열1" / "새이름" / "srt" / "a.srt").exists()
+    assert not (out / "새이름").exists(), "그룹 밖으로 튀어나가면 안 된다"
+    assert config.channel_dir("새이름") == out / "역배열1" / "새이름"
+
+
+def test_rename_channel_rejects_group_name(tmp_path, monkeypatch):
+    """ⓒ 그룹 미지정 채널의 새 이름이 기존 그룹명과 충돌 → ConflictError (FR35.6ⓒ)."""
+    import folder_ops
+    import renamer
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@평면채널")
+    reg.add("https://youtube.com/@그룹채널")
+    reg.set_group("그룹채널", "역배열1")
+    _mkchannel(out, "평면채널")
+    with pytest.raises(folder_ops.ConflictError):
+        renamer.rename_channel("평면채널", "역배열1")
+    assert (out / "평면채널" / "state.json").exists()
+    assert "평면채널" in ChannelRegistry().names()
+
+
+# ─── V-U26: add() upsert (FR7.7~7.9, DQ-37) ──────────────────────────────────
+def test_add_upsert_preserves_settings(tmp_path):
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@업서트", lang="ko", note="메모")
+    reg.set_group("업서트", "역배열1")
+    reg.set_auto_run("업서트", False)
+    reg.set_channel_id("업서트", "UCabcdefghijklmnopqrstu")
+    added_at = reg.get("업서트")["added_at"]
+
+    reg2 = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    name = reg2.add("https://youtube.com/@업서트/videos", lang="en")
+    assert name == "업서트"
+    ch = ChannelRegistry(yaml_path=tmp_path / "channels.yaml").get("업서트")
+    assert ch["group"] == "역배열1", "group 소실 = 채널 디스크 경로가 바뀌는 사고 (FR35)"
+    assert ch["auto_run"] is False and ch["channel_id"] == "UCabcdefghijklmnopqrstu"
+    assert ch["added_at"] == added_at and ch["note"] == "메모", "빈 note는 덮지 않는다"
+    assert ch["lang"] == "en" and ch["url"].endswith("/videos")
+
+
+def test_add_uses_resolve_name_for_renamed_channel(tmp_path):
+    """등록명≠URL핸들 채널을 다시 add해도 두 번째 항목이 생기지 않는다 (FR7.8)."""
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@oldhandle")
+    reg.rename("oldhandle", "표시이름")
+    before = len(reg.names())
+    name = ChannelRegistry(yaml_path=tmp_path / "channels.yaml").add(
+        "https://youtube.com/@oldhandle")
+    assert name == "표시이름"
+    reg2 = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    assert len(reg2.names()) == before and "oldhandle" not in reg2.names()
+
+
+def test_add_and_rename_reject_bad_names(tmp_path):
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@정상채널")
+    with pytest.raises(ValueError):
+        reg.add("https://youtube.com/@..")               # 경로 탈출 핸들 (FR7.9)
+    with pytest.raises(ValueError):
+        reg.rename("정상채널", "../탈출")
+    assert ChannelRegistry(yaml_path=tmp_path / "channels.yaml").names() == ["정상채널"]
+
+
+def test_add_new_channel_creates_all_fields(tmp_path):
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@신규", lang="ko", note="비고")
+    ch = reg.get("신규")
+    assert set(ch) == {"name", "url", "lang", "added_at", "note"}
+    assert ch["note"] == "비고"
+
+
+# ─── V-U27: 마이그레이션 저널·롤백·락 (FR35.11~35.12, DQ-36) ─────────────────
+def _migration_fixture(tmp_path, monkeypatch):
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    for n, g in (("c1", "역배열1"), ("c2", "역배열1"), ("c3", "AI LLM Wiki")):
+        reg.add(f"https://youtube.com/@{n}")
+        reg.set_group(n, g)
+        _mkchannel(out, n)                       # 평면 구조 (마이그레이션 전)
+    reg.add("https://youtube.com/@평면")          # 그룹 미지정 → 유지
+    _mkchannel(out, "평면")
+    reg.add("https://youtube.com/@미추출")         # 출력 폴더 없음
+    reg.set_group("미추출", "역배열1")
+    _mkchannel(out, "잔존")                       # 미등록 잔존 폴더 → 보고만
+    (out / ".cookie_status.json").write_text("{}", encoding="utf-8")
+    return out, reg
+
+
+def test_plan_migration_is_read_only(tmp_path, monkeypatch):
+    import folder_ops
+    out, reg = _migration_fixture(tmp_path, monkeypatch)
+    snapshot = sorted(p.name for p in out.iterdir())
+    yaml_bytes = (tmp_path / "channels.yaml").read_bytes()
+    plan = folder_ops.plan_migration(reg)
+    assert sorted(m["channel"] for m in plan["moves"]) == ["c1", "c2", "c3"]
+    assert plan["unregistered"] == ["잔존"]
+    reasons = {s["channel"]: s["reason"] for s in plan["skipped"]}
+    assert "평면" in reasons and "미추출" in reasons
+    # dry-run은 아무것도 옮기지 않는다
+    assert sorted(p.name for p in out.iterdir()) == snapshot
+    assert (tmp_path / "channels.yaml").read_bytes() == yaml_bytes
+
+
+def test_apply_migration_and_idempotent(tmp_path, monkeypatch):
+    import folder_ops
+    out, reg = _migration_fixture(tmp_path, monkeypatch)
+    yaml_bytes = (tmp_path / "channels.yaml").read_bytes()
+    result = folder_ops.apply_migration(folder_ops.plan_migration(reg), reg)
+    assert result["moved"] == 3
+    assert (out / "역배열1" / "c1" / "srt" / "a.srt").read_text(encoding="utf-8") == "자막"
+    assert (out / "AI LLM Wiki" / "c3" / "state.json").exists()
+    assert (out / "평면" / "state.json").exists(), "미지정 채널은 최상위 그대로"
+    assert (out / "잔존" / "state.json").exists(), "미등록 잔존 폴더는 건드리지 않는다"
+    assert (out / ".cookie_status.json").exists()
+    assert (tmp_path / "channels.yaml").read_bytes() == yaml_bytes, "yaml 바이트 불변"
+    assert not folder_ops.is_locked() and not folder_ops.has_pending_journal()
+    assert config.channel_dir("c1") == out / "역배열1" / "c1"
+    # 재실행 멱등 — 이동 0
+    assert folder_ops.plan_migration(ChannelRegistry())["moves"] == []
+
+
+def test_apply_migration_rolls_back_on_failure(tmp_path, monkeypatch):
+    """중간 실패 → 저널 역순 전량 원복 (FR35.12)."""
+    import folder_ops
+    out, reg = _migration_fixture(tmp_path, monkeypatch)
+    before = {p.name for p in out.iterdir()}
+    real = folder_ops.move_channel_dir
+    calls = []
+
+    def flaky(src, dst):
+        calls.append(src)
+        if len(calls) == 3:
+            raise OSError("이동 실패 주입")
+        return real(src, dst)
+    monkeypatch.setattr(folder_ops, "move_channel_dir", flaky)
+    with pytest.raises(OSError):
+        folder_ops.apply_migration(folder_ops.plan_migration(reg), reg)
+    assert {p.name for p in out.iterdir()} == before, "전량 원복"
+    assert (out / "c1" / "srt" / "a.srt").exists()
+    assert not folder_ops.has_pending_journal() and not folder_ops.is_locked()
+
+
+def test_rollback_migration_restores_flat(tmp_path, monkeypatch):
+    import folder_ops
+    out, reg = _migration_fixture(tmp_path, monkeypatch)
+    before = {p.name for p in out.iterdir()}
+    folder_ops.apply_migration(folder_ops.plan_migration(reg), reg)
+    # pending 저널 경로(중단된 마이그레이션) — 완료분(.done.json) 경로는 V-U28에서 별도 검증
+    import shutil as _sh
+    _sh.copy(out / ".migration_journal.done.json", out / ".migration_journal.json")
+    result = folder_ops.rollback_migration()
+    assert result["restored"] == 3
+    names = {p.name for p in out.iterdir()}
+    assert names >= before and not (out / "역배열1").exists()
+    assert (out / "c1" / "srt" / "a.srt").exists()
+
+
+def test_migration_blocked_by_lock_and_journal(tmp_path, monkeypatch):
+    import folder_ops
+    out, reg = _migration_fixture(tmp_path, monkeypatch)
+    plan = folder_ops.plan_migration(reg)
+    folder_ops.lock()
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.apply_migration(plan, reg)
+    assert (out / "c1" / "state.json").exists(), "사전 검증 실패 → 이동 0"
+    folder_ops.unlock()
+    (out / ".migration_journal.json").write_text("[]", encoding="utf-8")
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.apply_migration(plan, reg)
+    (out / ".migration_journal.json").unlink()
+
+
+def test_migration_lock_stale_after_6h(tmp_path, monkeypatch):
+    """stale 락(6시간 초과)은 무시하되 경고 — 수동 --unlock 안내 (FR35.10)."""
+    import os as _os
+    import time as _time
+    import folder_ops
+    out, _ = _migration_fixture(tmp_path, monkeypatch)
+    folder_ops.lock()
+    assert folder_ops.is_locked() is True
+    old = _time.time() - (folder_ops.STALE_LOCK_SEC + 60)
+    _os.utime(out / ".migration.lock", (old, old))
+    assert folder_ops.is_locked() is False
+    assert folder_ops.unlock() is True and folder_ops.unlock() is False
+
+
+def test_migration_precheck_rejects_namespace_conflict(tmp_path, monkeypatch):
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@역배열1")        # 미지정 채널명 == 그룹명
+    _mkchannel(out, "역배열1")
+    reg.add("https://youtube.com/@c1")
+    reg.set_group("c1", "역배열1")
+    _mkchannel(out, "c1")
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.apply_migration(folder_ops.plan_migration(reg), reg)
+    assert (out / "c1" / "state.json").exists(), "한 건도 옮기지 않는다"
+
+
+def test_job_is_busy_ors_migration_lock(tmp_path, monkeypatch):
+    """마이그레이션 중에는 대시보드 추출·삭제·이름 변경이 모두 409 (FR35.10)."""
+    import folder_ops
+    from jobs import JobManager
+    _isolate(tmp_path, monkeypatch)
+    mgr = JobManager()
+    assert mgr.is_busy() is False
+    folder_ops.lock()
+    try:
+        assert mgr.is_busy() is True
+    finally:
+        folder_ops.unlock()
+    assert mgr.is_busy() is False
+
+
+def test_prune_empty_group_dir_after_purge(tmp_path, monkeypatch):
+    """purge 후 남은 빈 그룹 폴더는 **빈 경우만** rmdir — rmtree는 이 경로에 없다 (U-3)."""
+    import folder_ops
+    out = _isolate(tmp_path, monkeypatch)
+    _mkchannel(out, "G", "c1")
+    _mkchannel(out, "G2", "c1")
+    _mkchannel(out, "G2", "c2")
+    import shutil as _sh
+    _sh.rmtree(out / "G" / "c1")
+    assert folder_ops.prune_empty_group_dir(out / "G") is True
+    assert not (out / "G").exists()
+    _sh.rmtree(out / "G2" / "c1")
+    assert folder_ops.prune_empty_group_dir(out / "G2") is False
+    assert (out / "G2" / "c2" / "state.json").exists(), "비어 있지 않으면 남긴다"
+    # OUTPUT_BASE 자신은 절대 건드리지 않는다
+    assert folder_ops.prune_empty_group_dir(out) is False and out.exists()
+
+
+# ─── V-U28: FR35 QA 결함 회귀 (F-1~F-6, `_workspace/28_fr35_qa.md`) ──────────
+def test_rollback_after_completed_migration(tmp_path, monkeypatch):
+    """
+    F-1 — **완료된** 마이그레이션도 `--rollback`으로 되돌아간다.
+
+    예전에는 성공 시 저널이 `.done.json`이 되는데 롤백이 pending만 읽어
+    `restored: 0`이면서 "롤백 완료"를 출력했다(조용한 실패).
+    """
+    import folder_ops
+    out, reg = _migration_fixture(tmp_path, monkeypatch)
+    before = {p.name for p in out.iterdir()}
+    folder_ops.apply_migration(folder_ops.plan_migration(reg), reg)
+    assert (out / ".migration_journal.done.json").exists()
+    result = folder_ops.rollback_migration()          # 수동 개명 없이 그대로
+    assert result["restored"] == 3 and result["source"] == "done"
+    assert result["remaining"] is False
+    assert (out / "c1" / "srt" / "a.srt").read_text(encoding="utf-8") == "자막"
+    assert not (out / "역배열1").exists() and not (out / "AI LLM Wiki").exists()
+    assert {p.name for p in out.iterdir()} >= before
+    # 저널은 소비됐다 → 다음 --apply가 "미완료 감지"로 막히지 않는다
+    assert not (out / ".migration_journal.done.json").exists()
+    assert not folder_ops.is_locked()
+
+
+def test_rollback_reports_nothing_to_restore(tmp_path, monkeypatch):
+    """F-1 — 되돌릴 저널이 없으면 restored 0 + 사유. 성공이라고 말하지 않는다."""
+    import folder_ops
+    _isolate(tmp_path, monkeypatch)
+    result = folder_ops.rollback_migration()
+    assert result["restored"] == 0 and result["source"] is None
+    assert result["detail"]
+
+
+def test_rollback_prefers_pending_journal_over_done(tmp_path, monkeypatch):
+    """
+    F-1 — pending·done이 둘 다 있으면 **pending(최근 중단분)을 먼저** 되돌리고
+    남은 저널을 `remaining`으로 알린다. 두 번째 호출이 done을 처리한다.
+    """
+    import folder_ops
+    out, reg = _migration_fixture(tmp_path, monkeypatch)
+    folder_ops.apply_migration(folder_ops.plan_migration(reg), reg)   # done 저널 생성
+    # 이후 별도 이동 1건을 pending 저널로 남긴 채 "급사"한 상황을 모사
+    _mkchannel(out, "새채널")
+    (out / "G9").mkdir()
+    (out / "새채널").rename(out / "G9" / "새채널")
+    (out / ".migration_journal.json").write_text(json.dumps(
+        [{"src": str(out / "새채널"), "dst": str(out / "G9" / "새채널"), "at": "x"}]),
+        encoding="utf-8")
+    first = folder_ops.rollback_migration()
+    assert first["source"] == "pending" and first["restored"] == 1
+    assert first["remaining"] is True
+    assert (out / "새채널" / "state.json").exists()
+    assert (out / "역배열1" / "c1").exists(), "done 저널분은 아직 그대로"
+    second = folder_ops.rollback_migration()
+    assert second["source"] == "done" and second["restored"] == 3
+    assert (out / "c1" / "state.json").exists()
+
+
+def test_rollback_under_live_lock_requires_takeover(tmp_path, monkeypatch):
+    """
+    F-2 — 락이 살아 있어도 롤백은 **가능해야** 한다(락 상황의 복구 수단이므로).
+    다만 무단 탈취는 막고 `takeover=True`(CLI `--yes`/대화형 y)로만 진행한다.
+    """
+    import folder_ops
+    out, reg = _migration_fixture(tmp_path, monkeypatch)
+    folder_ops.apply_migration(folder_ops.plan_migration(reg), reg)
+    folder_ops.lock()                                  # 급사한 마이그레이션의 잔존 락
+    with pytest.raises(folder_ops.ConflictError):
+        folder_ops.rollback_migration()
+    assert (out / "역배열1" / "c1").exists(), "거부 시 한 건도 움직이지 않는다"
+    result = folder_ops.rollback_migration(takeover=True)
+    assert result["restored"] == 3
+    assert (out / "c1" / "state.json").exists()
+    assert not folder_ops.is_locked(), "롤백 종료 시 락 해제"
+
+
+def test_acquire_blocked_by_migration_lock(tmp_path, monkeypatch):
+    """F-5 — 마이그레이션 락 중에는 스캔·추출 진입점(`_acquire`)도 409."""
+    import folder_ops
+    from jobs import JobManager, JobBusyError
+    _isolate(tmp_path, monkeypatch)
+    mgr = JobManager()
+    mgr._acquire(); mgr._release()                     # 락 없으면 정상 취득
+    folder_ops.lock()
+    try:
+        with pytest.raises(JobBusyError):
+            mgr._acquire()
+        with pytest.raises(JobBusyError):              # 스캔 진입점 (네트워크 도달 전)
+            mgr.scan("https://www.youtube.com/@ch/videos")
+    finally:
+        folder_ops.unlock()
+    mgr._acquire(); mgr._release()
+
+
+def test_group_flat_entries_skips_unusable_channel_name(tmp_path, monkeypatch):
+    """
+    F-6 — 예약어 핸들(`@con`) 한 건이 섞여도 스캔 전체를 죽이지 않고
+    **그 채널만** 제외한다 (채널 불명 → 제외와 같은 패턴).
+    """
+    import jobs
+    _isolate(tmp_path, monkeypatch)
+    entries = [
+        {"id": "v1", "title": "정상", "uploader_id": "@good"},
+        {"id": "v2", "title": "예약어", "uploader_id": "@con"},
+        {"id": "v3", "title": "예약어2", "uploader_id": "@con"},
+    ]
+    videos, by_channel = jobs._group_flat_entries(entries)
+    assert [v["id"] for v in videos] == ["v1"]
+    assert list(by_channel) == ["good"]
+
+
+def test_delete_channel_purges_grouped_dir(tmp_path, monkeypatch):
+    """
+    F-3 — 그룹 지정 채널의 `purge=true`가 **실제로** `output/<G>/<C>/`를 지운다.
+    회귀 원인: `reg.remove()`로 group을 지운 뒤 경로를 계산해 평면 경로가 나왔다.
+    """
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    import folder_ops                                   # noqa: F401 (경로 가드 동반 확인)
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@ch1")
+    reg.set_group("ch1", "묶음")
+    config.invalidate_group_cache()
+    _mkchannel(out, "묶음", "ch1")
+    import server
+    client = TestClient(server.app)
+    r = client.post("/channels/delete", json={"channel": "ch1", "purge": True})
+    assert r.status_code == 200
+    assert r.json() == {"deleted": True, "purged": True}
+    assert not (out / "묶음" / "ch1").exists()
+    assert not (out / "묶음").exists(), "빈 그룹 폴더는 rmdir (U-3)"
+    assert "ch1" not in ChannelRegistry().list()
+
+
+def test_rename_channel_validation_is_400(tmp_path, monkeypatch):
+    """F-4 — 이름 검증 실패는 409가 아니라 400 (`/channels/group`·`/folders/rename`과 동일)."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@베타")
+    _mkchannel(out, "베타")
+    import server
+    client = TestClient(server.app)
+    r = client.post("/channels/rename", json={"channel": "베타", "new_name": "CON"})
+    assert r.status_code == 400
+    assert (out / "베타" / "state.json").exists(), "거부 시 디스크 무변경"
+
+
+def test_rollback_aborts_when_restore_target_occupied(tmp_path, monkeypatch):
+    """
+    F-1 보강 — 마이그레이션 뒤 그 자리에 다른 폴더가 생겼다면 롤백은
+    **한 건도 움직이지 않고** 중단한다(절반만 되돌리는 것이 최악).
+    """
+    import folder_ops
+    out, reg = _migration_fixture(tmp_path, monkeypatch)
+    folder_ops.apply_migration(folder_ops.plan_migration(reg), reg)
+    _mkchannel(out, "c1")                              # 평면 자리를 누군가 다시 점유
+    with pytest.raises(folder_ops.MoveError):
+        folder_ops.rollback_migration()
+    assert (out / "역배열1" / "c2" / "state.json").exists(), "한 건도 되돌리지 않는다"
+    assert not folder_ops.is_locked()
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U29 — 멤버십 감지 언어 비의존 (FR13·FR17.6·FR19.1, DQ-38)
+#   `_workspace/30_members_detect_bug.md` 실측 회귀:
+#   DQ-20(`extractor_args.youtube.lang=ko`)이 YouTube가 주는 reason 문구까지
+#   한국어로 바꿔, 영어 전용 키워드 판정이 멤버십 영상을 전부 "오류"로 분류했다.
+# ════════════════════════════════════════════════════════════════════════════
+# 실측 문구 (2026-09-24, 같은 영상 aetOCkgzurM)
+MSG_KO = ("ERROR: [youtube] aetOCkgzurM: 이 동영상은 변곡점주식VIP 회원 등급 이상의 "
+          "채널 회원에게 제공됩니다. 채널에 가입하여 혜택을 누려보세요.")
+MSG_EN = ("ERROR: [youtube] aetOCkgzurM: This video is available to this channel's "
+          "members on level: VIP. Join this channel to get access to members-only "
+          "content and other exclusive perks.")
+
+
+def test_members_message_ko_and_en():
+    """한국어·영어 실측 문구 둘 다 판정 — 과잉 확장(오탐)은 없어야 한다."""
+    import video_access as va
+    assert va.is_members_message(MSG_KO), "lang=ko 실측 문구를 놓쳤다 (회귀)"
+    assert va.is_members_message(MSG_EN)
+    assert va.is_members_message("이 콘텐츠는 회원 전용입니다")
+    assert va.is_members_message("멤버십 전용 콘텐츠입니다")
+    # 오탐 방지 — `회원` 단독·일반 오류는 멤버십이 아니다
+    for benign in ("HTTP Error 403: Forbidden",
+                   "HTTP Error 429: Too Many Requests",
+                   "ERROR: [youtube] xxx: Private video. Sign in if you've been granted access",
+                   "이 동영상은 비공개 동영상입니다",
+                   "회원님의 요청을 처리할 수 없습니다",
+                   "", None):
+        assert not va.is_members_message(benign), benign
+
+
+def test_members_availability_is_language_independent():
+    """1차 신호는 구조화 필드 — 로케일과 무관하다 (FR17.6)."""
+    import video_access as va
+    for av in ("subscriber_only", "needs_auth", "premium_only"):
+        assert va.is_members_availability(av)
+        assert va.is_members_only("HTTP Error 403: Forbidden", av), "1차 신호 무시됨"
+    for av in ("public", "unlisted", "private", "", None):
+        assert not va.is_members_availability(av), av
+    assert va.is_members_only(MSG_KO, None), "availability 없으면 메시지 폴백"
+    assert not va.is_members_only("HTTP Error 403: Forbidden", "public")
+
+
+def test_members_rule_is_shared_by_jobs_and_extractor(tmp_path, monkeypatch):
+    """대시보드 스캔과 추출이 **같은 규칙**을 쓴다 — 중복 정의는 드리프트를 만든다."""
+    import video_access as va
+    import jobs
+    ex = _batch_rest(monkeypatch, tmp_path)
+    assert jobs._MEMBERS_AVAILABILITY is va.MEMBERS_AVAILABILITY
+    assert jobs._is_members_availability("subscriber_only") is True
+    assert jobs._is_members_availability("public") is False
+    assert ex.Extractor._is_members_only(MSG_KO) is True
+    assert ex.Extractor._is_members_only("HTTP Error 403: Forbidden",
+                                         "subscriber_only") is True
+
+
+def _run_one(ex, monkeypatch, name, entry, exc_msg):
+    """process_video가 exc_msg로 실패하는 run() 1영상 실행 → (stats, state)."""
+    def boom(self, vid, action="new", **kw):
+        raise Exception(exc_msg)
+    monkeypatch.setattr(ex.Extractor, "process_video", boom)
+    e = ex.Extractor({"name": name, "url": f"https://www.youtube.com/@{name}/videos"})
+    stats = e.run(entries=[dict(entry)], pl_map={})
+    return stats, e.state.state
+
+
+def test_run_classifies_members_by_availability_and_ko_message(tmp_path, monkeypatch):
+    """추출 경로 회귀 — availability 1차·한국어 메시지 2차 모두 members_only."""
+    ex = _batch_rest(monkeypatch, tmp_path)
+    # ⓐ availability 있음 + 메시지는 한국어(영어 키워드 없음)
+    stats, state = _run_one(ex, monkeypatch, "mem_av",
+                            {"id": "a1", "title": "멤버십영상",
+                             "availability": "subscriber_only"}, MSG_KO)
+    assert stats["members_only"] == 1 and stats["error"] == 0, stats
+    assert state["a1"]["sub_type"] == "members_only", "FR19.1 재시도 대상 기록 누락"
+    # ⓑ availability 없음(단일영상·검색 경로) → 한국어 메시지 폴백
+    stats, state = _run_one(ex, monkeypatch, "mem_msg",
+                            {"id": "b1", "title": "멤버십영상"}, MSG_KO)
+    assert stats["members_only"] == 1 and stats["error"] == 0, stats
+    assert state["b1"]["sub_type"] == "members_only"
+    # ⓒ 영어 문구도 그대로 동작 (lang 미지정 경로 회귀)
+    stats, _ = _run_one(ex, monkeypatch, "mem_en",
+                        {"id": "c1", "title": "members video"}, MSG_EN)
+    assert stats["members_only"] == 1, stats
+
+
+def test_429_takes_precedence_over_members_availability(tmp_path, monkeypatch):
+    """멤버십 영상의 429는 429다 — 멤버십으로 오분류하면 영구 스킵된다 (FR14.3)."""
+    ex = _batch_rest(monkeypatch, tmp_path)
+    monkeypatch.setattr(ex.time, "sleep", lambda s: None)
+    stats, state = _run_one(ex, monkeypatch, "mem_429",
+                            {"id": "d1", "title": "멤버십영상",
+                             "availability": "subscriber_only"},
+                            "ERROR: unable to download: HTTP Error 429: Too Many Requests")
+    assert stats["members_only"] == 0 and stats["error"] == 1, stats
+    assert "d1" not in state, "429는 state에 기록하지 않는다 — 다음 run에서 재시도"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U30 — 채널 메모 계약 (FR36.1~36.2, DQ-39)
+#   `note`는 `add()`가 쓰기만 하고 읽는 곳이 0이던 필드다. `set_note` 하나를
+#   쓰기 통로로 삼고, 빈 값도 **필드를 지우지 않고** `note: ""`로 남긴다.
+# ════════════════════════════════════════════════════════════════════════════
+def _reg(tmp_path) -> ChannelRegistry:
+    """tmp yaml 격리 레지스트리 — 실 channels.yaml을 절대 건드리지 않는다."""
+    reg = ChannelRegistry(yaml_path=tmp_path / "channels.yaml")
+    reg.add("https://youtube.com/@메모채널")
+    return reg
+
+
+def test_set_note_normalizes_control_chars_and_trims(tmp_path):
+    """제어문자(개행·탭·U+007F)는 공백 치환 후 트림 — 카드 1행 표시가 계약이다."""
+    reg = _reg(tmp_path)
+    got = reg.set_note("메모채널", "  장투 관점\n요약\t위주\x7f  ")
+    assert got == "장투 관점 요약 위주", got
+    assert "\n" not in got and "\t" not in got
+    # 반환값 = 저장값 (API가 그대로 응답 → 프론트 표시 불일치 차단)
+    assert ChannelRegistry(yaml_path=tmp_path / "channels.yaml").get("메모채널")["note"] == got
+
+
+def test_set_note_length_limit_rejects_not_truncates(tmp_path):
+    """200자 통과 · 201자는 `ValueError` — 조용한 절삭은 사용자 텍스트 소실이다."""
+    from channel_registry import NOTE_MAX_LEN
+    assert NOTE_MAX_LEN == 200
+    reg = _reg(tmp_path)
+    assert reg.set_note("메모채널", "가" * 200) == "가" * 200
+    with pytest.raises(ValueError):
+        reg.set_note("메모채널", "가" * 201)
+    # 거부 시 기존 값 유지 (부분 반영 없음)
+    assert reg.get("메모채널")["note"] == "가" * 200
+    # 트림 후 길이로 판정한다 — 공백 패딩만으로 400이 나지 않는다
+    assert reg.set_note("메모채널", "  " + "나" * 200 + "  ") == "나" * 200
+
+
+def test_set_note_empty_keeps_field_as_empty_string(tmp_path):
+    """빈 값은 **필드 제거가 아니라 `note: ""`** — group·auto_run식 pop을 쓰지 않는다."""
+    reg = _reg(tmp_path)
+    reg.set_note("메모채널", "지울 메모")
+    assert reg.set_note("메모채널", "   ") == ""
+    raw = yaml.safe_load((tmp_path / "channels.yaml").read_text(encoding="utf-8"))
+    assert "note" in raw["channels"]["메모채널"], "필드를 pop하면 yaml이 불균일해진다"
+    assert raw["channels"]["메모채널"]["note"] == ""
+
+
+def test_set_note_unknown_channel(tmp_path):
+    reg = _reg(tmp_path)
+    with pytest.raises(KeyError):
+        reg.set_note("없는채널", "메모")
+
+
+def test_note_survives_add_upsert_and_rename(tmp_path):
+    """회귀 — `add()` 재등록이 note를 보존하고(FR7.7) `rename()`이 note를 옮긴다."""
+    reg = _reg(tmp_path)
+    reg.set_note("메모채널", "보존되어야 함")
+    reg.add("https://youtube.com/@메모채널", lang="en")        # note 인자 없음 = 보존
+    assert reg.get("메모채널")["note"] == "보존되어야 함"
+    assert reg.get("메모채널")["lang"] == "en", "url·lang은 갱신된다"
+    reg.rename("메모채널", "새메모채널")
+    assert reg.get("새메모채널")["note"] == "보존되어야 함"
+
+
+def test_channels_note_api_contract(tmp_path, monkeypatch):
+    """
+    `POST /channels/note` + `GET /channels/stats.note` 응답 shape (FR36.3~36.4·36.11).
+
+    프론트는 `{ok, channel, note}`의 **서버 정규화 값**을 그대로 렌더하고,
+    카드는 `/channels/stats` 한 곳에서만 메모를 읽는다.
+    """
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    _isolate(tmp_path, monkeypatch)
+    ChannelRegistry().add("https://youtube.com/@메모채널")
+    import server
+    import jobs
+    client = TestClient(server.app)
+
+    r = client.post("/channels/note", json={"channel": "메모채널", "note": " 첫 메모\n둘째 "})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "channel": "메모채널", "note": "첫 메모 둘째"}
+
+    stats = {c["name"]: c for c in client.get("/channels/stats").json()["channels"]}
+    assert stats["메모채널"]["note"] == "첫 메모 둘째", "카드는 stats 하나만 읽는다 (FR36.3)"
+
+    assert client.post("/channels/note",
+                       json={"channel": "없는채널", "note": "x"}).status_code == 404
+    assert client.post("/channels/note",
+                       json={"channel": "메모채널", "note": "가" * 201}).status_code == 400
+    assert client.post("/channels/note",
+                       json={"channel": "../etc", "note": "x"}).status_code == 400
+    # note 생략 = 삭제 (필드는 남는다)
+    assert client.post("/channels/note", json={"channel": "메모채널"}).json()["note"] == ""
+    assert ChannelRegistry().get("메모채널")["note"] == ""
+
+    # 작업 중에는 409 — 파일 경합이 아니라 channels.yaml lost update 때문이다 (DQ-42)
+    jobs.MANAGER._busy = True
+    try:
+        assert client.post("/channels/note",
+                           json={"channel": "메모채널", "note": "x"}).status_code == 409
+    finally:
+        jobs.MANAGER._busy = False
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U31 — 스캔 캐시 무효화 (FR36.8, DQ-41)
+#   캐시에 박힌 **스캔 시점 채널명**을 `_run_channel`이 끝까지 쓴다. 이름 변경·삭제
+#   뒤 옛 scan_id로 추출하면 유령 폴더(`output/<옛이름>/`)가 생기거나 삭제한 채널이
+#   되살아난다 → 캐시를 고쳐 쓰지 않고 **폐기**해 기존 400에 착지시킨다.
+# ════════════════════════════════════════════════════════════════════════════
+def _mkscan(mgr, sid: str, *, channel: str = None, by_channel: list = None):
+    """스캔 캐시 항목 주입 — 채널 스캔(channel)·재생목록/검색 스캔(by_channel)."""
+    import time as _t
+    entry = {"scan_id": sid, "channel": channel, "url": "https://youtube.com/@x/videos",
+             "videos_view": [], "entries": [], "pl_map": {}, "created_at": _t.time()}
+    if by_channel is not None:
+        entry["kind"] = "playlist"
+        entry["by_channel"] = {n: {"url": "", "entries": []} for n in by_channel}
+    mgr._scans[sid] = entry
+    return sid
+
+
+def test_invalidate_scans_targets_only_referencing_entries(tmp_path, monkeypatch):
+    """대상 채널을 참조하는 항목만 삭제 — 다른 채널 캐시는 남는다."""
+    _isolate(tmp_path, monkeypatch)
+    import jobs
+    mgr = jobs.JobManager()
+    _mkscan(mgr, "s_ch", channel="대상")                        # 채널 스캔
+    _mkscan(mgr, "s_pl", channel="재생목록제목", by_channel=["대상", "다른채널"])
+    _mkscan(mgr, "s_other", channel="다른채널")
+    _mkscan(mgr, "s_other_pl", channel="검색어", by_channel=["다른채널"])
+    assert mgr.invalidate_scans(channel="대상") == 2
+    assert set(mgr._scans) == {"s_other", "s_other_pl"}
+    # 정확 일치 — 부분 문자열로 남의 캐시를 지우지 않는다
+    assert mgr.invalidate_scans(channel="다른") == 0
+    assert set(mgr._scans) == {"s_other", "s_other_pl"}
+    assert mgr.invalidate_scans() == 2, "channel=None이면 전체 비움"
+    assert mgr._scans == {}
+
+
+def test_rename_invalidates_scan_and_extract_is_400(tmp_path, monkeypatch):
+    """`POST /channels/rename` 성공 → 캐시 폐기 → 옛 scan_id는 **기존 400**(신규 코드 없음)."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@옛이름")
+    _mkchannel(out, "옛이름")
+    import server
+    import jobs
+    jobs.MANAGER._scans.clear()
+    try:
+        _mkscan(jobs.MANAGER, "stale", channel="옛이름")
+        _mkscan(jobs.MANAGER, "keep", channel="남는채널")
+        client = TestClient(server.app)
+        r = client.post("/channels/rename", json={"channel": "옛이름", "new_name": "새이름"})
+        assert r.status_code == 200, r.text
+        assert set(jobs.MANAGER._scans) == {"keep"}, "대상 캐시만 폐기"
+        r = client.post("/extract", json={"scan_id": "stale"})
+        assert r.status_code == 400
+        assert "만료" in r.json()["detail"], r.json()
+    finally:
+        jobs.MANAGER._scans.clear()
+
+
+def test_rename_failure_keeps_scan_cache(tmp_path, monkeypatch):
+    """400/409면 캐시를 건드리지 않는다 — 무효화는 **성공 후에만**."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@옛이름")
+    _mkchannel(out, "옛이름")
+    import server
+    import jobs
+    jobs.MANAGER._scans.clear()
+    try:
+        _mkscan(jobs.MANAGER, "stale", channel="옛이름")
+        client = TestClient(server.app)
+        r = client.post("/channels/rename", json={"channel": "옛이름", "new_name": "CON"})
+        assert r.status_code == 400, r.text
+        assert set(jobs.MANAGER._scans) == {"stale"}, "거부 시 캐시 무변경"
+    finally:
+        jobs.MANAGER._scans.clear()
+
+
+def test_delete_channel_invalidates_scan_cache(tmp_path, monkeypatch):
+    """삭제도 같은 계열의 구멍 — 옛 scan_id로 추출하면 `reg.add()`가 채널을 되살린다."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@지울채널")
+    _mkchannel(out, "지울채널")
+    import server
+    import jobs
+    jobs.MANAGER._scans.clear()
+    try:
+        _mkscan(jobs.MANAGER, "gone", channel="지울채널")
+        _mkscan(jobs.MANAGER, "keep", channel="남는채널")
+        client = TestClient(server.app)
+        r = client.post("/channels/delete", json={"channel": "지울채널"})
+        assert r.status_code == 200, r.text
+        assert set(jobs.MANAGER._scans) == {"keep"}
+        r = client.post("/extract", json={"scan_id": "gone"})
+        assert r.status_code == 400 and "만료" in r.json()["detail"]
+        assert "지울채널" not in ChannelRegistry().list(), "되살아나지 않는다"
+    finally:
+        jobs.MANAGER._scans.clear()
+
+
+def test_stale_scan_cache_targets_ghost_dir_without_invalidation(tmp_path, monkeypatch):
+    """
+    **결함 재현 대조군** — 무효화가 없으면 `_run_channel`은 옛 이름을 끝까지 쓴다.
+
+    `reg.add()`는 `resolve_name`으로 새 이름을 돌려주지만 워커가 반환값을 받지
+    않으므로 지역 변수는 옛 이름 그대로 → `reg.get(옛이름)` KeyError → 폴백 cfg →
+    `config.channel_dir(옛이름)` = 그룹 밖 **평면 유령 경로**.
+    """
+    import types
+    out = _isolate(tmp_path, monkeypatch)
+    import jobs
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@옛이름")
+    reg.set_group("옛이름", "묶음")
+    reg.rename("옛이름", "새이름")                 # 레지스트리만 변경(폴더 이동은 renamer)
+    config.invalidate_group_cache()
+
+    captured = {}
+
+    class FakeExtractor:
+        def __init__(self, cfg):
+            captured["cfg"] = cfg
+
+        def run(self, **kw):
+            return {"new": 0}
+
+    monkeypatch.setattr(jobs, "_app_extractor",
+                        lambda: types.SimpleNamespace(
+                            Extractor=FakeExtractor,
+                            BatchRest=lambda **kw: None))
+    mgr = jobs.JobManager()
+    entry = {"channel": "옛이름", "url": "https://youtube.com/@옛이름/videos",
+             "videos_view": [{"id": "v1", "title": "영상"}],
+             "entries": [{"id": "v1"}], "pl_map": {}}
+    job = mgr._new_job("channel_run", "옛이름", entry["url"])
+    mgr._job = job
+    mgr._cancel.clear()
+    mgr._run_channel(job, entry, {"include_members": True}, False)
+
+    assert captured["cfg"]["name"] == "옛이름", "워커는 캐시의 옛 이름을 끝까지 쓴다"
+    assert config.channel_dir("옛이름") == out / "옛이름", "레지스트리에 없는 평면 유령 경로"
+    assert config.channel_dir("새이름") == out / "묶음" / "새이름", "실제 채널은 그룹 안"
+    # 그래서 폐기가 유일한 해 — 폐기하면 이 경로에 애초에 도달하지 않는다
+    mgr._scans["stale"] = {"channel": "옛이름", "created_at": 0}
+    assert mgr.invalidate_scans(channel="옛이름") == 1

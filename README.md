@@ -72,6 +72,7 @@ chmod +x yt.sh
 | `./yt.sh search 채널 "키워드"` | 벡터 검색만 |
 | `./yt.sh summarize 채널 VIDEO_ID` | 영상 전체 요약 |
 | `./yt.sh serve` | 웹 대시보드 |
+| `./yt.sh migrate-groups [--apply]` | 폴더(그룹)를 `output/<폴더>/<채널>/` 실제 디렉터리로 이전 (기본 dry-run · **대시보드를 먼저 종료**할 것 → [순서](USAGE.md#폴더그룹-디렉터리화--1회성-마이그레이션-fr35)) |
 | `./yt.sh test` | 단위 검증 |
 
 ---

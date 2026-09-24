@@ -438,4 +438,47 @@ with mock.patch.object(Extractor, "process_video",
 assert st20["new"] == 1
 print("✓ 이벤트(FR26.1): 처리 전 보고 스키마 유지 · new/skip/error 이벤트 · CLI 무영향")
 
+
+# ── 21. 멤버십 감지 언어 비의존 (DQ-38, `_workspace/30`) ─────────────────────
+# DQ-20(lang=ko)이 YouTube reason 문구를 한국어로 바꿔 영어 키워드 판정이 전부
+# 실패했다. 실측 문구(2026-09-24, aetOCkgzurM)를 고정 케이스로 박아 회귀를 막는다.
+MSG_KO_21 = ("ERROR: [youtube] aetOCkgzurM: 이 동영상은 변곡점주식VIP 회원 등급 "
+             "이상의 채널 회원에게 제공됩니다. 채널에 가입하여 혜택을 누려보세요.")
+MSG_EN_21 = ("ERROR: [youtube] aetOCkgzurM: This video is available to this "
+             "channel's members on level: VIP. Join this channel to get access "
+             "to members-only content")
+
+assert Extractor._is_members_only(MSG_KO_21), "lang=ko 한국어 문구 회귀"
+assert Extractor._is_members_only(MSG_EN_21)
+assert Extractor._is_members_only("HTTP Error 403: Forbidden", "subscriber_only"), \
+    "availability 1차 신호 무시됨"
+assert not Extractor._is_members_only("HTTP Error 403: Forbidden", "public")
+assert not Extractor._is_members_only("회원님의 요청을 처리할 수 없습니다"), "오탐"
+
+
+def run_one_21(name, entry, exc_msg):
+    e = fresh(name)
+    with mock.patch.object(Extractor, "process_video",
+                           lambda self, vid, action="new", **kw:
+                           (_ for _ in ()).throw(Exception(exc_msg))):
+        st = e.run(entries=[dict(entry)], pl_map={})
+    return st, e.state.state
+
+
+# availability 1차 (메시지는 한국어) · 메시지 2차 폴백 → 둘 다 members_only + mark_skip
+s21a, st21a = run_one_21("mem_av", {"id": "m1", "title": "멤버십",
+                                    "availability": "subscriber_only"}, MSG_KO_21)
+assert s21a["members_only"] == 1 and s21a["error"] == 0, s21a
+assert st21a["m1"]["sub_type"] == "members_only", st21a
+s21b, st21b = run_one_21("mem_msg", {"id": "m2", "title": "멤버십"}, MSG_KO_21)
+assert s21b["members_only"] == 1 and st21b["m2"]["sub_type"] == "members_only", s21b
+# 429는 멤버십 영상이어도 429 — 오분류하면 _mark_skip으로 영구 스킵된다 (FR14.3)
+with mock.patch("extractor.time.sleep"):
+    s21c, st21c = run_one_21("mem_429", {"id": "m3", "title": "멤버십",
+                                         "availability": "subscriber_only"},
+                             "HTTP Error 429: Too Many Requests")
+assert s21c["members_only"] == 0 and s21c["error"] == 1, s21c
+assert "m3" not in st21c, "429는 state 미기록(다음 run 재시도)"
+print("✓ 멤버십 감지(DQ-38): availability 1차 · 한/영 메시지 폴백 · 429 우선")
+
 print("\n모든 mock 단위 검증 통과")

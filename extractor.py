@@ -12,6 +12,7 @@ import yt_dlp
 
 import config
 import cookie_health
+import video_access
 import subtitle_utils as su
 from state_manager import StateManager
 from meta_collector import MetaCollector
@@ -491,8 +492,14 @@ class Extractor:
                         event = self._event(vid, entry, "no_sub", "자막 없음")
                 except Exception as exc:
                     msg = str(exc)
-                    # 멤버십 전용 영상은 오류가 아니라 접근 불가로 분류
-                    if self._is_members_only(msg):
+                    # 멤버십 전용 영상은 오류가 아니라 접근 불가로 분류.
+                    # 1차 신호는 스캔 엔트리의 availability(언어 비의존, DQ-38) —
+                    # 메시지 문구만 보면 lang=ko(DQ-20)에서 한국어로 번역돼 놓친다.
+                    # 단 429는 멤버십 여부와 무관한 일시 차단이므로 **먼저** 판정한다:
+                    # 멤버십으로 오분류하면 _mark_skip으로 영구 스킵된다.
+                    is_429 = self._is_429(msg)
+                    if not is_429 and self._is_members_only(
+                            msg, entry.get("availability")):
                         log.info(f"  🔒 멤버십 전용 (스킵): {vid}")
                         self._log_row([vid, "-", "-", action, "-", "members_only", "-"])
                         self._mark_skip(vid, "members_only")
@@ -500,7 +507,7 @@ class Extractor:
                         consecutive_429 = 0
                         event = self._event(vid, entry, "members_only",
                                             "멤버십 전용 — 접근 불가")
-                    elif self._is_429(msg):
+                    elif is_429:
                         consecutive_429 += 1
                         log.warning(f"  ⏳ 429 차단 ({consecutive_429}/{config.CONSECUTIVE_429_LIMIT}): {vid}")
                         self._log_row([vid, "-", "-", action, "-", "error:429", "-"])
@@ -594,11 +601,15 @@ class Extractor:
         return False
 
     @staticmethod
-    def _is_members_only(msg: str) -> bool:
-        """멤버십 전용 영상 에러 판별."""
-        keywords = ["members-only", "members only", "channel's members",
-                    "Join this channel", "available to this channel"]
-        return any(k.lower() in msg.lower() for k in keywords)
+    def _is_members_only(msg: str, availability=None) -> bool:
+        """멤버십 전용 영상 판별 — 1차 availability, 2차 메시지 (DQ-38).
+
+        판정 규칙은 `video_access`에 모아 대시보드 스캔(FR17.6)과 공유한다.
+        메시지 단독 판정은 언어 의존이다 — `extractor_args.youtube.lang`(DQ-20)이
+        YouTube가 주는 `reason` 문구까지 번역하기 때문에, 구조화 필드인
+        `availability`가 있으면 그쪽이 1차 신호다.
+        """
+        return video_access.is_members_only(msg, availability)
 
     def _mark_skip(self, vid: str, reason: str):
         """접근 불가 영상을 state에 기록해 다음 실행 시 재시도 방지."""

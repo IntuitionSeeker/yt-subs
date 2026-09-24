@@ -11,6 +11,8 @@ channels.yaml
 
 # 추출 결과물 (용량 크고 사용자별로 다름)
 output/
+# migrate-groups --apply 가 호스트에 만드는 자동 백업 (FR35.11⑦)
+output_backup_*/
 
 # Python
 __pycache__/

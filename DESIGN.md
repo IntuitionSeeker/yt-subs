@@ -1,8 +1,8 @@
 # DESIGN — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v5.10  
+> **버전:** v5.11  
 > **작성일:** 2026-08-09  
-> **연계 문서:** REQUIREMENTS.md v5.10 (FR1~FR37)  
+> **연계 문서:** REQUIREMENTS.md v5.11 (FR1~FR38)  
 > **주요 변경:** 질의 인터페이스(FR9)·질의 하네스(FR10)·웹 대시보드(FR11~12) 설계 편입,
 > 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20) 설계 추가,
@@ -33,6 +33,7 @@
 > **v5.8:** 채널 메모 · 추출 탭 이름 변경 · 탭 간 자동 갱신(FR36, §2.1·§2.9·§2.9b·§2.10·§5.1·§5.9) — 메모는 **신규 스키마가 아니다**: `channels.yaml`의 `note`는 `add()`가 이미 쓰고 FR7.7이 보존까지 약속하지만 **읽는 곳이 0이라 죽어 있던 필드**이며(77채널 전부 `""`), `ChannelRegistry.set_note` + `POST /channels/note` + `/channels/stats.note` 세 접점만으로 살린다(DQ-39). 표시·입력은 기존 채널 카드와 `prompt`를 재사용한다(한 줄·200자, DQ-39). 추출 탭 이름 변경은 **기존 `POST /channels/rename`을 그대로 호출**하고, 그 과정에서 드러난 기존 결함 — 옛 이름으로 캐시된 `scan_id`가 `output/<옛이름>/` **유령 폴더**를 만드는 경로 — 를 `JobManager.invalidate_scans()`로 끊는다(DQ-41, 기존 400 계약 재사용). 갱신은 **`/channels/stats` 단일 출처 + 공통 헬퍼 `refreshChannelViews({names})`**로 통일하되 비활성 탭은 무효화 플래그로 지연 로드하고, 이관은 `renameChannel` 한 곳만 한다(DQ-40). 메모 저장은 `ChannelRegistry`의 read-modify-write 특성 때문에 작업 중 409다(DQ-42). 신규 결정 DQ-39~DQ-42, 검증 V-U30·V-U31·V-D20
 > **v5.9 (버그 수정):** 종목코드 추출 문맥화(FR12.2·12.5~12.7, §2.4·§5.3) — 구 규칙 `_TICKER_KR = re.compile(r'\b(\d{6})\b')`은 **6자리 숫자면 무엇이든** 채택했고, 실측 441개 meta에서 `tickers`가 **100% 오탐**이었다(값 있는 26개 = 제목 날짜 `260819` 22종 + 계좌번호 조각 `241686`, `_workspace/34_ticker_bug.md`). 날짜·계좌·전화·사업자번호·URL 조각이 전부 같은 모양이므로 **숫자만 보는 방식 자체가 성립하지 않는다** → `extract_tickers`를 후보 스캔 + 근거/배제 판정으로 재작성한다(강한 근거 = 종목 전용 라벨·거래소 표기 / 약한 근거 = 일반 `코드:`·괄호 단독·나열 / 공통 배제 = URL·숫자 나열 / 약한 근거에만 YYMMDD 배제, DQ-43). 기존 데이터는 신규 CLI `backfill-tickers`(기본 dry-run, meta+desc 재계산이라 네트워크 불필요)로 정리한다. **정상 결과가 빈 값**임을 FR12.6에 못박았다. 검증 V-U32
 > **v5.10:** 주기 자동 추출(FR37, §2.2·§2.9·§2.10·§2.13·§3.11·§5.7·§5.9·§5.10·§7) + **NFR3 개정** — 스케줄러는 **serve 프로세스 안의 단일 데몬 스레드**다(신규 잎 모듈 `scheduler.py`). 별도 컨테이너·호스트 cron을 쓰지 않는 이유는 `JobManager._busy`가 **프로세스 지역 싱글턴**이라 외부 프로세스의 추출은 사용자의 대시보드 작업과 동시에 돌기 때문이다(DQ-44). 주기 판정은 맥북 절전 때문에 **정시가 아니라 경과 시간**이고 밀린 주기는 1회만 따라잡는다(DQ-45). 기본 주기는 **3일**이다(선택지 3·7·14·28일, 대시보드에서 변경 — 근거는 FR37.3: RSS 15개 상한 구멍 축소·주기당 버스트 감소·예산 30 적정화·백오프 상한 12일). 상태·설정은 `output/.scheduler.json` 한 파일(원자 교체, DQ-46 — `channels.yaml`의 read-modify-write lost update를 피한다). 실행은 **RSS 선행 → 새 영상 있는 채널만 `_run_grouped` 재사용**(`pl_map={}`·`group_title=None`)이고 RSS 15개 상한은 **무시하되 감지·노출**한다(DQ-47). 무인 전용 안전장치로 **429 2단 회로차단**을 신설했다 — ⓐ `Extractor.run`이 429 중단을 `stats["aborted_429"]`로 **알리게 하고**(현재는 호출자가 구별할 수 없어 `_run_grouped`가 차단 상태로 다음 채널을 계속 두드린다 — **재생목록·검색 경로에도 이미 있던 결함**) ⓑ 주기 간 지수 백오프 `skip_cycles` 1→2→4(DQ-48). 쿠키 경고·백오프는 **상태로만 표현**하고 사용자 설정(`enabled`)을 기계가 되돌려 쓰지 않는다(DQ-49). `run-now`는 우회 경로가 아니라 "지금 도래시키기"다(DQ-50). 신규 결정 DQ-44~DQ-50, 검증 V-U33~V-U34·V-D21
+> **v5.11:** 정합 감사 · 데이터 건전성 점검(FR38, §2.14·§3.12·§5.11·§7·§8·§9.1a·§9.3·§11.2) — 신규 잎 모듈 `selfcheck.py` 하나에 `audit`(문서·코드 정합 8검사)와 `doctor`(실데이터 건전성 10검사)를 담고 **CLI만 둘로 분리**한다(DQ-51 — 모듈을 쪼개면 발견 표현·심각도·예외·종료코드 계약이 흩어져 그것이 다음 drift가 된다. 명령을 분리하는 이유는 성격이 아니라 **실행 환경**이다: audit은 `output/` 없이 완결되고 doctor는 `output/`이 전부다). 검사는 `{ID: 함수}` 레지스트리 + `Finding(check, target, message, severity, evidence)` 계약으로 표준화하고 **고치지 않는다** — 문서가 낡았는지 코드가 틀렸는지는 기계가 정할 수 없고(spec-sync 원칙), 잘못된 방향의 자동 수정은 정본을 오염시킨다(DQ-52). 종료코드 `0`/`1`(경고)/`2`(오류)/`3`(**점검 실패** — '이상 없음'과 '확인 못 함'을 같은 코드로 내지 않는다)이고 기본 차단선은 2다. **정밀도 우선**(판정 불가는 침묵)과 **2층 예외 모델**(1차 = 문서 안의 기존 표기 `(구현 없음 — …)`·`**테스트 미구현**`·`(구현 예정)`·§9.1a 위치 열, 2차 = `audit_waivers.yaml` 정확 일치·와일드카드 금지·**stale waiver 자체가 경고**)이 오탐으로 도구가 죽는 것을 막는다(DQ-53 — 시제품 실측 허위 보고: FR 중복 15건·DQ 중복 6건·토큰 잡음 140건을 스코프·토큰 분류로 0으로 내렸다). 손으로 복제된 값(pytest 기준선 5곳·V-U/DQ/V-D '다음 번호' 포인터)은 **정본에서 계산해 대조**한다(DQ-54 — 한 세션에 4번 어긋난 실측). `doctor`는 **전수**로 돌고(실측 0.02s + chroma 0.32s — 샘플링은 놓침만 만든다) ChromaDB는 **`chroma.sqlite3` 읽기 전용 sqlite 직조회**다 — `KLIndexer._get_client()`가 `mkdir(parents=True)`를 하고 `PersistentClient`가 스키마를 쓰므로 평소 경로로 점검하면 **읽기 전용이 코드 수준에서 깨진다**(DQ-55). 스냅샷이 필요한 '분포 급변 감지'는 기각하고(로그에 timestamp 열이 없고 `members_only` 레코드의 `extracted_at`이 비어 있다 — 실측) **같은 데이터 안의 모순 감지**로 대체했다 — 로그의 `error:` 사유를 `video_access.is_members_message()`로 재판정해 **2026-09-09 멤버십 감지 고장의 화석 1건을 실제로 적발**했고, `tickers` 오탐은 '값이 있는데 distinct 1' 신호로 **필드 하드코딩 없이** 일반화했다(DQ-56). 자동 실행은 없다 — NFR3 예외는 FR37에 한정되고, 결과를 남기려면 리포트 저장소·알림이 필요해지는데 그것이 이번에 배제한 것들이다(FR38.16). 자막 교정(다음 단계)용 검사는 **레지스트리 자리만 열고 이름·스키마를 정하지 않는다**(DQ-57 — `note`·`tickers`가 '미리 만들었는데 죽어 있던' 전례다). 신규 결정 DQ-51~DQ-57, 검증 V-U35~V-U36·V-D22
 
 > **v5.5 정합 정정 (2026-09-20, 문서 전용):** §9.1을 전면 재정렬해 V-U 번호 충돌·누락을 해소했다 — **정본은 `tests/test_unit.py`**(실행되는 것이 진실). 구 목록의 `V-U12 reflow_sentences`·`V-U13 live guard`는 테스트 파일이 쓰는 `V-U12 채널 폴더(FR25.1)`·`V-U13 챕터 정규화(FR27.1)`에 자리를 내주고 번호를 폐기(검증 자체는 §9.1b에 존치), 누락돼 있던 V-U14(Whisper SRT 조립)·V-U15(RSS 파싱)·V-U16(이름 변경)·V-U11b(재생목록 URL 분류)를 편입했다. 코드·FR 변경 없음
 
@@ -343,6 +344,28 @@ dict 단일 인자 규약이라 필드를 추가해도 시그니처가 깨지지
 > 후자는 시계·상태 파일·백오프라는 **완전히 다른 상태 기계**이며, `decide_cycle`을 순수 함수로 분리해야
 > 일 단위 동작을 초 단위 단위 테스트로 검증할 수 있다(V-U33 — 실제로 3일을 기다려 검증할 수는 없다).
 
+### 2.14 selfcheck.py (신규, v5.11) — FR38
+
+`audit`(문서·코드 정합)와 `doctor`(데이터 건전성)의 **검사 구현과 공통 계약**을 한 모듈에 둔다.
+CLI 명령은 둘로 분리되지만(FR38.2·DQ-51) 모듈을 쪼개지 않는 이유는 **공통 계약이 흩어지면 그것이 다음 drift**이기 때문이다 —
+발견 표현·심각도·예외 적용·출력 형식·종료코드는 두 명령이 **한 글자도 다르지 않아야** 한다.
+의존은 표준 라이브러리 + `config`·`channel_registry`·`folder_ops`·`video_access`·`scheduler`·`cookie_health`뿐이고,
+**`chromadb`·`sentence_transformers`·`yt_dlp`를 임포트하지 않는다**(FR38.15).
+
+| 함수·클래스 | 설계 |
+|---|---|
+| `Severity` | `ERROR` / `WARN` / `INFO` 3단. 정렬·집계·종료코드 계산의 기준이며 검사 함수가 새 등급을 만들지 않는다 (FR38.7) |
+| `Finding(check, target, message, severity, evidence=None)` | 발견 1건. `check` = 고정 ID(`audit.*`/`doctor.*`), `target` = waiver 매칭 키가 되는 **안정 문자열**(파일 경로·채널명·번호 등 — 가변 메시지를 키로 쓰면 waiver가 조용히 풀린다), `evidence` = 수치 dict(`--json`에 실린다) |
+| `AUDIT_CHECKS` / `DOCTOR_CHECKS` | `{검사ID: 함수}` **레지스트리**. 함수는 `ctx`를 받아 `list[Finding]`을 돌려주는 순수 함수에 가깝게 쓴다(입력 = 읽은 텍스트·파싱 결과). 새 검사 추가 = 함수 1개 + 등록 1행이며 이것이 FR38.18의 "열어 둔 자리"다 |
+| `AuditContext` / `DoctorContext` | 입력을 **한 번만 읽어** 검사들이 공유한다. `AuditContext` = 문서 텍스트 5종 + `tests/test_unit.py` + 소스 인덱스(단어 집합) + `main.py` 서브파서 목록. `DoctorContext` = 레지스트리 + 채널별 `{dir, state, meta 목록, chroma video_id 집합, extract_log 행}`. 파일을 두 번 읽는 검사가 생기면 전수 스캔 예산(FR38.14)이 무너진다 |
+| `load_waivers(path)` / `apply_waivers(findings, waivers)` | `audit_waivers.yaml` 적재 → `(check, target)` 정확 일치로 면제. **와일드카드·정규식을 지원하지 않는다**(FR38.10ⓐ). 반환은 `(남은 발견, 면제된 발견, stale waiver 목록)`이며 stale은 `WARN` Finding으로 승격된다 — 이 승격이 예외 파일이 썩지 않게 하는 유일한 장치다 |
+| `render_text(findings, summary)` / `render_json(...)` | FR38.4·38.5. 같은 발견 집합에서 형식만 다르다. 텍스트는 `[E]`/`[W]`/`[I]` 접두 + 심각도·검사ID 순 정렬, 0건이면 요약 1줄만 |
+| `exit_code(findings)` | `ERROR>0 → 2` · `WARN>0 → 1`(`--strict`면 1도 실패로 취급하는 것은 호출자 몫이 아니라 이 함수의 인자 `strict`로 표현) · 그 외 `0`. **점검 자체 실패는 예외를 올려** `main`이 `3`으로 변환한다(FR38.6 — "이상 없음"과 "확인 못 함"을 절대 같은 코드로 내지 않는다) |
+| `_read_chroma_ids(chroma_dir)` | `sqlite3.connect("file:<chroma.sqlite3>?mode=ro", uri=True)` → `embedding_metadata`에서 `key='video_id'`의 distinct `string_value` 집합 + 청크 수. 파일 부재·테이블 부재·조회 실패는 **예외를 삼키고 `None`** 을 돌려주며 호출한 검사가 "건너뜀(INFO)"으로 보고한다. `chromadb.PersistentClient`를 쓰지 않는 이유는 **디렉터리·스키마를 쓰기 때문**이다(FR38.3·DQ-55) |
+
+> **왜 `main.py`에 직접 쓰지 않는가:** 검사 본문은 단위 테스트가 **합성 픽스처**로 참·거짓 양쪽을 돌려야 한다(FR38.19).
+> `main.py`의 `cmd_*`는 인자 파싱과 종료코드 변환만 맡고, 검사는 전부 import 가능한 순수 함수로 둔다.
+
 ---
 
 ## 3. 데이터 플로우
@@ -498,6 +521,44 @@ GET /cookies → present·mtime + (detected_at ≥ 쿠키 mtime ? 경고 : 해�
 
 - 카테고리(재생목록)는 이 경로에서 매핑하지 않는다 — `pl_map={}`이라 요청 0이고, 다음 전체 run의 백필(FR15.5)이 채운다.
 - 자막 **수정 감지**(FR2.2)는 이 경로의 대상이 아니다 — RSS "새 영상"은 state에 없는 영상이라는 뜻이다(FR37.17).
+
+### 3.12 정합 감사 · 건전성 점검 (FR38)
+
+```
+./yt.sh audit                                   ./yt.sh doctor [채널]
+  │                                               │
+  ├─ AuditContext 1회 적재                        ├─ DoctorContext 1회 적재
+  │   REQUIREMENTS.md · DESIGN.md                 │   channels.yaml (98채널)
+  │   qa-verifier.md · pipeline-verify/SKILL.md   │   output/ 워크 → 채널별
+  │   CLAUDE.md · spec-sync/SKILL.md              │     state.json · meta/*.json 목록
+  │   tests/test_unit.py (V-U 마커 = 정본)        │     srt·txt·meta·desc stat
+  │   소스 단어 색인(*.py·index.html·yt.sh)       │     extract_log.csv 행
+  │   main.py 서브파서 목록                       │     chroma.sqlite3 (mode=ro) → video_id 집합
+  │                                               │   .scheduler.json · .cookie_status.json
+  │   실측 < 0.3s · output/ 불필요                │   실측 0.02s + chroma 0.32s · 네트워크 0
+  ▼                                               ▼
+AUDIT_CHECKS 8종 순차 실행                      DOCTOR_CHECKS 10종 순차 실행
+  (판정 불가 토큰·대상은 침묵 — FR38.8)           (판정 불가·스키마 상이는 INFO 건너뜀)
+  │                                               │
+  └──────────────┬────────────────────────────────┘
+                 ▼
+       문서 내 표준 표기로 1차 면제 (FR38.9)
+         §6 `(구현 없음 — …)` · §9.1a `**테스트 미구현**` · `(구현 예정)` · §9.1a 위치 열
+                 ▼
+       audit_waivers.yaml 2차 면제 (FR38.10)
+         (check, target) 정확 일치 · 면제분은 세어서 노출
+         대응 발견 없는 waiver → stale WARN 승격
+                 ▼
+       render_text / render_json  →  exit_code
+         0 이상 없음 · 1 경고만 · 2 오류 · 3 점검 실패
+```
+
+- **파일을 쓰지 않는다.** 두 경로 어디에도 열기·생성·기록이 없다(FR38.3). `chroma/`는 읽기 전용 sqlite로만 열고,
+  `KLIndexer`·`chromadb`를 경유하지 않는 이유가 여기 있다 — `_get_client()`는 `mkdir(parents=True, exist_ok=True)`를 한다(DQ-55).
+- **자동 실행 경로가 없다.** `scheduler.py`·`server.py`의 어디에서도 호출되지 않는다(FR38.16·DQ-56).
+  호출 주체는 사람 또는 개발 하네스 게이트(§11.2)뿐이다.
+- **스냅샷을 남기지 않는다.** 그래서 "직전 대비 변화" 계열 검사는 채택하지 않았고, 대신
+  `doctor.detector-fossils`처럼 **같은 데이터 안의 모순**을 본다(DQ-56).
 
 ---
 
@@ -730,6 +791,54 @@ channels:
 - 위치가 `output/`인 근거는 DQ-11(`.cookie_status.json`)·FR35.10(`.migration.lock`)의 선례이며,
   `channels.yaml`을 쓰지 않는 근거는 **lost update**다(DQ-46·DQ-42).
 
+### 5.11 audit_waivers.yaml · 발견(finding) 출력 (FR38.5·38.10, v5.11)
+
+```yaml
+# audit_waivers.yaml — 감사 예외 선언 (저장소 루트, 사람이 쓴다)
+# 1차 예외는 문서 안의 표준 표기로 표현한다(FR38.9). 이 파일은 그것으로 표현할 수 없는 잔여만 담는다.
+waivers:
+  - check: audit.traceability          # 검사ID — 정확 일치 (와일드카드 금지)
+    target: "Reprocessor"              # Finding.target 과 정확 일치
+    reason: "FR5 행의 '(Extractor 재사용)' 개념명 — 같은 이름의 클래스는 존재하지 않는 것이 정상"
+    added: "2026-09-26"
+    # expires: "2027-03-31"            # (선택) 이 날짜 이후에는 면제하지 않고 원래 심각도로 보고
+  - check: doctor.meta-fields
+    target: "tickers/all-empty"
+    reason: "DQ-43 — 이 코퍼스의 정답이 빈 값이다(실측 495/495). 느슨하게 되돌리지 말 것(FR12.6)"
+    added: "2026-09-26"
+```
+
+- **와일드카드·정규식 없음**(`check: "audit.*"`·`target: "*"` 금지) — 검사 한 종류를 통째로 끌 수 있으면 그것이 첫 은폐 수단이 된다.
+- **대응 발견이 없는 항목은 `stale waiver` 경고**로 올라온다 — 예외가 자기 수명을 스스로 신고하게 만드는 장치다.
+  (`note`·`tickers`가 죽어 있던 이유는 "아무도 읽지 않아서"였다.)
+- 파일이 없으면 예외 0건으로 동작한다(부재는 오류가 아니다).
+
+`--json` 출력 (사람용 출력과 **같은 발견 집합**, 형식만 다르다):
+
+```json
+{
+  "command": "doctor",
+  "started_at": "2026-09-26T15:40:02",
+  "elapsed_sec": 0.41,
+  "checks_run": ["doctor.state-files", "doctor.index-coverage", "..."],
+  "checks_skipped": [{"check": "doctor.index-coverage", "target": "output/한균수", "why": "chroma.sqlite3 스키마 상이"}],
+  "findings": [
+    {"check": "doctor.index-coverage", "target": "output/역배열1/변곡점주식",
+     "severity": "warn", "message": "자막 4편이 ChromaDB에 없다 (chroma/ 미생성)",
+     "evidence": {"subtitled": 4, "indexed": 0}}
+  ],
+  "waived": [
+    {"check": "doctor.meta-fields", "target": "tickers/all-empty", "severity": "warn",
+     "reason": "DQ-43 — 이 코퍼스의 정답이 빈 값이다"}
+  ],
+  "stale_waivers": [],
+  "summary": {"error": 0, "warn": 9, "info": 3, "waived": 1, "exit_code": 1}
+}
+```
+
+- `check`·`target`·`severity` 3필드는 **계약**이다(훅·CI·이슈 참조의 키). 메시지 문구는 개선해도 되지만 이 셋은 고정이다(FR38.4).
+- `exit_code`를 payload에도 싣는 이유: 파이프로 받는 쪽이 프로세스 코드를 잃어도 판정이 가능해야 한다.
+
 ---
 
 ## 6. 지식층 시스템: ChromaDB
@@ -762,6 +871,8 @@ yt-subs/
 ├── cookie_health.py       # FR19 (YDLLogger·상태 영속·get_status)
 ├── scheduler.py           # FR37 주기 자동 추출 — 판정(decide_cycle)·계획(build_plan)·상태 파일·틱 스레드
 ├── video_access.py        # 멤버십 판정 공유 규칙 (FR13.7·17.6, DQ-38) — 의존성 없는 잎 모듈
+├── selfcheck.py           # FR38 정합 감사·건전성 점검 — audit 8검사 · doctor 10검사 (읽기 전용, chromadb 미임포트)
+├── audit_waivers.yaml     # FR38.10 감사 예외 선언 (없으면 예외 0건)
 ├── dashboard/
 │   ├── server.py          # FastAPI (FR11·17~20)
 │   ├── jobs.py            # JobManager·classify_url·apply_filters·재생목록/검색/스케줄 워커 (FR17~18·24·34·37)
@@ -789,6 +900,9 @@ yt-subs/
 ./yt.sh summarize 채널 VIDEO_ID           # 전문 요약
 ./yt.sh serve                             # 대시보드 :8800
 ./yt.sh test [--integration]              # 검증
+./yt.sh audit [--json] [--strict]         # 문서·코드 정합 감사 (FR38, output/ 불필요)
+./yt.sh doctor [채널] [--json] [--strict] # 데이터 건전성 점검 (FR38, 읽기 전용 전수)
+./yt.sh backfill-tickers [채널] [--apply] # 종목코드 재계산 (기본 dry-run, FR12.5)
 ```
 
 사전 준비: `export ANTHROPIC_API_KEY=…`, (선택) `cookies.txt` 배치 — COOKIES_GUIDE.md.
@@ -806,9 +920,11 @@ yt-subs/
 > 섹션 헤더 주석과 **1:1**로 맞춘 것이다. 목록에 없는 V-U 번호는 존재하지 않고, 테스트에 있는
 > 검증은 번호가 없더라도 §9.1b에 전부 기록한다. **v5.6에서 V-U22~V-U27을 FR35·FR7.7~7.9용으로 선점**했다 —
 > 구현 시 `tests/test_unit.py`에 같은 번호의 섹션 헤더 주석을 **같은 커밋에서** 넣어야 정본이 성립한다.
-> **v5.8에서 V-U30~V-U31을 FR36용으로 선점**했다(문서 선행 — 구현 커밋이 같은 번호의 섹션 헤더를 넣는다). **v5.10에서 V-U33~V-U34를 FR37용으로 선점**했다(문서 선행 — 구현 커밋이 같은 번호의 섹션 헤더를 넣는다). 다음 신규 번호는 **V-U35**다.
+> **v5.8에서 V-U30~V-U31을 FR36용으로 선점**했다(문서 선행 — 구현 커밋이 같은 번호의 섹션 헤더를 넣는다). **v5.10에서 V-U33~V-U34를 FR37용으로 선점**했다(문서 선행 — 구현 커밋이 같은 번호의 섹션 헤더를 넣는다).
+> **v5.11에서 V-U35~V-U36을 FR38용으로 선점**했다(같은 규약). 다음 신규 번호는 **V-U37**이다.
+> **v5.11 이후 이 포인터는 손으로만 관리되지 않는다** — `audit.next-pointers`(FR38.11)가 이 문장의 값과 실제 최대값+1을 대조한다(DQ-54).
 
-#### 9.1a 번호 부여 항목 (V-U1~V-U34)
+#### 9.1a 번호 부여 항목 (V-U1~V-U36)
 
 | ID | 대상 | FR·DQ | 위치 |
 |---|---|---|---|
@@ -848,8 +964,10 @@ yt-subs/
 | V-U32 | **종목코드 문맥 판정**(FR12.2·12.5~12.7) — 실측 오탐 고정: 제목 날짜 `[주식] 260819 …` 3종·계좌번호 `우리은행 /1002 763 241686 /`·사업자/전화번호·URL 숫자 조각·근거 없는 맨 6자리·`쿠폰코드 123456`·약한 근거+날짜(`인증코드: 260819`·`(260819)`) **전부 `[]`** / 채택: 강한 라벨(`종목코드:`·`단축코드`·`티커`)·거래소 표기(`KRX:`·`.KS`)·괄호 단독·일반 `코드:`·나열(`005930, 000660`)·`$AAPL` / **강한 라벨이면 날짜형 코드(`010130`)도 채택** / 백필은 dry-run에서 **파일 무변경**, `--apply`에서만 기록하고 재실행 시 변경 0(멱등) | FR12.2·12.5~12.7·DQ-43 | `tests/test_unit.py` §V-U32 (`test_extract_tickers_rejects_noise`(13케이스)·`test_extract_tickers_accepts_with_context`(10케이스)·`test_backfill_tickers_dry_run_then_apply`) |
 | V-U33 | **스케줄 판정 상태 기계**(FR37) — `decide_cycle`을 **가짜 시계**로 구동: ⓐ `enabled=false`면 항상 `idle`(기본 설치 상태에서 네트워크 0) ⓑ 기동 후 5분 미만이면 `idle` ⓒ 도래 전/도래 후 경계(`last_run_at + interval_days`) ⓓ **8일·30일·90일 잠든 뒤 깨어나도 실행은 1회**(밀린 만큼 반복 없음)이고 `last_run_at`은 `now`로 갱신(cron식 `+=` 누적 아님) ⓔ `skip_cycles>0`이면 실행 대신 1 감소 + `last_run_at` 갱신 ⓕ 쿠키 `warning`이면 `idle` + `paused_reason="cookie"` + **`last_run_at` 미갱신**이고 warning이 내려가면 다음 틱에 `run`(자가 치유) ⓖ `busy`면 `idle` + 미갱신 → 다음 틱 `run` ⓗ **판정 순서**(백오프 감소가 쿠키·busy보다 먼저) ⓘ `update()` 검증 — `interval_days` **3(기본)**/7/14/28 통과·1·5·30 `ValueError`, **기본 설정 파일의 `interval_days`가 3**, 예산 1~200 경계, **켤 때마다 `last_run_at`이 `now`로 채워짐**(토글 즉시 대량 추출 방지 — 껐다가 한참 뒤 다시 켜는 경우 포함) ⓙ `request_now()`가 도래시키되 `skip_cycles`를 소모하지 않음 ⓚ 상태 파일 — 원자 교체·손상 JSON·부재·미지 키에서 기본값 폴백 ⓛ **주기 도중 `POST /schedule {enabled:false}` → 주기 마감 후에도 `false`**(주기 길이만큼의 창 동안 비상 정지가 무효화되던 결함의 회귀 시험 — 마감은 `USER_FIELDS`를 쓰지 않는다, NFR3 ⓓ) ⓜ 백오프 skip이 **`last_result`를 덮지 않고**(직전 `aborted_429` 증거 보존) `last_skip_at`만 남김 ⓝ `_sanitize` — `enabled`는 **JSON 불리언만**(`"yes"`는 꺼짐), 깨진 `last_run_at`은 `now`로 교정("즉시 도래" 금지) ⓞ 작업 대기 중 예외가 나도 **주기를 마감**한다(`last_run_at` 갱신 → 같은 주기 재실행 없음, `outcome="error"`) | FR37.2~37.3·37.10~37.15·DQ-45·DQ-49·DQ-50 | `tests/test_unit.py` §V-U33 (구현됨 — `test_schedule_*` 17케이스) |
 | V-U34 | **RSS 선행 계획·429 중단 전파**(FR37) — ⓐ `check_new_videos(names=)`가 **준 채널만** 조회(`auto_run:false` 채널에 요청 0)하고 인자 없이 부르면 **기존 전 채널 동작 그대로**(FR29.2 회귀) ⓑ 새 영상 0이면 `build_plan`이 빈 계획 → **job 생성 0** ⓒ RSS 실패 채널은 계획에서 빠지고 `rss_errors`에 기록 ⓓ 채널 새 영상이 15건이면 `truncated_channels`에 오르고 **전체 스캔으로 승격하지 않음**(DQ-47) ⓔ 예산 절단 — 합계가 `max_videos_per_cycle`을 넘지 않고, **커서 회전으로 다음 주기에 뒷 채널이 먼저 잡힘**(기아 방지) ⓕ 계획 → `by_channel`/`videos_view` 모양이 `_run_grouped` 기대와 일치하고 `published`가 `upload_date`로 새지 않음 ⓖ **`stats["aborted_429"]`**: `run()`이 연속 429 중단 시 표식을 싣고 `_STAT_KEYS` 합산·job `stats` 등식(V-D11)을 오염시키지 않음 ⓗ `_run_grouped`가 표식을 보면 **남은 채널의 `run()`을 호출하지 않고**(대조군: 표식 없으면 전 채널 호출 = 현행 결함 재현) `status="done"` + 경고 1건 ⓘ 주기 결과가 `aborted_429`면 `skip_cycles` 1→2→4(상한 4), 정상 종료면 0으로 리셋 | FR37.4~37.9·DQ-47·DQ-48 | `tests/test_unit.py` §V-U34 + `mock_jobs_test.py` ⑭ (구현됨) |
+| V-U35 | **`audit` 검사 계약** — 합성 문서 픽스처(tmp 디렉터리에 REQUIREMENTS/DESIGN/테스트/SKILL 축소판을 쓴다)로: ⓐ pytest 기준선이 5곳 중 1곳만 낡으면 **오류 1건·종료코드 2**, 전부 같으면 0건·종료코드 0, `--baseline` 실측값과 다르면 오류 ⓑ `CLAUDE.md` 이력의 **과거 값(31→33 등)은 오탐이 되지 않는다**(마지막 행 오른쪽 값만 본다) ⓒ 유령 V-U(문서에만)·누락 V-U(테스트에만) 각각 오류이고 `**테스트 미구현**` 표기는 면제, **위치 열이 `mock_scan_test.py`인 항목은 마커를 요구하지 않는다**(V-U8·V-U9 현행 상태가 오탐이 되지 않는다) ⓓ "다음 신규 번호" 포인터가 최대값+1과 다르면 오류(V-U·V-I·V-D·DQ 4계열) ⓔ FR 중복 = 오류·결번 = 경고이고 **§6 트레이서빌리티 행이 FR 정의로 세어지지 않는다**(실측 허위 15건 회귀) ⓕ DQ 중복 판정에서 **REQUIREMENTS §8 역사 표가 제외**된다(실측 허위 6건 회귀) ⓖ §6 토큰 분류 — 없는 파일·없는 식별자·없는 라우트는 오류, **CSS 선택자·필드명·`""`·런타임 산출물 경로는 침묵**(실측 140건 잡음 회귀) ⓗ `(구현 예정)` 표기 행은 CLI·트레이서빌리티 부재를 면제 ⓘ waiver 정확 일치로 면제되면 종료코드 0 + `waived` 집계에 남고, **와일드카드 waiver는 무효**(면제되지 않는다) ⓙ 대응 발견 없는 waiver = `stale waiver` 경고 ⓚ 문서 파일이 없거나 파싱 불가면 **종료코드 3**(0이 아니다) ⓛ `--json` 스키마(`check`·`target`·`severity`·`summary.exit_code`) 고정 ⓜ **실행 전후 픽스처 전체 바이트·mtime 불변**(FR38.3) | FR38.1~38.12·DQ-52~54 | `tests/test_unit.py` §V-U35 (구현됨 — `test_audit_clean_fixture_is_silent`·`test_audit_is_read_only`·`test_audit_pytest_baseline_catches_one_stale_place`·`test_audit_pytest_baseline_vs_measured`·`test_audit_pytest_baseline_ignores_claude_history`·`test_audit_vu_numbers_ghost_and_missing`·`test_audit_vu_numbers_exemptions`·`test_audit_next_pointers_four_families`·`test_audit_fr_numbers_scope_and_duplicates`·`test_audit_dq_numbers_excludes_requirements_history`·`test_audit_traceability_token_classification`·`test_audit_traceability_fr_coverage_warns`·`test_audit_planned_marker_exempts_absence`·`test_audit_cli_commands_both_directions`·`test_audit_doc_version_header_sync`·`test_audit_waivers_exact_match_and_wildcard`·`test_audit_waiver_stale_and_expired`·`test_audit_waiver_file_parses_without_pyyaml`·`test_audit_missing_document_is_exit_3`·`test_audit_json_schema_and_strict`) |
+| V-U36 | **`doctor` 검사 계약** — 합성 `output/` 픽스처(채널 3~4개·그룹 1개·state·txt·meta·extract_log·가짜 chroma.sqlite3)로: ⓐ 레코드 있고 txt 없음 / txt 있고 레코드 없음 **양방향 오류** ⓑ 같은 basename을 두 video_id가 공유하면 오류 ⓒ 미등록 채널형 디렉터리 경고(`folder_ops.is_channel_like_dir` 판정 재사용)·등록됐지만 미추출은 정보 ⓓ 그룹 지정 채널이 평면 위치에 남아 있으면 오류 ⓔ 자막 보유 영상이 chroma에 없으면 경고·인덱스에만 있으면 경고 ⓕ **`chroma.sqlite3`가 없거나 `embedding_metadata`가 없으면 "건너뜀(정보)"이고 디렉터리·파일을 만들지 않는다**(FR38.3·DQ-55 회귀 — 클라이언트 경로의 `mkdir` 부작용 금지) ⓖ `extract_log.csv` 완전 동일 행 경고·BOM 헤더를 정상 파싱(경고 1건)·열 수 불일치 오류 ⓗ `error:` 사유 재판정으로 **한국어 멤버십 문구(실측 문구 고정)·영어 문구 양쪽**이 오류로 잡히고 `error:429`는 정보, 멤버십과 무관한 오류 사유는 **침묵** ⓘ `meta-fields` — "값이 있는데 distinct 1"이 경고, 열거형 필드(`content_type`·`sub_type`)는 면제, `upload_date == "00000000"`은 정보(FR2.6)·다른 비8자리 값은 오류, `tickers` 전량 빈 값은 **waiver로 침묵** ⓙ 스케줄러 — 가짜 시계로 `enabled=true`·오래된 `last_run_at` → 적체 경고, `skip_cycles>0` → 경고, `interval_days=5` → 오류, 기본 상태(`enabled:false`)에서는 0건 ⓚ 쿠키 무효 경고 N일 방치 경고(가짜 시계) ⓛ `output/` 부재 시 **종료코드 3** ⓜ 채널 인자로 범위 한정 ⓝ **실행 전후 픽스처 전체 바이트·mtime 불변** | FR38.13~38.15·DQ-55~56 | `tests/test_unit.py` §V-U36 (구현됨 — `test_doctor_clean_fixture_is_silent`·`test_doctor_is_read_only`·`test_doctor_state_files_both_directions`·`test_doctor_basename_collision`·`test_doctor_orphan_dirs_and_unextracted`·`test_doctor_registry_paths_flat_leftover_is_error`·`test_doctor_index_coverage_missing_and_orphan`·`test_doctor_index_coverage_schema_mismatch_is_skip`·`test_doctor_extract_log_hygiene`·`test_doctor_extract_log_mid_file_bom_is_warn`·`test_doctor_detector_fossils_reappraises_reasons`·`test_doctor_meta_fields_generalized_signals`·`test_doctor_meta_fields_format_contract`·`test_doctor_scheduler_states`·`test_doctor_cookie_status_uses_get_status`·`test_doctor_channel_scope_and_missing_output`·`test_doctor_registry_and_state_parse_failure_is_exit_3`) |
 
-기준선: 2026-09-24 기준 `./yt.sh test` = **185 passed / 1 skipped** (FR37 주기 자동 추출 V-U33·V-U34 +
+기준선: 2026-09-26 기준 `./yt.sh test` = **223 passed / 1 skipped** (FR38 정합 감사·건전성 점검 V-U35·V-U36 + FR37 주기 자동 추출 V-U33·V-U34 +
 FR37 QA 결함 수정분 포함. skip 1건은 컨테이너 이미지에 node가 없는 `fmtDuration` node 실행 테스트 —
 호스트 node 22에서 통과 확인).
 
@@ -879,7 +997,7 @@ JobManager 동시성/취소(FR17.7~17.8)·필터 차분 대조(V-D11 전제)·�
 V-I1 등록+폴더 · V-I2 2회차 SKIP · V-I3 수정 감지 · V-I4 SUSPECT 기록 ·
 V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 재시작 영속
 
-### 9.3 대시보드·기능 검증 (V-D — FR15~20·24~26·34~36)
+### 9.3 대시보드·기능 검증 (V-D — FR15~20·24~26·34~38)
 
 | ID | 절차 | 합격 기준 | 현황 (2026-08-04) |
 |---|---|---|---|
@@ -904,6 +1022,7 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | V-D19 | `./yt.sh add` 재등록 회귀 (FR7.7~7.9) — 이미 `group`·`auto_run`·`channel_id`가 있는 채널의 URL로 다시 `add` | 세 필드 **전부 보존**되고 `url`·`lang`만 갱신 · 채널 출력 경로 **불변**(라이브러리에서 채널이 사라지지 않음) · 개명 채널(등록명≠핸들) URL로 add해도 `channels.yaml` 항목 수 불변 · 신규 URL은 종전대로 등록+추출 시작 | ⏳ 미검증 (FR35 구현 시) |
 | V-D20 | **메모·추출 탭 이름 변경·탭 간 갱신 (FR36)** — 합성 테스트 채널로: ① 추출 탭 카드의 📝로 메모 저장 → **라이브러리 탭으로 전환하면 같은 메모가 보인다**(새로고침 없이) ② 라이브러리에서 메모를 지우면 두 탭 모두 메모 줄이 사라지고 `channels.yaml`에 `note: ""`가 남는다(필드 제거 아님) ③ 추출 탭 ✏️로 이름 변경 → 라이브러리·추출·질의 탭 채널 목록이 **전부 새 이름**이고 질의 탭의 **선택 채널이 첫 채널로 튕기지 않는다**(FR36.10) ④ 스캔 조건 화면을 띄운 채 그 채널의 이름을 바꾸면 화면이 닫히고 안내가 뜨며, 옛 `scan_id`로 `POST /extract` 시 **400** ⑤ 추출 작업 중 메모 저장·이름 변경 **둘 다 409** ⑥ 201자 메모 **400**(절삭되지 않음) ⑦ ✏️·📝 클릭이 **스캔을 시작시키지 않는다**(FR36.7 전파 차단) ⑧ 메모가 빈 기존 채널들의 카드 외형이 **v5.7과 동일**(FR36.5) | 위 8항목 전부 관찰 일치 | ⏳ 미검증 (FR36 구현 완료 — 재빌드 후 브라우저 확인 대기) |
 | V-D21 | **주기 자동 추출 (FR37)** — 합성/실채널 혼합으로: ① 배포 직후 기본 상태에서 **`GET /schedule.enabled == false`이고 서버를 30분 띄워도 yt-dlp 요청·RSS 요청이 0**(옵트인 실증) ② 켠 직후에도 즉시 실행되지 않고 `next_due_at`이 **기본 주기(3일) 뒤**(FR37.3·`update` 규약) ③ `POST /schedule/run-now` → 몇 초 내 `kind="schedule_run"` job 생성, **RSS 조회는 `auto_run:false` 채널을 제외한 수만큼**(실측 36) 발생 ④ 새 영상이 없는 채널에는 영상 페이지 요청 0이고, 전부 없으면 **job 자체가 만들어지지 않음** ⑤ 새 영상이 있는 채널만 추출되고 결과물은 **원채널(그룹) 폴더**에 저장, `meta.playlists`가 **덮어써지지 않음**(`pl_map={}`) ⑥ 실행 중 `POST /extract` → **409**, 취소 버튼 → `cancelled`이고 **`last_run_at`이 갱신돼 60초 뒤 재시작하지 않음** ⑦ 사용자 작업 중에 주기를 도래시키면 **그 틱에는 아무 일도 없고** 작업 종료 후 자동 시작 ⑧ 쿠키 경고를 주입하면 실행되지 않고 배너 표시, 쿠키 갱신 후 **자동 재개**(설정 토글 불필요) ⑨ 429 중단을 주입하면 **남은 채널이 돌지 않고**(`warnings` 1건) 다음 주기가 `skip_cycles`로 건너뛰며 UI에 재개 예정이 뜬다 ⑩ `interval_days=5` 요청 **400**(3·7·14·28만 허용) · `interval_days=7`로 바꾸면 `next_due_at`이 그에 맞게 이동(주기는 **고정값이 아니다**) ⑪ 컨테이너 재시작 후에도 설정·`last_run_at`이 유지(`output/.scheduler.json`) ⑫ `SCHEDULER_DISABLED=1`로 띄우면 스레드가 뜨지 않음 | 위 12항목 전부 관찰 일치 | ⏳ 미검증 (FR37 구현 시) |
+| V-D22 | **정합 감사·건전성 점검 실데이터 1회 (FR38)** — 실제 저장소·실제 `output/`에서 `./yt.sh audit`와 `./yt.sh doctor`를 각 1회 실행하고, 스펙 작성 시점의 읽기 전용 시제품 실측과 대조한다: ① `audit` **1초 이내**·`doctor` **10초 이내** 종료 ② `git status` **clean 유지**·`output/` 전체 파일 바이트·mtime **불변**(읽기 전용 실증, FR38.3) ③ `doctor`가 **미인덱싱 12편**(`역배열1/firststockclass`·`변곡점주식`·`버럭쌤TV`·`1yearporsh`·`DevilishChart`·`GlobalDefens-e`의 `chroma/` 부재 9편 + `역배열1/차트분석남`·`역배열1/돌파감독`·`한균수` 각 1편) · **extract_log 동일 행 24개** · **멤버십 화석 1건**(`변곡점주식`/`aetOCkgzurM`) · **쿠키 방치 1건**(`detected_at: 2026-08-08`) 을 보고 ④ `doctor`가 `state-files`·`basename-collision`·`orphan-dirs`·`registry-paths`에서 **0건**(현행 기준선) ⑤ `audit`가 §6의 **미발견 식별자 4건**(`loadSchedule`·`saveSchedule`·`runScheduleNow` = 진짜 drift · `Reprocessor` = waiver 대상)을 보고하고, waiver 등록 후 **1건이 `waived`로 이동** ⑥ FR·DQ·V-U 번호 검사가 **허위 보고 0건**(허위 15·6·140건 회귀 — 시제품이 스코프 없이 냈던 수치) ⑦ 종료코드가 FR38.6 규약과 일치하고 `--strict`가 경고를 실패로 승격 ⑧ `--json` 출력이 `python3 -m json.tool`로 파싱 | 위 8항목 전부 관찰 일치 | ✅ 검증 (2026-09-26 구현 후 실측) — ① `audit` **0.0s**(컨테이너 포함 0.22s, `output/` 마운트 없이 성립) · `doctor` **0.3s**(상한 10s) ② `output/` 전체 3,099 파일·772 디렉터리의 크기·mtime **digest 불변**, `chroma/` 부재 채널에 디렉터리 생성 없음, `git status`에 `output/`·`channels.yaml` 변경 없음 ③ **미인덱싱 12편**(`chroma/` 부재 6채널 9편 + 부분 누락 3채널 3편) · **extract_log 동일 행 24개**(4채널) · **멤버십 화석 1건**(`변곡점주식`/`aetOCkgzurM`) 전부 스펙 실측과 일치 ④ `state-files`·`basename-collision`·`orphan-dirs`·`registry-paths` **전부 0건** ⑤ §6 미발견 식별자 **4건**(진짜 drift 3 = `loadSchedule`·`saveSchedule`·`runScheduleNow` → §6을 `schLoad`·`schSave`·`schRunNow`로 정정해 해소 · `Reprocessor` 1건은 waiver로 이동) ⑥ FR·DQ·V-U 번호 검사 **허위 보고 0건**(FR 256행 중복 0·결번 0 · DQ 57 중복 0·결번 0 · V-U 유령·누락 0 — 시제품의 허위 15·6·140건 전부 재현 안 됨) ⑦ 종료코드 audit **1**(경고 9) · doctor **2**(오류 1) · `--strict`가 1→2로 승격 · 문서 부재·미등록 채널·손상 JSON은 **3** ⑧ `--json`이 `python3 -m json.tool` 통과. **수정 사항 — ⓐ 쿠키 "48일 방치"는 오탐이었다**: `cookie_health.get_status()`가 FR19.3대로 Firefox `cookies.sqlite` mtime(2026-08-27) > `detected_at`(2026-08-08)로 이미 자동 해제한다 → 검사를 그 함수 경유로 고정하고 실측을 **0건**으로 정정(상태 파일을 직접 읽으면 오탐, `./yt.sh doctor`처럼 프로필이 마운트된 환경에서 판정해야 한다) ⓑ `upload_date == "00000000"`은 meta가 아니라 **state 레코드 9건**(스펙의 11건은 그 사이 변동) ⓒ 선두 BOM(98/98 파일)은 `extractor.py`가 `utf-8-sig`로 의도적으로 쓰는 것이라 **경고에서 제외**(중간 BOM만 경고) |
 
 > **2026-08-08 FR21 실검증**: `POST /videos/delete`·`POST /channels/delete`를 합성 테스트 채널(등록·인덱싱까지 완료한
 > 가짜 영상 1건)로 검증 — 실채널 데이터는 전혀 건드리지 않았다. 스캔 진행 중 삭제 시도 시 409 확인(FR21.4).
@@ -980,6 +1099,13 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | DQ-48 | 429 회로차단을 **2단**으로 올린다 — ⓐ 주기 내 즉시 중단(신호 `aborted_429` 신설) ⓑ 주기 간 지수 백오프(1→2→4) | 현행 방어는 **사람이 지켜보는 실행** 전제다: 연속 429 5회면 `run()`이 중단하고 로그로 "30분~1시간 후 다시"라고 말한다 — 읽는 사람이 있을 때만 작동하는 방어다. 무인에서는 두 구멍이 난다. **ⓐ 같은 주기 안:** `run()`이 중단 사실을 호출자에게 **구별 가능하게 알리지 않아**(`stats["error"] += 1`이 전부) `_run_grouped`가 차단 상태에서 다음 채널로 넘어가 계속 두드린다 — 이것은 스케줄러 이전에 **재생목록(FR24)·검색(FR34) 추출에 이미 있던 결함**이며, 사람이 보고 있으면 취소할 수 있었을 뿐이다. `stats["cancelled"]`와 같은 계열의 불리언 표식을 추가해 그룹 루프가 즉시 멈추게 한다. **ⓑ 다음 주기:** 아무 조치가 없으면 일주일 뒤 같은 조건으로 다시 들어간다. 차단은 "회복될 때까지 누적되는 압력"이므로 **성공한 주기만** 백오프를 0으로 되돌리고, 실패는 1→2→4주기로 물러선다(상한 4 = **기본 주기 3일 기준 최대 12일**. 주 단위 기본이었다면 약 한 달이라 과했다 — 기본 주기 3일이 이 상한을 합리적 범위에 두는 전제다, FR37.3ⓓ). 백오프 중에도 **사용자의 수동 추출은 막지 않는다** — 사람은 상황을 보고 판단할 수 있고, 막으면 복구 수단까지 빼앗는 것이다 (FR37.9~37.10) |
 | DQ-49 | 쿠키 만료·백오프는 **상태**로 표현한다 — 기계가 사용자 설정(`enabled`)을 끄지 않는다 | "쿠키 만료 시 스케줄 정지"를 `enabled = false` 기록으로 구현하면 ⓐ 사용자가 **켜 둔 적 없는 상태**로 되돌아가 나중에 "왜 안 돌지"를 겪고 ⓑ 쿠키를 고쳐도 **누군가 다시 켜야** 하며 ⓒ 설정 파일만 봐서는 사용자 의도와 기계 개입을 구별할 수 없다. 대신 매 틱마다 `cookie_health.get_status().warning`을 **조건으로 평가**하고 `paused_reason`으로 노출한다 — FR19.3이 쿠키 갱신 시 warning을 자동 해제하므로 스케줄은 **스스로 재개**한다. 같은 원칙이 `skip_cycles`(429)와 busy 경합에도 적용된다: 전부 판정 입력이지 설정 변경이 아니다. NFR3 ⓓ로 이 원칙을 못박았다 (FR37.11·37.12). **v5.10 보강(QA F1):** 원칙을 말로만 두면 저장 경로에서 깨진다 — 주기 마감이 *주기 시작 시점 스냅샷*을 통째로 저장해 그 사이의 `enabled`·`interval_days`·`max_videos_per_cycle` 변경을 되돌려 썼다(끄기가 듣지 않고, 원복 방향이 하필 더 자주·더 많이 도는 쪽). 그래서 소유를 **코드 상수**(`USER_FIELDS`/`SCHEDULER_FIELDS`)로 못박고 기계 쪽 쓰기를 전부 `save_scheduler_state()` **재적재 후 병합**으로 돌렸다. 같은 이유로 백오프 skip은 `last_result`(직전 429 증거)를 덮지 않고 `last_skip_at`만 남긴다 |
 | DQ-50 | `run-now`는 **별도 실행 경로가 아니다** — "지금 도래시키기"로 구현한다 | 수동 트리거를 "바로 추출 시작"으로 구현하면 busy·쿠키·백오프·예산 검사를 **두 벌** 갖게 되고, 경험상 안전장치는 반드시 둘 중 한쪽에서 빠진다(무인 기능에서 그 누락은 429 차단으로 돌아온다). `request_now()`는 `last_run_at`을 간격만큼 과거로 당기고 틱 이벤트를 깨우기만 하며, 실제 실행은 평상시와 **완전히 같은 `decide_cycle` → `run_cycle`** 경로다. 부수 효과로 검증이 가능해진다 — 최소 주기가 7일이라 `run-now` 없이는 V-D21을 실행할 방법이 없다. `skip_cycles`를 소모하지 않는 것은 사용자가 상황을 보고 누른 예외 실행이기 때문이다 (FR37.15) |
+| DQ-51 | `audit`와 `doctor`를 **두 명령으로 분리**한다 — 하나로 합치기를 기각 | 성격 차이(문서 vs 데이터)가 아니라 **실행 환경이 갈린다**는 것이 결정 근거다. `audit`의 입력은 저장소 텍스트뿐이라 `output/`·Docker 볼륨·네트워크가 **없어도 완결**되고(CI 컨테이너·커밋 훅) 실측 0.3초다. `doctor`의 입력은 사용자 실데이터(`output/` 293MB·98채널)라 **마운트가 없으면 아무것도 못 한다**. 합치면 ⓐ CI에서 반드시 절반이 실패하거나 조용히 스킵되고(스킵은 "이상 없음"으로 읽힌다 — FR35.12 F-1과 같은 실패 유형) ⓑ 종료코드 하나가 "문서가 어긋났다"와 "데이터가 깨졌다"를 뒤섞어 **훅이 무엇을 막아야 하는지** 정할 수 없게 되고 ⓒ 실행 빈도가 다르다(audit = 변경마다 · doctor = 릴리스·운영 점검 시). 반대로 **모듈은 하나(`selfcheck.py`)로 둔다** — 발견 표현·심각도·예외 적용·출력·종료코드는 두 명령이 한 글자도 달라서는 안 되고, 공통 계약이 두 파일로 흩어지는 것이 곧 다음 drift다 (FR38.2) |
+| DQ-52 | 감사는 **고치지 않는다** — `--fix` 류를 만들지 않고, 종료코드로만 말한다 | 문서가 낡은 것인지 코드가 틀린 것인지는 **기계가 정할 수 없다.** spec-sync가 이미 "문서와 코드 중 어느 쪽이 진실인지 임의로 정하지 않는다"를 원칙으로 세웠고, 이번 세션에서 드러난 §6의 `loadSchedule`→`schLoad` 같은 사례도 "문서를 코드에 맞추는" 것이 정답처럼 보이지만 **반대 방향일 수도 있다**(이름을 문서가 요구한 대로 바꾸는 것이 옳을 수 있다). 잘못된 방향의 자동 수정은 정본을 오염시켜 다음 세션이 그 오염을 근거로 또 틀린다 — `tickers`가 2주간 "값이 있으니 맞겠지"로 넘어간 것과 같은 구조다. **종료코드 체계를 4단으로 나눈 것**도 같은 이유다: `0`(이상 없음)과 `3`(확인 못 함)을 같은 코드로 내는 순간 도구는 거짓말을 시작한다. 경고(`1`)를 기본 차단선에서 뺀 이유는 경고가 상시 몇 건 존재하는 것이 정상이고(실측: 미인덱싱 12편·로그 중복 24행) **상시 빨간 게이트는 꺼진 게이트**이기 때문이다 (FR38.1·38.6) |
+| DQ-53 | **정밀도 우선 + 2층 예외 모델** — 판정 불가는 침묵, 예외는 먼저 문서 안의 기존 표기로 표현하고 남는 것만 `audit_waivers.yaml` | 오탐을 내는 감사 도구는 **아무도 보지 않는다** — 그 상태는 도구가 없는 것보다 나쁘다(있다고 믿기 때문이다). `tickers`가 2주간 100% 오탐으로 방치된 메커니즘이 정확히 이것이다. 실측이 이 위험을 수치로 보여줬다: 소박한 정규식 시제품은 §6 트레이서빌리티 행을 FR 정의 행으로 착각해 **FR 중복 15건을 허위 보고**했고, §6 백틱 토큰 224개 중 **140개가 판정 대상이 아닌 잡음**(CSS 선택자·필드명·`""`)이었으며, REQUIREMENTS §8의 역사 표 때문에 **DQ 중복 6건**이 허위로 잡혔다. 그래서 ⓐ 스코프를 절 단위로 못박고 ⓑ 토큰을 분류해 판정 가능한 것만 세고 ⓒ 나머지는 "의심"으로도 올리지 않는다(FR34.3의 "판정 불가를 제외 근거로 쓰지 않는다"와 같은 원칙). **예외를 별 파일부터 만들지 않은 이유:** 의도적 예외는 이미 문서에 한국어로 적혀 있다(`(구현 없음 — 범위 명시)`·`**테스트 미구현**`·`(구현 예정)`·§9.1a 위치 열). 예외는 그것을 설명하는 문장 **옆에** 있어야 함께 갱신된다 — 별 파일로 떼면 그 파일이 또 drift한다. 2차 파일은 개념명(`Reprocessor`)처럼 1차로 표현할 수 없는 잔여만 담고, **대응 발견이 없는 waiver 자체가 경고**다(예외에 수명을 신고하게 만드는 장치) (FR38.8~38.10) |
+| DQ-54 | 번호 **"다음 값" 포인터를 손으로 들지 않는다** — 정본에서 계산해 포인터와 대조 | V-U 번호는 사람이 문서에 적어 둔 "다음 신규 번호는 V-U35" 같은 포인터로 관리됐고, 그것이 **구 V-U12/13 중복과 V-U14~16 누락의 직접 원인**이었다(2026-09-20 전면 재정렬). 같은 패턴이 pytest 기준선에서 반복됐다 — **5곳 중복 · 한 세션에 4번 어긋남**(124 낡음 → 140 vs 163 두 문서 불일치 → 180 → 185). 공통 구조는 "계산 가능한 값을 사람이 복제해 들고 있다"이며, 해법은 값을 없애는 것이 아니라(포인터는 다음 작업자에게 유용하다) **기계가 계산값과 대조**하는 것이다. V-U의 정본은 `tests/test_unit.py`의 섹션 헤더 주석이고(2026-09-20 확정), DQ의 정본은 DESIGN §10, FR의 정본은 REQUIREMENTS §3이다. 포인터가 사는 곳(DESIGN §9.1·spec-sync SKILL.md)은 **전부 검사 대상**이다 (FR38.11 `audit.vu-numbers`·`audit.next-pointers`·`audit.pytest-baseline`) |
+| DQ-55 | `doctor`는 **전수**로 돌고, ChromaDB는 **`chroma.sqlite3` 읽기 전용 sqlite 직조회**다 — 샘플링·증분과 chromadb 클라이언트를 모두 기각 | **전수:** 실측 98채널 디렉터리 워크 + state 98개 + 파일 1,980개 stat = **0.02초**, chroma 91개 조회 = **0.32초**. 293MB의 대부분은 자막 본문과 sqlite이고 점검은 본문을 **열지 않는다**(경로·크기·JSON 메타·인덱스 id만 본다). 이 비용에서 샘플링은 **놓침만 만들고 얻는 것이 없다** — 그리고 이 도구의 목적은 "드문 이상의 발견"이라 샘플링과 목적이 정면으로 충돌한다. 증분은 "직전 상태"라는 스냅샷을 요구하므로 리포트 저장소를 불러들인다(DQ-56에서 기각). **클라이언트 기각:** `KLIndexer._get_client()`는 `self.dirs["chroma"].mkdir(parents=True, exist_ok=True)`를 하고 `chromadb.PersistentClient`는 스키마를 쓴다 — 읽기 전용 점검을 평소 경로로 구현하면 **`chroma/`가 없는 6채널에 빈 디렉터리와 sqlite가 생긴다**(실측). "읽기 전용"이 선언이 아니라 코드 수준에서 깨지는 것이다. 대신 `sqlite3.connect("file:…?mode=ro", uri=True)` + `embedding_metadata`로 필요한 것(`video_id` 집합·청크 수)을 전부 얻는다(실측 91/91 성공·임베딩 6,688·0.32초). 대가는 chromadb 내부 스키마 의존이며, 그래서 **테이블·컬럼이 다르면 오류가 아니라 "검사 건너뜀(INFO)"** 이다 — 라이브러리 업그레이드가 감사 실패로 나타나면 도구가 신뢰를 잃는다 (FR38.14~38.15) |
+| DQ-56 | **자동 실행하지 않는다**(스케줄러가 부르지 않는다) + "`sub_type` 분포 급변 감지"를 기각하고 **내적 모순 감지**로 대체 | **자동 실행:** 읽기 전용이라 NFR3ⓐ(멱등·가산)보다 약한 작업이지만, 자동 실행이 의미를 가지려면 결과를 **남기고 비교하고 노출해야** 한다 — 리포트 파일·이력·알림·대시보드 UI. 그것들은 이번 범위에서 명시적으로 배제한 것들이고, 없이 자동 실행하면 아무도 읽지 않는 stdout만 쌓인다(= `note`·`tickers`가 죽어 있던 패턴의 재현). 그래서 호출 주체는 사람과 개발 하네스 게이트(§11.2)로 한정한다. NFR3의 예외는 **FR37 하나로 유지**되고 이 FR은 예외를 넓히지 않는다. **급변 감지 기각:** "분포가 갑자기 변했다"를 판정하려면 기준 스냅샷이 필요하고, 그 저장이 바로 위에서 배제한 것이다. 게다가 데이터가 시계열을 주지 않는다 — 실측 ⓐ `extract_log.csv`에 **timestamp 열이 없다**(열은 `video_id,upload_date,title,action,sub_type,status,basename`) ⓑ `members_only` 레코드는 `extracted_at`이 **빈 문자열**이고 `upload_date`가 `"00000000"`이다(8/8). 즉 멤버십 감지 고장을 시계열로 잡을 방법이 애초에 없다. **대체:** 같은 데이터 안의 **모순**을 본다 — `extract_log.csv`의 `error:` 사유를 **현행 판정 규칙(`video_access.is_members_message`)으로 재판정**해 참이면 "감지 규칙이 그 사유를 놓쳤다"는 확정적 모순이다. 기준선·스냅샷이 필요 없고 오탐이 없으며, **실제로 2026-09-09 결함의 화석 1건을 적발했다**(`error:ERROR: [youtube] aetOCkgzurM: … VIP 회원 등급 이상의 채널 회…`). 같은 발상이 `doctor.meta-fields`의 "값이 있는데 distinct 1"이다 — `tickers` 오탐(26개 전부 같은 모양)을 **필드 하드코딩 없이** 잡는다 (FR38.13·38.16) |
+| DQ-57 | 자막 교정(다음 단계)용 검사는 **자리만 열고 지금 만들지 않는다** | 교정 기능이 필요해질 검사는 짐작이 간다(죽은 규칙·오적용·stale 교정본·hold 적체). 그래도 지금 이름·스키마를 정하지 않는 이유는 이 프로젝트가 **미리 만든 것이 죽어 있던 전례를 두 번** 겪었기 때문이다: `note`는 쓰기만 하고 읽는 곳이 0이었고(FR36까지), `tickers`는 필드와 추출기가 있었는데 값이 전부 오탐이었다(FR12.2까지, 2주 방치). 대상 기능의 데이터 모양이 확정되기 전에 검사를 박으면 ⓐ 아무도 읽지 않는 죽은 검사가 되고 ⓑ 그 검사 ID가 **다시 drift 원천**이 된다(FR38.4는 공개한 ID를 바꾸지 말라고 요구한다 — 그래서 잘못 정한 이름의 비용이 크다). 열어 두는 것은 **구조뿐**이다: `DOCTOR_CHECKS` 레지스트리 + `Finding` 계약 + waiver 규약이 있으므로 교정 FR이 확정될 때 `doctor.correction-*` 계열을 **함수 1개 + 표 1행**으로 추가할 수 있고, FR38.19가 그때 요구할 것(합성 픽스처 테스트 + 실데이터 발견 건수 실측)을 미리 못박아 뒀다 (FR38.18~38.19) |
 
 ---
 
@@ -1006,10 +1132,11 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | 게이트 | 실행 주체 | 대응 검증 |
 |---|---|---|
 | 정적 | pipeline-verify ① | py_compile 전체 |
-| 단위 | pipeline-verify ② | V-U1~V-U34 (§9.1a — pytest + mock 스크립트, 네트워크 없음). V-U3은 테스트 미구현, V-U8·V-U9는 mock 스크립트, **V-U33~34는 FR37용 선점(구현 예정)** |
+| 단위 | pipeline-verify ② | V-U1~V-U36 (§9.1a — pytest + mock 스크립트, 네트워크 없음). V-U3은 테스트 미구현, V-U8·V-U9는 mock 스크립트, V-U35~36은 FR38 정합 감사·건전성 점검(구현됨) |
 | 빌드 | pipeline-verify ③ | docker build |
 | 카나리아 | pipeline-verify ④⑤ | V-D2 + 회귀(스킵 수 유지·429 없음) |
 | 인덱스/스모크 | pipeline-verify ⑥⑦ | V-D9 일부 (curl /videos·/search) |
-| 문서 정합 | spec-sync | 트레이서빌리티 불일치 0건 |
+| 문서 정합 | **`./yt.sh audit`**(FR38) + spec-sync | **종료코드 2 없음**(오류 0건) — 기준선 5곳 일치·V-U 번호 정본 대조·FR/DQ 번호·트레이서빌리티 실재·버전 헤더·CLI 명령. 경고(종료코드 1)는 사람이 판단한다. 기계 판정으로 옮기기 전에는 사람이 기억해야 했고 한 세션에 4번 어긋났다(DQ-54) |
+| 데이터 건전성 | **`./yt.sh doctor`**(FR38, 선택) | 오류 0건 + 경고 건수가 회귀 기준선(`.claude/agents/qa-verifier.md`)과 일치. 무인 운영(FR37)을 켠 뒤에는 릴리스·주기 점검 시 실행한다 |
 
 실행 모드: **서브 에이전트 오케스트레이션** (파일 기반 산출물 전달, `_workspace/`).

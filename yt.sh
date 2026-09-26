@@ -10,6 +10,11 @@
 #       ./yt.sh serve --detach   (상시 운용: -d --restart unless-stopped, FR37.18)
 #       ./yt.sh migrate-groups [--apply [--yes]] [--rollback] [--unlock] [--no-backup]
 #       ./yt.sh backfill-tickers [채널] [--apply]   (기본 dry-run, FR12.2)
+#       ./yt.sh audit [--json] [--strict] [--check ID] [--baseline "N passed / M skipped"]
+#                            (문서·코드 정합 감사 — 읽기 전용·output/ 불필요, FR38)
+#       ./yt.sh doctor [채널] [--json] [--strict] [--check ID]
+#                            (데이터 건전성 점검 — 읽기 전용 전수, FR38)
+#       종료코드: 0 이상없음 / 1 경고만 / 2 오류 / 3 점검 자체 실패
 # ─────────────────────────────────────────────────────────────
 set -e
 

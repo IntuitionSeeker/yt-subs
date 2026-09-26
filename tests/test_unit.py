@@ -1,4 +1,5 @@
 """단위 검증 — V-U1~V-U11. 외부 네트워크 불필요."""
+import os
 import re
 import sys
 import json
@@ -2651,3 +2652,843 @@ def test_start_schedule_fixed_arguments(tmp_path, monkeypatch):
     assert captured["index"] is True and captured["group_title"] is None
     assert captured["merge_categories"] is False
     assert captured["entry"]["by_channel"] == plan["by_channel"]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U35 — `audit` 검사 계약 (FR38.1~38.12, DQ-52~54)
+#
+# 합성 문서 픽스처(tmp에 REQUIREMENTS/DESIGN/CLAUDE/qa-verifier/SKILL/테스트 축소판)로
+# **양성·음성 양쪽**을 고정한다. "검사가 있다"가 아니라 "그 이상을 실제로 잡고,
+# 정상 상태를 오탐하지 않는다"를 증명해야 한다 — 시제품이 스코프 없이 냈던
+# 허위 15건(FR 중복)·6건(DQ 중복)·140건(토큰 잡음)의 회귀 시험이 여기 들어 있다.
+# ════════════════════════════════════════════════════════════════════════════
+import selfcheck
+
+_AUDIT_BASELINE = "10 passed / 1 skipped"
+
+
+def _write(path: Path, text: str):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+def _audit_fixture(tmp_path: Path) -> Path:
+    """감사가 **0건**을 내는 정상 저장소 축소판. 음성 대조군의 기준선이다."""
+    root = tmp_path / "repo"
+    _write(root / "REQUIREMENTS.md", """# REQUIREMENTS
+
+> **버전:** v1.0
+> **연계 문서:** DESIGN.md v1.0
+
+## 3. 기능 요구사항 (FR)
+
+| ID | 요구사항 | 우선순위 |
+|---|---|---|
+| FR1.1 | 가 | 필수 |
+| FR1.2 | 나 | 필수 |
+| FR2.1 | 다 | 필수 |
+
+## 4. 비기능 요구사항 (NFR)
+
+## 5. 사용자 명령어 (CLI 사양)
+
+| 명령 | 동작 | 비고 |
+|---|---|---|
+| `./yt.sh add URL` | 등록 | FR1.1 |
+| `./yt.sh audit` | 감사 | FR2.1 |
+
+## 6. 트레이서빌리티 매트릭스
+
+| FR | 구현 컴포넌트 | 출력 아티팩트 |
+|---|---|---|
+| FR1.1~1.2 | `Extractor` · `alpha.py` · `.chan-card` · `""` · `.scheduler.json` · `cp -a` | srt/ |
+| FR2.1 | `helper_fn` · `GET /ping` | (API) |
+
+## 7. 검증 방법
+
+기준선 `./yt.sh test` = **10 passed / 1 skipped**
+
+## 8. 설계 결정 사항 (확정)
+
+| ID | 결정 |
+|---|---|
+| DQ-1 | 가 |
+""")
+    _write(root / "DESIGN.md", """# DESIGN
+
+> **버전:** v1.0
+> **연계 문서:** REQUIREMENTS.md v1.0 (FR1~FR2)
+
+## 8. 실행 방법
+
+```bash
+./yt.sh add https://youtube.com/@채널
+./yt.sh audit
+```
+
+## 9. 검증 설계 (Verification Design)
+
+### 9.1 단위 검증 (V-U)
+
+> 다음 신규 번호는 **V-U3**이다.
+
+#### 9.1a 번호 부여 항목 (V-U1~V-U2)
+
+| ID | 대상 | FR·DQ | 위치 |
+|---|---|---|---|
+| V-U1 | 가 | FR1.1 | `tests/test_unit.py` §V-U1 |
+| V-U2 | 나 | FR1.2 | `mock_scan_test.py` ① (pytest 아님) |
+
+기준선: `./yt.sh test` = **10 passed / 1 skipped**
+
+#### 9.1b 번호 미부여 항목
+
+### 9.2 통합 테스트 (네트워크 필요)
+
+V-I1 등록 · V-I2 스킵
+
+### 9.3 대시보드·기능 검증 (V-D)
+
+| ID | 절차 |
+|---|---|
+| V-D1 | 가 |
+
+## 10. 설계 결정 사항
+
+| ID | 결정 | 근거 |
+|---|---|---|
+| DQ-1 | 가 | 나 |
+
+## 11. 개발 하네스
+""")
+    # CLAUDE.md — 이력 표에는 **과거 값이 정당하게** 남는다(5→8). 마지막 행 오른쪽만 본다.
+    _write(root / "CLAUDE.md", """# CLAUDE
+
+| 날짜 | 변경 내용 | 대상 | 사유 |
+|------|----------|------|------|
+| 2026-01-01 | 초기 · pytest 기준선 5→8 | 전체 | 가 |
+| 2026-01-02 | 다음 · pytest 기준선 8→**10 passed / 1 skipped** | 전체 | 나 |
+""")
+    _write(root / ".claude/agents/qa-verifier.md",
+           "단위 테스트 기준선은 **10 passed / 1 skipped**이다.\n")
+    _write(root / ".claude/skills/pipeline-verify/SKILL.md",
+           "- `./yt.sh test`(pytest **10 passed / 1 skipped**)도 병행\n")
+    _write(root / ".claude/skills/pipeline-verify/scripts/mock_scan_test.py", "# mock\n")
+    _write(root / ".claude/skills/spec-sync/SKILL.md",
+           "- 다음 번호: **V-U3** · V-I3 · **V-D2**. "
+           "DQ 다음 번호는 **DQ-2**이다\n")
+    _write(root / "tests/test_unit.py", "# ─── V-U1: 가 ───\ndef test_a(): pass\n")
+    _write(root / "main.py",
+           'sub.add_parser("add")\nsub.add_parser("audit")\n')
+    _write(root / "alpha.py", "class Extractor: pass\n\n\ndef helper_fn(): pass\n")
+    _write(root / "dashboard/server.py", '@app.get("/ping")\ndef ping(): pass\n')
+    return root
+
+
+def _audit_run(root, baseline=None, strict=False, waivers=None, only=None):
+    ctx = selfcheck.AuditContext(root=root, baseline=baseline)
+    return selfcheck.run("audit", ctx, only=only, strict=strict,
+                         waivers=waivers if waivers is not None else [])
+
+
+def _snapshot(root: Path) -> dict:
+    """전체 파일의 바이트·mtime_ns — 읽기 전용 실증용 (FR38.3)."""
+    snap = {}
+    for p in sorted(root.rglob("*")):
+        st = p.stat()
+        snap[str(p.relative_to(root))] = (p.is_dir(), st.st_size, st.st_mtime_ns)
+    return snap
+
+
+def _codes(result, check=None):
+    return sorted((f.check, f.target, f.severity) for f in result["findings"]
+                  if check is None or f.check == check)
+
+
+def test_audit_clean_fixture_is_silent(tmp_path):
+    """ⓐ음성 대조군 — 정상 저장소에서는 **0건·종료코드 0**이고 요약 1줄만 낸다."""
+    root = _audit_fixture(tmp_path)
+    r = _audit_run(root, baseline=_AUDIT_BASELINE)
+    assert r["findings"] == [], f"오탐: {_codes(r)}"
+    assert r["exit_code"] == 0
+    text = selfcheck.render_text("audit", r["findings"], r["waived"], r["checks_run"],
+                                 r["skipped"], r["elapsed"], r["exit_code"])
+    assert text.count("\n") == 0 and text.startswith("검사 8개 · 오류 0")
+
+
+def test_audit_is_read_only(tmp_path):
+    """ⓜ 실행 전후 픽스처 전체 바이트·mtime **불변**(디렉터리 생성 포함 금지, FR38.3)."""
+    root = _audit_fixture(tmp_path)
+    before = _snapshot(root)
+    _audit_run(root, baseline=_AUDIT_BASELINE)
+    assert _snapshot(root) == before
+
+
+def test_audit_pytest_baseline_catches_one_stale_place(tmp_path):
+    """ⓐ 5곳 중 1곳만 낡아도 오류 — 이 프로젝트가 한 세션에 4번 겪은 어긋남이다."""
+    root = _audit_fixture(tmp_path)
+    p = root / ".claude/agents/qa-verifier.md"
+    p.write_text(p.read_text(encoding="utf-8").replace("10 passed", "9 passed"),
+                 encoding="utf-8")
+    r = _audit_run(root, only=["audit.pytest-baseline"])
+    assert r["exit_code"] == 2
+    assert {f.severity for f in r["findings"]} == {"error"}
+    assert len(r["findings"]) == 5, "불일치한 5곳을 모두 보여준다"
+
+
+def test_audit_pytest_baseline_vs_measured(tmp_path):
+    """ⓐ `--baseline` 실측값과 다르면 오류. 같으면 조용하다."""
+    root = _audit_fixture(tmp_path)
+    r = _audit_run(root, baseline="11 passed / 1 skipped",
+                   only=["audit.pytest-baseline"])
+    assert _codes(r) == [("audit.pytest-baseline", "--baseline", "error")]
+    assert _audit_run(root, baseline=_AUDIT_BASELINE,
+                      only=["audit.pytest-baseline"])["findings"] == []
+
+
+def test_audit_pytest_baseline_ignores_claude_history(tmp_path):
+    """ⓑ `CLAUDE.md` 이력의 과거 값(5→8)은 **오탐이 되지 않는다** — 마지막 행 오른쪽만 본다."""
+    root = _audit_fixture(tmp_path)
+    claude = root / "CLAUDE.md"
+    claude.write_text(claude.read_text(encoding="utf-8") +
+                      "| 2026-01-03 | 또 · pytest 기준선 10→**12 passed / 1 skipped** | 전체 | 다 |\n",
+                      encoding="utf-8")
+    r = _audit_run(root, only=["audit.pytest-baseline"])
+    targets = [f.target for f in r["findings"]]
+    assert any("CLAUDE.md" in t for t in targets), "마지막 행이 달라지면 잡아야 한다"
+    assert all("5→8" not in str(f.evidence) for f in r["findings"])
+
+
+def test_audit_vu_numbers_ghost_and_missing(tmp_path):
+    """ⓒ 유령 V-U(문서에만)·누락 V-U(테스트에만) 각각 오류. 정본은 테스트 코드다."""
+    root = _audit_fixture(tmp_path)
+    d = root / "DESIGN.md"
+    d.write_text(d.read_text(encoding="utf-8").replace(
+        "| V-U2 | 나 | FR1.2 | `mock_scan_test.py` ① (pytest 아님) |",
+        "| V-U2 | 나 | FR1.2 | `mock_scan_test.py` ① (pytest 아님) |\n"
+        "| V-U3 | 유령 | FR2.1 | `tests/test_unit.py` §V-U3 |"), encoding="utf-8")
+    t = root / "tests/test_unit.py"
+    t.write_text(t.read_text(encoding="utf-8") + "# ─── V-U9: 코드에만 ───\n",
+                 encoding="utf-8")
+    r = _audit_run(root, only=["audit.vu-numbers"])
+    assert _codes(r) == [("audit.vu-numbers", "V-U3", "error"),
+                         ("audit.vu-numbers", "V-U9", "error")]
+
+
+def test_audit_vu_numbers_exemptions(tmp_path):
+    """ⓒ `**테스트 미구현**`(V-U3 = 정상 상태)와 **mock 위치 항목**(V-U2)은 면제된다."""
+    root = _audit_fixture(tmp_path)
+    d = root / "DESIGN.md"
+    d.write_text(d.read_text(encoding="utf-8").replace(
+        "#### 9.1b",
+        "| V-U3 | 미구현 | FR2.1 | **테스트 미구현** (검증 의도만 보존) |\n\n#### 9.1b"),
+        encoding="utf-8")
+    sync = root / ".claude/skills/spec-sync/SKILL.md"
+    sync.write_text(sync.read_text(encoding="utf-8").replace("V-U3", "V-U4"),
+                    encoding="utf-8")
+    d.write_text(d.read_text(encoding="utf-8").replace(
+        "다음 신규 번호는 **V-U3**", "다음 신규 번호는 **V-U4**"), encoding="utf-8")
+    r = _audit_run(root, only=["audit.vu-numbers", "audit.next-pointers"])
+    assert r["findings"] == [], f"정상 상태를 오탐했다: {_codes(r)}"
+    # 위치 열의 파일이 실제로 없으면 그때는 오류다
+    (root / ".claude/skills/pipeline-verify/scripts/mock_scan_test.py").unlink()
+    r = _audit_run(root, only=["audit.vu-numbers"])
+    assert _codes(r) == [("audit.vu-numbers", "V-U2", "error")]
+
+
+def test_audit_next_pointers_four_families(tmp_path):
+    """ⓓ V-U·V-I·V-D·DQ 포인터가 정본 최대값+1과 다르면 오류(손으로 든 값은 어긋난다)."""
+    root = _audit_fixture(tmp_path)
+    sync = root / ".claude/skills/spec-sync/SKILL.md"
+    sync.write_text("- 다음 번호: **V-U9** · V-I9 · **V-D9**. "
+                    "DQ 다음 번호는 **DQ-9**이다\n", encoding="utf-8")
+    r = _audit_run(root, only=["audit.next-pointers"])
+    got = {f.target.split()[-1] for f in r["findings"]}
+    assert got == {"V-U", "V-I", "V-D", "DQ"}
+    assert all(f.severity == "error" for f in r["findings"])
+    # 선점(문서 선행)은 정상 — 문서에만 있는 V-U 번호도 최대값에 포함된다
+    assert _audit_run(root, only=["audit.next-pointers"])["exit_code"] == 2
+
+
+def test_audit_fr_numbers_scope_and_duplicates(tmp_path):
+    """ⓔ 중복 = 오류 · 결번 = 경고. **§6 행이 §3 정의로 세어지지 않는다**(허위 15건 회귀)."""
+    root = _audit_fixture(tmp_path)
+    assert _audit_run(root, only=["audit.fr-numbers"])["findings"] == []
+    req = root / "REQUIREMENTS.md"
+    req.write_text(req.read_text(encoding="utf-8").replace(
+        "| FR2.1 | 다 | 필수 |", "| FR2.1 | 다 | 필수 |\n| FR2.1 | 또 다 | 필수 |\n"
+                                 "| FR2.4 | 결번 뒤 | 필수 |"), encoding="utf-8")
+    r = _audit_run(root, only=["audit.fr-numbers"])
+    assert ("audit.fr-numbers", "FR2.1", "error") in _codes(r)
+    assert ("audit.fr-numbers", "FR2.2", "warn") in _codes(r)
+    assert ("audit.fr-numbers", "FR2.3", "warn") in _codes(r)
+
+
+def test_audit_dq_numbers_excludes_requirements_history(tmp_path):
+    """ⓕ 중복 판정에서 **REQUIREMENTS §8 역사 표 제외**(허위 6건 회귀) · 미존재 참조는 오류."""
+    root = _audit_fixture(tmp_path)
+    assert _audit_run(root, only=["audit.dq-numbers"])["findings"] == []
+    req = root / "REQUIREMENTS.md"
+    req.write_text(req.read_text(encoding="utf-8").replace(
+        "| DQ-1 | 가 |", "| DQ-1 | 가 |\n| DQ-7 | §10에 없는 결정 |"), encoding="utf-8")
+    r = _audit_run(root, only=["audit.dq-numbers"])
+    assert _codes(r) == [("audit.dq-numbers", "DQ-7", "error")]
+
+
+def test_audit_traceability_token_classification(tmp_path):
+    """ⓖ 없는 파일·식별자·라우트는 오류 · **CSS 선택자·`""`·런타임 경로는 침묵**(잡음 140건 회귀)."""
+    root = _audit_fixture(tmp_path)
+    assert [f for f in _audit_run(root, only=["audit.traceability"])["findings"]
+            if f.severity == "error"] == []
+    req = root / "REQUIREMENTS.md"
+    req.write_text(req.read_text(encoding="utf-8").replace(
+        "| FR2.1 | `helper_fn` · `GET /ping` | (API) |",
+        "| FR2.1 | `helper_fn` · `GET /ping` · `ghost.py` · `noSuchFn` · `GET /nope` | (API) |"),
+        encoding="utf-8")
+    r = _audit_run(root, only=["audit.traceability"])
+    errs = sorted(f.target for f in r["findings"] if f.severity == "error")
+    assert errs == ["GET /nope", "ghost.py", "noSuchFn"], f"분류 실패: {_codes(r)}"
+
+
+def test_audit_traceability_fr_coverage_warns(tmp_path):
+    """§3에 있으나 §6에 없는 FR = **경고**(조치 방향은 사람이 정한다)."""
+    root = _audit_fixture(tmp_path)
+    req = root / "REQUIREMENTS.md"
+    req.write_text(req.read_text(encoding="utf-8").replace(
+        "| FR2.1 | 다 | 필수 |", "| FR2.1 | 다 | 필수 |\n| FR2.2 | §6에 없다 | 필수 |"),
+        encoding="utf-8")
+    r = _audit_run(root, only=["audit.traceability"])
+    assert ("audit.traceability", "FR2.2", "warn") in _codes(r)
+
+
+def test_audit_planned_marker_exempts_absence(tmp_path):
+    """ⓗ `(구현 예정)` 표기 행은 CLI·트레이서빌리티 부재를 **정보**로 낮춘다(문서 선행 = 정상)."""
+    root = _audit_fixture(tmp_path)
+    req = root / "REQUIREMENTS.md"
+    req.write_text(req.read_text(encoding="utf-8")
+                   .replace("| `./yt.sh audit` | 감사 | FR2.1 |",
+                            "| `./yt.sh audit` | 감사 | FR2.1 |\n"
+                            "| `./yt.sh doctor` | 점검 | FR2.1 **(구현 예정)** |")
+                   .replace("| FR2.1 | `helper_fn` · `GET /ping` | (API) |",
+                            "| FR2.1 | `helper_fn` · `GET /ping` · `future.py` | "
+                            "(API) **(구현 예정)** |"), encoding="utf-8")
+    r = _audit_run(root, only=["audit.cli-commands", "audit.traceability"])
+    assert r["exit_code"] == 0
+    assert ("audit.cli-commands", "doctor", "info") in _codes(r)
+    assert ("audit.traceability", "future.py", "info") in _codes(r)
+
+
+def test_audit_cli_commands_both_directions(tmp_path):
+    """문서 정본은 **§5 ∪ DESIGN §8**이다 — 한쪽만 보면 오탐이 난다. 양방향 오류."""
+    root = _audit_fixture(tmp_path)
+    # DESIGN §8에만 있는 명령은 오탐이 아니다(합집합)
+    d = root / "DESIGN.md"
+    d.write_text(d.read_text(encoding="utf-8").replace("./yt.sh audit",
+                                                       "./yt.sh audit\n./yt.sh serve"),
+                 encoding="utf-8")
+    m = root / "main.py"
+    m.write_text(m.read_text(encoding="utf-8") + 'sub.add_parser("serve")\n',
+                 encoding="utf-8")
+    assert _audit_run(root, only=["audit.cli-commands"])["findings"] == []
+    # 코드에만 있는 명령 · 문서에만 있는 명령 양쪽
+    m.write_text(m.read_text(encoding="utf-8") + 'sub.add_parser("secret")\n',
+                 encoding="utf-8")
+    d.write_text(d.read_text(encoding="utf-8").replace("./yt.sh serve",
+                                                       "./yt.sh serve\n./yt.sh ghostcmd"),
+                 encoding="utf-8")
+    r = _audit_run(root, only=["audit.cli-commands"])
+    assert _codes(r) == [("audit.cli-commands", "ghostcmd", "error"),
+                         ("audit.cli-commands", "secret", "error")]
+
+
+def test_audit_doc_version_header_sync(tmp_path):
+    """버전 헤더 3곳 ↔ `(FR1~FRn)` ↔ 실제 최대 FR."""
+    root = _audit_fixture(tmp_path)
+    assert _audit_run(root, only=["audit.doc-version"])["findings"] == []
+    d = root / "DESIGN.md"
+    d.write_text(d.read_text(encoding="utf-8")
+                 .replace("**버전:** v1.0", "**버전:** v1.1")
+                 .replace("(FR1~FR2)", "(FR1~FR9)"), encoding="utf-8")
+    r = _audit_run(root, only=["audit.doc-version"])
+    assert any(f.target == "DESIGN.md (FR1~FRn)" for f in r["findings"])
+    assert sum(1 for f in r["findings"] if "버전" in f.target) >= 2
+    assert all(f.severity == "error" for f in r["findings"])
+
+
+def test_audit_waivers_exact_match_and_wildcard(tmp_path):
+    """ⓘ 정확 일치 면제 → 종료코드 0 + `waived` 집계 · **와일드카드는 무효**(면제되지 않는다)."""
+    root = _audit_fixture(tmp_path)
+    req = root / "REQUIREMENTS.md"
+    req.write_text(req.read_text(encoding="utf-8").replace(
+        "`helper_fn`", "`helper_fn` · `Reprocessor`"), encoding="utf-8")
+    exact = [{"check": "audit.traceability", "target": "Reprocessor",
+              "reason": "개념명", "added": "2026-09-26", "expires": None, "invalid": None}]
+    r = _audit_run(root, only=["audit.traceability"], waivers=exact)
+    assert r["exit_code"] == 0 and len(r["waived"]) == 1
+    assert [f.target for f, _ in r["waived"]] == ["Reprocessor"]
+    wild = [{"check": "audit.traceability", "target": "*", "reason": "은폐",
+             "added": "2026-09-26", "expires": None,
+             "invalid": "와일드카드·정규식을 쓸 수 없다(정확 일치만)"}]
+    r = _audit_run(root, only=["audit.traceability"], waivers=wild)
+    assert r["waived"] == [], "와일드카드로 면제되면 안 된다"
+    assert ("audit.traceability", "Reprocessor", "error") in _codes(r)
+    assert any(f.check == "waiver.invalid" for f in r["findings"])
+
+
+def test_audit_waiver_stale_and_expired(tmp_path):
+    """ⓙ 대응 발견 없는 waiver = `waiver.stale` 경고 · 만료된 waiver는 원래 심각도로 돌아온다."""
+    root = _audit_fixture(tmp_path)
+    stale = [{"check": "audit.traceability", "target": "없는대상", "reason": "옛 예외",
+              "added": "2026-01-01", "expires": None, "invalid": None}]
+    r = _audit_run(root, only=["audit.traceability"], waivers=stale)
+    assert _codes(r) == [("waiver.stale", "audit.traceability/없는대상", "warn")]
+    assert r["exit_code"] == 1
+    # 만료 — `expires`는 선택 필드이며 지난 날짜면 면제하지 않는다
+    req = root / "REQUIREMENTS.md"
+    req.write_text(req.read_text(encoding="utf-8").replace(
+        "`helper_fn`", "`helper_fn` · `Reprocessor`"), encoding="utf-8")
+    expired = [{"check": "audit.traceability", "target": "Reprocessor", "reason": "개념명",
+                "added": "2026-01-01", "expires": "2026-01-02", "invalid": None}]
+    r = _audit_run(root, only=["audit.traceability"], waivers=expired)
+    assert r["waived"] == []
+    assert ("audit.traceability", "Reprocessor", "error") in _codes(r)
+
+
+def test_audit_waiver_file_parses_without_pyyaml(tmp_path, monkeypatch):
+    """실제 `audit_waivers.yaml`이 PyYAML **없이도** 읽힌다(audit은 의존성 없이 성립한다)."""
+    real = selfcheck.load_waivers()
+    assert {(w["check"], w["target"]) for w in real} >= {
+        ("audit.traceability", "Reprocessor"),
+        ("doctor.meta-fields", "tickers/all-empty")}
+    assert all(not w.get("invalid") for w in real), "정본 waiver 파일이 규약 위반이면 안 된다"
+    import builtins
+    orig = builtins.__import__
+
+    def no_yaml(name, *a, **kw):
+        if name == "yaml":
+            raise ImportError("no yaml")
+        return orig(name, *a, **kw)
+
+    monkeypatch.setattr(builtins, "__import__", no_yaml)
+    fallback = selfcheck.load_waivers()
+    assert [(w["check"], w["target"]) for w in fallback] == \
+           [(w["check"], w["target"]) for w in real]
+
+
+def test_audit_missing_document_is_exit_3(tmp_path):
+    """ⓚ 문서 부재·파싱 불가는 **3**이다 — "이상 없음"(0)이라고 말하지 않는다."""
+    root = _audit_fixture(tmp_path)
+    (root / "DESIGN.md").unlink()
+    with pytest.raises(selfcheck.CheckFailure):
+        _audit_run(root)
+    # 알 수 없는 검사 ID도 점검 실패다(조용히 건너뛰면 "이상 없음"으로 읽힌다)
+    root2 = _audit_fixture(tmp_path / "b")
+    with pytest.raises(selfcheck.CheckFailure):
+        _audit_run(root2, only=["audit.no-such-check"])
+
+
+def test_audit_json_schema_and_strict(tmp_path):
+    """ⓛ `--json` 계약 3필드 + `summary.exit_code` · ⓖ `--strict`가 경고를 실패로 승격."""
+    root = _audit_fixture(tmp_path)
+    req = root / "REQUIREMENTS.md"
+    req.write_text(req.read_text(encoding="utf-8").replace(
+        "| FR2.1 | 다 | 필수 |", "| FR2.1 | 다 | 필수 |\n| FR2.2 | §6에 없다 | 필수 |"),
+        encoding="utf-8")
+    r = _audit_run(root, only=["audit.traceability"])
+    assert r["exit_code"] == 1
+    payload = json.loads(selfcheck.render_json(
+        "audit", r["findings"], r["waived"], r["checks_run"], r["skipped"],
+        r["elapsed"], r["exit_code"], stale=r["stale"]))
+    assert payload["command"] == "audit"
+    assert payload["summary"]["exit_code"] == 1
+    assert payload["checks_run"] == ["audit.traceability"]
+    for item in payload["findings"]:
+        assert {"check", "target", "severity"} <= set(item)
+    # 사람용 출력과 **같은 발견 집합**이어야 한다(형식만 다르다)
+    assert len(payload["findings"]) == len(r["findings"])
+    rs = _audit_run(root, only=["audit.traceability"], strict=True)
+    assert rs["exit_code"] == 2 and len(rs["findings"]) == len(r["findings"])
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U36 — `doctor` 검사 계약 (FR38.13~38.15, DQ-55~56)
+#
+# 합성 `output/` 픽스처(채널 2개·그룹 1개·state·txt·meta·extract_log·가짜 chroma.sqlite3).
+# **실데이터는 절대 건드리지 않는다** — `_isolate`로 config 경로를 tmp에 묶고,
+# 실행 전후 픽스처 바이트·mtime 불변을 함께 고정한다(FR38.3 · DQ-55의 `mkdir` 부작용 금지).
+# ════════════════════════════════════════════════════════════════════════════
+def _fake_chroma(chroma_dir: Path, video_ids, *, broken=False):
+    """`chroma.sqlite3` 축소판. chromadb를 쓰지 않고 우리가 읽는 스키마만 만든다."""
+    import sqlite3 as _sq
+    chroma_dir.mkdir(parents=True, exist_ok=True)
+    con = _sq.connect(chroma_dir / "chroma.sqlite3")
+    if broken:                      # 테이블 이름이 다르면 "건너뜀(정보)"이어야 한다
+        con.execute("CREATE TABLE other_table (a TEXT)")
+    else:
+        con.execute("CREATE TABLE IF NOT EXISTS embedding_metadata "
+                    "(id INTEGER, key TEXT, string_value TEXT)")
+        for i, vid in enumerate(video_ids):
+            con.execute("INSERT INTO embedding_metadata VALUES (?,?,?)", (i, "video_id", vid))
+    con.commit()
+    con.close()
+
+
+def _mkvideo(cd: Path, vid, base, *, upload="20260101", duration=100, sub_type="auto",
+             extra=None):
+    for sub in ("txt", "meta", "srt", "desc"):
+        (cd / sub).mkdir(parents=True, exist_ok=True)
+    (cd / "txt" / f"{base}.txt").write_text("본문", encoding="utf-8")
+    # `tickers: []`·`modified_date: None`은 실데이터의 모양이다(전 코퍼스가 빈 값) —
+    # `meta-fields` ⓐ가 그것을 잡고 waiver가 침묵시키는 경로를 함께 고정한다
+    meta = {"id": vid, "title": base, "upload_date": upload, "duration": duration,
+            "sub_type": sub_type, "content_type": "video", "tickers": [],
+            "modified_date": None}
+    meta.update(extra or {})
+    (cd / "meta" / f"{base}.json").write_text(json.dumps(meta, ensure_ascii=False),
+                                              encoding="utf-8")
+    return {"upload_date": upload, "modified_date": None, "sub_type": sub_type,
+            "extracted_at": "2026-09-01T00:00:00", "basename": base}
+
+
+def _write_log(cd: Path, rows, *, header=None, bom=True, mid_bom=False):
+    cols = header or ["video_id", "upload_date", "title", "action", "sub_type",
+                      "status", "basename"]
+    body = ",".join(cols) + "\n" + "".join(",".join(r) + "\n" for r in rows)
+    data = ("﻿" if bom else "") + body
+    raw = data.encode("utf-8")
+    if mid_bom:
+        raw = raw + "﻿".encode("utf-8") + b"x,y,z,w,v,u,t\n"
+    (cd / "extract_log.csv").write_bytes(raw)
+
+
+def _doctor_fixture(tmp_path, monkeypatch):
+    """발견 **0건**인 정상 `output/`. 모든 음성 대조군의 기준선이다."""
+    out = _isolate(tmp_path, monkeypatch)
+    import cookie_health
+    monkeypatch.setattr(config, "COOKIE_FILE", tmp_path / "cookies.txt")
+    monkeypatch.setattr(config, "FIREFOX_PROFILE", tmp_path / "ff")
+    monkeypatch.setattr(cookie_health, "STATUS_FILE", out / ".cookie_status.json")
+
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@ch1")
+    reg.add("https://youtube.com/@ch2")
+    reg.set_group("ch2", "G1")
+
+    ch1 = out / "ch1"
+    st1 = {"v1": _mkvideo(ch1, "v1", "20260101_가"),
+           "v2": _mkvideo(ch1, "v2", "20260102_나", upload="20260102", duration=200)}
+    (ch1 / "state.json").write_text(json.dumps(st1, ensure_ascii=False), encoding="utf-8")
+    _write_log(ch1, [["v1", "20260101", "가", "new", "auto", "ok", "20260101_가"],
+                     ["v2", "20260102", "나", "new", "auto", "ok", "20260102_나"]])
+    _fake_chroma(ch1 / "chroma", ["v1", "v2"])
+
+    ch2 = out / "G1" / "ch2"
+    st2 = {"v3": _mkvideo(ch2, "v3", "20260103_다", upload="20260103", duration=300),
+           "v4": _mkvideo(ch2, "v4", "20260104_라", upload="20260104", duration=400,
+                          sub_type="manual")}
+    (ch2 / "state.json").write_text(json.dumps(st2, ensure_ascii=False), encoding="utf-8")
+    _write_log(ch2, [["v3", "20260103", "다", "new", "auto", "ok", "20260103_다"]])
+    _fake_chroma(ch2 / "chroma", ["v3", "v4"])
+    return out
+
+
+_TICKER_WAIVER = [{"check": "doctor.meta-fields", "target": "tickers/all-empty",
+                   "reason": "DQ-43", "added": "2026-09-26", "expires": None,
+                   "invalid": None},
+                  {"check": "doctor.meta-fields", "target": "modified_date/all-empty",
+                   "reason": "FR2.6", "added": "2026-09-26", "expires": None,
+                   "invalid": None}]
+
+
+def _doctor_run(only=None, channel=None, strict=False, now=None, waivers=None,
+                grace=7):
+    ctx = selfcheck.DoctorContext(channel=channel, now=now, cookie_grace_days=grace)
+    return selfcheck.run("doctor", ctx, only=only, strict=strict,
+                         waivers=_TICKER_WAIVER if waivers is None else waivers)
+
+
+def test_doctor_clean_fixture_is_silent(tmp_path, monkeypatch):
+    """음성 대조군 — 정상 `output/`에서는 0건·종료코드 0(waiver 2건은 세어서 노출)."""
+    _doctor_fixture(tmp_path, monkeypatch)
+    r = _doctor_run()
+    assert r["findings"] == [], f"오탐: {_codes(r)}"
+    assert r["exit_code"] == 0 and len(r["waived"]) == 2
+
+
+def test_doctor_is_read_only(tmp_path, monkeypatch):
+    """ⓝ 실행 전후 픽스처 전체 바이트·mtime 불변 · **디렉터리도 만들지 않는다**.
+
+    `chroma/`를 `chromadb.PersistentClient`나 `KLIndexer`로 열면 이 시험이 깨진다
+    (`_get_client()`가 `mkdir(parents=True, exist_ok=True)`를 한다 — DQ-55).
+    """
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    ch3 = out / "G1" / "ch3-no-chroma"        # chroma/가 없는 채널 (실측 6채널의 모양)
+    (ch3 / "txt").mkdir(parents=True)
+    (ch3 / "state.json").write_text("{}", encoding="utf-8")
+    before = _snapshot(out)
+    _doctor_run()
+    after = _snapshot(out)
+    assert after == before, "읽기 전용 위반"
+    assert not (ch3 / "chroma").exists(), "chroma/ 디렉터리를 만들면 안 된다"
+
+
+def test_doctor_state_files_both_directions(tmp_path, monkeypatch):
+    """ⓐ 레코드 있고 txt 없음 / txt 있고 레코드 없음 — **양방향 오류**."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    (out / "ch1" / "txt" / "20260101_가.txt").unlink()
+    (out / "ch1" / "txt" / "떠돌이.txt").write_text("x", encoding="utf-8")
+    r = _doctor_run(only=["doctor.state-files"])
+    assert _codes(r) == [("doctor.state-files", "ch1/txt/떠돌이", "error"),
+                         ("doctor.state-files", "ch1/v1", "error")]
+    assert r["exit_code"] == 2
+
+
+def test_doctor_basename_collision(tmp_path, monkeypatch):
+    """ⓑ 같은 basename을 두 video_id가 쓰면 srt·txt·meta가 조용히 덮어써진다 → 오류."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    st = json.loads((out / "ch1" / "state.json").read_text(encoding="utf-8"))
+    st["v2"]["basename"] = st["v1"]["basename"]
+    (out / "ch1" / "state.json").write_text(json.dumps(st, ensure_ascii=False),
+                                            encoding="utf-8")
+    r = _doctor_run(only=["doctor.basename-collision"])
+    assert _codes(r) == [("doctor.basename-collision", "ch1/20260101_가", "error")]
+
+
+def test_doctor_orphan_dirs_and_unextracted(tmp_path, monkeypatch):
+    """ⓒ 미등록 채널형 폴더 = 경고(지울지 등록할지는 사람) · 등록됐지만 미추출 = 정보."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    (out / "G1" / "잔존채널" / "srt").mkdir(parents=True)
+    ChannelRegistry().add("https://youtube.com/@ch9")
+    r = _doctor_run(only=["doctor.orphan-dirs", "doctor.registry-paths"])
+    assert ("doctor.orphan-dirs", "output/G1/잔존채널", "warn") in _codes(r)
+    assert ("doctor.registry-paths", "ch9", "info") in _codes(r)
+    assert r["exit_code"] == 1, "미등록 폴더는 경고 상한이다"
+
+
+def test_doctor_registry_paths_flat_leftover_is_error(tmp_path, monkeypatch):
+    """ⓓ 그룹 지정 채널이 평면 위치에 남아 있으면 **오류** — 대시보드에 빈 채널로 보이고
+    전량 재추출로 이어진 FR35 런북의 사고다."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    shutil.move(str(out / "G1" / "ch2"), str(out / "ch2"))
+    r = _doctor_run(only=["doctor.registry-paths"])
+    assert _codes(r) == [("doctor.registry-paths", "ch2", "error")]
+    assert r["findings"][0].evidence["기대"] == "G1/ch2"
+
+
+def test_doctor_index_coverage_missing_and_orphan(tmp_path, monkeypatch):
+    """ⓔ 자막이 chroma에 없으면 경고(자막은 있으니 **검색에서만 조용히 빠진다**) ·
+    인덱스에만 있어도 경고."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    shutil.rmtree(out / "ch1" / "chroma")                    # chroma/ 자체가 없는 채널
+    _fake_chroma(out / "G1" / "ch2" / "chroma", ["v3", "v4", "유령"])
+    r = _doctor_run(only=["doctor.index-coverage"])
+    codes = _codes(r)
+    assert ("doctor.index-coverage", "ch1", "warn") in codes
+    assert ("doctor.index-coverage", "ch2/index-orphan", "warn") in codes
+    ev = [f.evidence for f in r["findings"] if f.target == "ch1"][0]
+    assert ev == {"subtitled": 2, "indexed": 0, "missing": 2, "ids": "v1,v2"}
+    assert "chroma/ 미생성" in [f.message for f in r["findings"] if f.target == "ch1"][0]
+
+
+def test_doctor_index_coverage_schema_mismatch_is_skip(tmp_path, monkeypatch):
+    """ⓕ `embedding_metadata`가 없으면 **오류가 아니라 건너뜀(정보)** 이고 파일을 만들지 않는다
+    — 라이브러리 업그레이드가 감사 실패로 나타나면 도구가 신뢰를 잃는다(DQ-55)."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    shutil.rmtree(out / "ch1" / "chroma")
+    _fake_chroma(out / "ch1" / "chroma", [], broken=True)
+    before = _snapshot(out)
+    r = _doctor_run(only=["doctor.index-coverage"])
+    assert _codes(r) == [("doctor.index-coverage", "ch1", "info")]
+    assert r["exit_code"] == 0
+    assert r["skipped"] and r["skipped"][0]["check"] == "doctor.index-coverage"
+    assert _snapshot(out) == before
+
+
+def test_doctor_extract_log_hygiene(tmp_path, monkeypatch):
+    """ⓖ 완전 동일 행 = 경고 · **선두 BOM은 정상 파싱하고 침묵** · 열 수 불일치 = 오류."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    row = ["v1", "20260101", "가", "new", "auto", "ok", "20260101_가"]
+    _write_log(out / "ch1", [row, row, row], bom=True)       # BOM + 중복 2건
+    r = _doctor_run(only=["doctor.extract-log"])
+    assert _codes(r) == [("doctor.extract-log", "ch1/duplicate-rows", "warn")], \
+        "선두 BOM(utf-8-sig)은 extractor가 의도적으로 쓴다 — 경고로 올리면 98/98 파일이 시끄럽다"
+    assert r["findings"][0].evidence["duplicate_rows"] == 2
+    # 열 수 불일치·헤더 손상은 오류
+    _write_log(out / "ch1", [row[:3]], header=["a", "b", "c", "d", "e", "f", "g"])
+    r = _doctor_run(only=["doctor.extract-log"])
+    sev = {f.target: f.severity for f in r["findings"]}
+    assert sev["ch1/header"] == "error" and sev["ch1/columns"] == "error"
+
+
+def test_doctor_extract_log_mid_file_bom_is_warn(tmp_path, monkeypatch):
+    """중간 BOM(append 경로 손상)만 경고다 — 정상과 이상을 구분한다."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    _write_log(out / "ch1", [["v1", "20260101", "가", "new", "auto", "ok", "20260101_가"]],
+               bom=True, mid_bom=True)
+    r = _doctor_run(only=["doctor.extract-log"])
+    assert ("doctor.extract-log", "ch1/bom", "warn") in _codes(r)
+
+
+def test_doctor_detector_fossils_reappraises_reasons(tmp_path, monkeypatch):
+    """ⓗ 한국어·영어 멤버십 문구 양쪽이 오류 · `429`는 정보 · **무관한 오류 사유는 침묵**.
+
+    시계열이 아니라 **같은 데이터 안의 모순**을 본다(로그에 timestamp 열이 없고
+    `members_only` 레코드의 `extracted_at`이 비어 있다 — DQ-56).
+    """
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    ko = "ERROR: [youtube] aetOCkgzurM: 이 동영상은 변곡점주식VIP 회원 등급 이상의 채널 회"
+    en = "ERROR: [youtube] xx: Join this channel to get access to members-only content"
+    _write_log(out / "ch1", [
+        ["aetOCkgzurM", "0", "화석ko", "new", "none", "error:" + ko, ""],
+        ["xx", "0", "화석en", "new", "none", "error:" + en, ""],
+        ["yy", "0", "차단", "new", "none", "error:HTTP Error 429: Too Many Requests", ""],
+        ["zz", "0", "무관", "new", "none", "error:ERROR: unable to download webpage", ""],
+    ])
+    r = _doctor_run(only=["doctor.detector-fossils"])
+    codes = _codes(r)
+    assert ("doctor.detector-fossils", "ch1/aetOCkgzurM", "error") in codes
+    assert ("doctor.detector-fossils", "ch1/xx", "error") in codes
+    assert ("doctor.detector-fossils", "error:429", "info") in codes
+    assert not any(t == "ch1/zz" for _, t, _ in codes), "멤버십과 무관한 사유는 침묵해야 한다"
+    assert [f.evidence["rows"] for f in r["findings"] if f.target == "error:429"] == [1]
+
+
+def test_doctor_meta_fields_generalized_signals(tmp_path, monkeypatch):
+    """ⓘ "값이 있는데 distinct 1"·전량 빈 값 = 경고 · 열거형 면제 · `tickers`는 waiver로 침묵."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    # 전 코퍼스가 같은 값 = 기록 경로 고장·상수 오염 신호 (필드 이름을 하드코딩하지 않는다)
+    for ch, names in ((out / "ch1", ["20260101_가", "20260102_나"]),
+                      (out / "G1" / "ch2", ["20260103_다", "20260104_라"])):
+        for n in names:
+            p = ch / "meta" / f"{n}.json"
+            d = json.loads(p.read_text(encoding="utf-8"))
+            d["uploader"] = "같은값"
+            p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    r = _doctor_run(only=["doctor.meta-fields"])
+    assert ("doctor.meta-fields", "uploader/single-value", "warn") in _codes(r)
+    # `sub_type`은 열거형이라 distinct 1이 정상 → 면제되어야 한다
+    assert not any("sub_type" in t for _, t, _ in _codes(r))
+    # `tickers` 전량 빈 값은 waiver로 침묵하고 **세어서** 노출된다
+    assert ("doctor.meta-fields", "tickers/all-empty") in \
+           {(f.check, f.target) for f, _ in r["waived"]}
+
+
+def test_doctor_meta_fields_format_contract(tmp_path, monkeypatch):
+    """ⓘ `upload_date == "00000000"`은 정보(FR2.6) · 다른 비8자리·음수 duration은 오류."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    p = out / "ch1" / "meta" / "20260101_가.json"
+    d = json.loads(p.read_text(encoding="utf-8"))
+    d["upload_date"] = "00000000"
+    p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    p2 = out / "ch1" / "meta" / "20260102_나.json"
+    d2 = json.loads(p2.read_text(encoding="utf-8"))
+    d2["upload_date"] = "2026-01-02"
+    d2["duration"] = -5
+    d2["chapters"] = [{"start": 0, "title": "가"}, {"start": 10}]
+    p2.write_text(json.dumps(d2, ensure_ascii=False), encoding="utf-8")
+    r = _doctor_run(only=["doctor.meta-fields"])
+    sev = {}
+    for f in r["findings"]:
+        sev.setdefault(f.target, []).append(f.severity)
+    assert sev["upload_date/00000000"] == ["info"]
+    assert sev["ch1/20260102_나"].count("error") == 3
+
+
+def test_doctor_scheduler_states(tmp_path, monkeypatch):
+    """ⓙ 적체·백오프 = 경고 · 열거 밖 = 오류 · **기본 상태(`enabled:false`)에서는 0건**.
+
+    열거 위반은 `load_state()`의 `_sanitize`가 조용히 교정하므로 **원본 파일**과
+    대조해야만 보인다 — 교정된 값만 보면 영원히 잡히지 않는다.
+    """
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    assert _doctor_run(only=["doctor.scheduler"])["findings"] == []
+    path = out / ".scheduler.json"
+    now = __import__("datetime").datetime(2026, 9, 26, 12, 0, 0)
+    path.write_text(json.dumps({"enabled": True, "interval_days": 5,
+                                "max_videos_per_cycle": 9999,
+                                "last_run_at": "2026-08-01T00:00:00",
+                                "skip_cycles": 2, "paused_reason": "cookie"}),
+                    encoding="utf-8")
+    r = _doctor_run(only=["doctor.scheduler"], now=now)
+    got = {f.target: f.severity for f in r["findings"]}
+    assert got == {"interval_days": "error", "max_videos_per_cycle": "error",
+                   "paused_reason": "warn", "skip_cycles": "warn",
+                   "last_run_at": "warn"}
+    # 껐으면 적체·백오프는 정상 상태다(상시 빨간 게이트는 꺼진 게이트다)
+    path.write_text(json.dumps({"enabled": False, "interval_days": 3,
+                                "last_run_at": "2026-01-01T00:00:00",
+                                "skip_cycles": 3}), encoding="utf-8")
+    assert _doctor_run(only=["doctor.scheduler"], now=now)["findings"] == []
+
+
+def test_doctor_cookie_status_uses_get_status(tmp_path, monkeypatch):
+    """ⓚ N일 방치 경고(가짜 시계) · **쿠키 갱신으로 자동 해제된 경고는 오탐이 되지 않는다**.
+
+    상태 파일의 `invalid: true`를 직접 읽으면 이미 해소된 경고를 "48일 방치"로 보고한다
+    — 실측으로 확인된 오탐이며 `cookie_health.get_status()`(FR19.3) 경유가 유일한 정답이다.
+    """
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    import cookie_health
+    now = __import__("datetime").datetime(2026, 9, 26, 12, 0, 0)
+    ck = tmp_path / "cookies.txt"
+    ck.write_text("# cookies", encoding="utf-8")
+    os.utime(ck, (1754600000, 1754600000))          # 2026-08-08 이전
+    (out / ".cookie_status.json").write_text(json.dumps(
+        {"invalid": True, "message": "no longer valid",
+         "detected_at": "2026-08-08T08:11:05"}), encoding="utf-8")
+    r = _doctor_run(only=["doctor.cookie-status"], now=now)
+    assert _codes(r) == [("doctor.cookie-status", "cookie", "warn")]
+    assert r["findings"][0].evidence["days"] == 49
+    # 유예 기간 안이면 침묵
+    assert _doctor_run(only=["doctor.cookie-status"], now=now, grace=90)["findings"] == []
+    # 쿠키를 경고 이후에 갱신 → get_status()가 자동 해제 → **0건**
+    os.utime(ck, None)
+    assert _doctor_run(only=["doctor.cookie-status"], now=now)["findings"] == []
+
+
+def test_doctor_channel_scope_and_missing_output(tmp_path, monkeypatch):
+    """ⓜ 채널 인자로 범위 한정 · ⓛ `output/` 부재·미등록 채널은 **종료코드 3**."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    shutil.rmtree(out / "ch1" / "chroma")
+    assert [f.target for f in _doctor_run(only=["doctor.index-coverage"])["findings"]] == ["ch1"]
+    r = _doctor_run(only=["doctor.index-coverage"], channel="ch2")
+    assert r["findings"] == [], "다른 채널의 이상은 범위 밖이다"
+    with pytest.raises(selfcheck.CheckFailure):
+        _doctor_run(channel="없는채널")
+    shutil.rmtree(out)
+    with pytest.raises(selfcheck.CheckFailure):
+        _doctor_run()
+
+
+def test_doctor_registry_and_state_parse_failure_is_exit_3(tmp_path, monkeypatch):
+    """손상된 `state.json`은 **확인 못 함(3)** 이다 — 0건("이상 없음")으로 넘기지 않는다."""
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    (out / "ch1" / "state.json").write_text("{깨진 JSON", encoding="utf-8")
+    with pytest.raises(selfcheck.CheckFailure):
+        _doctor_run()
+
+
+def test_doctor_channel_scope_skips_corpus_signal(tmp_path, monkeypatch):
+    """채널 1개 범위에서는 `meta-fields` **코퍼스 신호를 건너뛴다**(채널 안의 균일함은 정상).
+
+    실측 회귀: `./yt.sh doctor 호두감자`가 `categories/single-value`·`tags/all-empty`를
+    오탐 2건으로 냈다 — 한 채널의 58편이 같은 카테고리인 것은 정상이다.
+    건너뛴 검사의 waiver는 **stale로 올리지 않는다**(돌지 않은 검사로 예외를 썩었다고 하면 그것도 오탐).
+    """
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    for ch, names in ((out / "ch1", ["20260101_가", "20260102_나"]),
+                      (out / "G1" / "ch2", ["20260103_다", "20260104_라"])):
+        for base in names:
+            p = ch / "meta" / f"{base}.json"
+            d = json.loads(p.read_text(encoding="utf-8"))
+            d["categories"] = ["주식"]                  # 채널 안에서 균일 = 정상
+            p.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+    full = _doctor_run(only=["doctor.meta-fields"])
+    assert any(f.target == "categories/single-value" for f in full["findings"]), \
+        "채널을 가로지르면 신호가 살아 있어야 한다"
+    one = _doctor_run(only=["doctor.meta-fields"], channel="ch1")
+    assert [f.target for f in one["findings"]] == [selfcheck.WHOLE_CHECK]
+    assert one["findings"][0].severity == "info" and one["exit_code"] == 0
+    assert one["skipped"] and one["skipped"][0]["target"] == selfcheck.WHOLE_CHECK
+    assert not any(f.check == "waiver.stale" for f in one["findings"])

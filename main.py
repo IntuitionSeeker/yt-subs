@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
-"""CLI 진입점 — add / run / review / reextract / index / list / remove / ask / summarize / serve / backfill-tickers."""
+"""CLI 진입점 — add / run / review / reextract / index / list / remove / ask / summarize / serve / backfill-tickers / audit / doctor."""
 import sys
 import argparse
 import logging
 
 import config
-from channel_registry import ChannelRegistry
+
+# `channel_registry`는 **지연 임포트**다 — 이 모듈은 PyYAML이 없는 환경에서도
+# `audit`이 돌아야 한다(FR38.12: output/·Docker·네트워크·pytest 없이 순수 텍스트로 완결).
+# 최상단에서 import하면 yaml 부재만으로 CLI 진입 자체가 죽는다.
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("main")
@@ -14,6 +17,7 @@ log = logging.getLogger("main")
 def cmd_add(args):
     """채널 등록 + 전체 자막 추출 자동 시작. FR7.2"""
     from extractor import Extractor
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     existed = reg.resolve_name(args.url) in reg.names()      # FR7.7 upsert 판정
     name = reg.add(args.url, lang=args.lang)
@@ -24,7 +28,7 @@ def cmd_add(args):
     Extractor(reg.get(name)).run()
 
 
-def bulk_targets(reg: ChannelRegistry, channel: str = None) -> list:
+def bulk_targets(reg, channel: str = None) -> list:
     """
     일괄 명령(run·transcribe)의 대상 채널 산출. FR34.7 (DQ-25)
 
@@ -38,6 +42,7 @@ def bulk_targets(reg: ChannelRegistry, channel: str = None) -> list:
 def cmd_run(args):
     """전체 또는 특정 채널 업데이트. FR7.3"""
     from extractor import Extractor
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     targets = bulk_targets(reg, args.channel)
     if not targets:
@@ -50,6 +55,7 @@ def cmd_run(args):
 def cmd_transcribe(args):
     """무자막(sub_type=none) 영상 Whisper 전사. FR30.1"""
     from transcriber import Transcriber
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     targets = bulk_targets(reg, args.channel)
     if not targets:
@@ -62,6 +68,7 @@ def cmd_transcribe(args):
 def cmd_review(args):
     """품질 검토. FR4"""
     from quality_checker import QualityChecker
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     targets = [args.channel] if args.channel else reg.names()
     for name in targets:
@@ -74,6 +81,7 @@ def cmd_reextract(args):
     from quality_checker import QualityChecker
     from state_manager import StateManager
     import json
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     targets = [args.channel] if args.channel else reg.names()
     for name in targets:
@@ -99,6 +107,7 @@ def cmd_reextract(args):
 def cmd_index(args):
     """KL 인덱싱. FR6"""
     from kl_indexer import KLIndexer
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     targets = [args.channel] if args.channel else reg.names()
     for name in targets:
@@ -107,6 +116,7 @@ def cmd_index(args):
 
 def cmd_list(args):
     """채널 목록. FR7.5"""
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     chans = reg.list()
     if not chans:
@@ -120,6 +130,7 @@ def cmd_list(args):
 
 def cmd_remove(args):
     """채널 삭제. FR7.5"""
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     if reg.remove(args.channel):
         log.info(f"✅ 삭제: {args.channel} (출력 폴더는 수동 삭제 필요)")
@@ -216,6 +227,7 @@ def cmd_migrate_groups(args):
             log.info("   되돌릴 저널이 더 남아 있습니다 — 한 번 더 `--rollback` 하세요.")
         return
 
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     plan = folder_ops.plan_migration(reg)
     log.info(f"▢ 이동 예정 {len(plan['moves'])}건 · 유지 {len(plan['skipped'])}건 "
@@ -268,6 +280,7 @@ def cmd_backfill_tickers(args):
     제목·태그(meta) + 설명(desc/*.txt)만 쓰므로 재추출이 필요 없다.
     """
     from meta_collector import backfill_tickers
+    from channel_registry import ChannelRegistry
     reg = ChannelRegistry()
     targets = [args.channel] if args.channel else reg.names()
     if not targets:
@@ -290,6 +303,49 @@ def cmd_backfill_tickers(args):
     if not args.apply:
         log.info("※ dry-run입니다. 아무것도 쓰지 않았습니다. "
                  "실제 반영은 `./yt.sh backfill-tickers --apply`")
+
+
+def _selfcheck(command, args):
+    """
+    `audit`·`doctor` 공통 실행부. FR38.4~38.6
+
+    **고치지 않는다** — 발견을 출력하고 종료코드로만 말한다(FR38.1). 종료코드는
+    0 이상없음 / 1 경고만 / 2 오류 / **3 점검 자체 실패**이며, 3을 분리하는 이유는
+    "이상 없음"과 "확인 못 함"을 같은 코드로 내면 도구가 거짓말을 하기 때문이다.
+    """
+    import selfcheck
+    import datetime
+    started = datetime.datetime.now()          # 입력 적재부터 재야 성능 상한 감시가 된다
+    try:
+        if command == "audit":
+            ctx = selfcheck.AuditContext(baseline=getattr(args, "baseline", None))
+        else:
+            ctx = selfcheck.DoctorContext(channel=getattr(args, "channel", None))
+        result = selfcheck.run(command, ctx, only=args.check, strict=args.strict,
+                               started=started)
+    except selfcheck.CheckFailure as exc:
+        print(f"[!] 점검 실패 — {exc}")
+        sys.exit(3)
+    if args.json:
+        print(selfcheck.render_json(command, result["findings"], result["waived"],
+                                    result["checks_run"], result["skipped"],
+                                    result["elapsed"], result["exit_code"],
+                                    stale=result["stale"]))
+    else:
+        print(selfcheck.render_text(command, result["findings"], result["waived"],
+                                    result["checks_run"], result["skipped"],
+                                    result["elapsed"], result["exit_code"]))
+    sys.exit(result["exit_code"])
+
+
+def cmd_audit(args):
+    """문서·코드 정합 감사 — `output/`·네트워크 없이 완결. FR38.11~38.12"""
+    _selfcheck("audit", args)
+
+
+def cmd_doctor(args):
+    """데이터 건전성 점검 — `output/` 전수, 읽기 전용. FR38.13~38.15"""
+    _selfcheck("doctor", args)
 
 
 def cmd_test(args):
@@ -374,6 +430,21 @@ def build_parser():
     sp.add_argument("channel", nargs="?")
     sp.add_argument("--apply", action="store_true", help="실제 파일 쓰기")
     sp.set_defaults(func=cmd_backfill_tickers)
+
+    # FR38 — 읽기 전용 점검 2종. `--fix` 류는 만들지 않는다(FR38.1·DQ-52)
+    sp = sub.add_parser("audit", help="문서·코드 정합 감사 (읽기 전용, FR38)")
+    sp.add_argument("--json", action="store_true", help="기계 판독 출력")
+    sp.add_argument("--strict", action="store_true", help="경고도 실패로 취급")
+    sp.add_argument("--check", action="append", help="검사ID 지정 (반복 가능)")
+    sp.add_argument("--baseline", help='pytest 실측값 대조 (예: "185 passed / 1 skipped")')
+    sp.set_defaults(func=cmd_audit)
+
+    sp = sub.add_parser("doctor", help="데이터 건전성 점검 (읽기 전용 전수, FR38)")
+    sp.add_argument("channel", nargs="?", help="지정 시 해당 채널만")
+    sp.add_argument("--json", action="store_true", help="기계 판독 출력")
+    sp.add_argument("--strict", action="store_true", help="경고도 실패로 취급")
+    sp.add_argument("--check", action="append", help="검사ID 지정 (반복 가능)")
+    sp.set_defaults(func=cmd_doctor)
 
     sp = sub.add_parser("test", help="검증 실행")
     sp.add_argument("--integration", action="store_true"); sp.set_defaults(func=cmd_test)

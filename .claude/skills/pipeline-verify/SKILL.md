@@ -7,11 +7,18 @@ description: yt-subs 변경 사항의 검증 런북. "검증해줘", "테스트"
 
 DESIGN §9의 V-U/V-D 게이트를 실행 가능한 순서로 배열한 런북. **앞 게이트가 실패하면 뒤로 가지 않는다** — 네트워크·빌드 비용이 큰 게이트일수록 뒤에 있다.
 
-## ① 정적 (V-D1 일부)
+## ① 정적 + 문서 정합 (V-D1 일부 · FR38)
 
 ```bash
 python3 -m py_compile *.py dashboard/*.py 2>/dev/null || python3 -m py_compile *.py dashboard/server.py
+python3 main.py audit          # 문서·코드 정합 8검사 (output/·Docker·PyYAML 불필요, 1초 이내)
 ```
+
+- `audit`의 **오류(종료코드 2)는 보고하고 계속 진행**한다 — 문서 어긋남이 코드 검증을 막을 이유는 없다.
+  단 커밋 전에는 반드시 해소한다(DESIGN §11.2 "문서 정합" 행의 합격 기준 = 종료코드 2 없음)
+- 경고(종료코드 1)는 상시 몇 건이 정상이다. 현행 기준선 = **경고 9건**(§6 미수록 FR) · **오류 0**
+- pytest 기준선을 바꿨으면 `python3 main.py audit --baseline "<실측값>"`으로 5곳 동기화까지 확인한다
+- `audit`은 **고치지 않는다**. 발견은 사람이 방향을 정한다(FR38.1·DQ-52)
 
 ## ② mock 단위 (V-U8·V-U9 + 번호 미부여 mock 케이스 — 네트워크·Docker 불필요)
 
@@ -22,7 +29,7 @@ python3 .claude/skills/pipeline-verify/scripts/mock_jobs_test.py   # 대시보�
 
 - 호스트에 yt_dlp가 없으므로 스크립트가 `sys.modules` 스텁을 사용한다. 새 로직을 추가했으면 **해당 스크립트에 케이스를 추가**한 뒤 실행하라 — 케이스 추가 없이 통과를 선언하지 않는다
 - `mock_jobs_test.py`의 필터 순서 차분 대조(프론트 `applyFilters` 참조 구현과 랜덤 입력 비교)는 V-D11의 전제다. 필터 로직을 건드렸으면 반드시 이 케이스가 통과해야 한다
-- Docker가 가능하면 `./yt.sh test`(pytest **185 passed / 1 skipped**, V-U1~V-U34 중 pytest 소관 전부 — 2026-09-24 기준선)도 병행
+- Docker가 가능하면 `./yt.sh test`(pytest **223 passed / 1 skipped**, V-U1~V-U36 중 pytest 소관 전부 — 2026-09-26 기준선)도 병행
 - V-U 번호↔테스트 대응은 **DESIGN §9.1a(번호 부여)·§9.1b(번호 미부여)**가 정본이며, 그 정본은 `tests/test_unit.py`의 섹션 헤더 주석이다. 새 테스트에 번호를 붙일 때는 §9.1과 테스트 주석을 **같은 커밋에서** 함께 갱신하고, 다음 번호는 **V-U35**부터 잇는다 (V-U3은 테스트 미구현 자리, V-U8·V-U9는 이 ② mock 스크립트 소관)
 
 ## ③ 빌드
@@ -48,6 +55,16 @@ docker build -t youtube-subs "$(git rev-parse --show-toplevel)"
 - 기존 추출분이 여전히 `스킵`인지 (기준선: qa-verifier.md의 회귀 기준선 수치)
 - `오류 0`, 연속 429 중단 없음
 - 새 기능 산출물 존재 (예: playlists.json 갱신, 신규 meta 필드)
+
+**데이터 건전성 점검(선택, FR38):**
+
+```bash
+./yt.sh doctor                 # 읽기 전용 전수 (10검사 · 실측 0.3초)
+```
+
+- 출력을 `.claude/agents/qa-verifier.md`의 **doctor 발견 건수 기준선**과 대조한다
+- 읽기 전용이므로 실데이터에 그대로 돌려도 된다(파일·디렉터리를 만들지 않는다 — V-U36이 고정)
+- 무인 운영(FR37)을 켠 뒤에는 릴리스·주기 점검 시 실행한다
 
 ## ⑥ 인덱스 확인
 

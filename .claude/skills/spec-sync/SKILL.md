@@ -35,7 +35,7 @@ description: yt-subs의 PRD(REQUIREMENTS.md)와 설계서(DESIGN.md) 갱신·정
 
 ```bash
 ./yt.sh audit                                  # 8검사 · 1초 이내 · output/ 불필요
-./yt.sh audit --baseline "223 passed / 1 skipped"   # pytest 실측값까지 대조
+./yt.sh audit --baseline "227 passed / 1 skipped"   # pytest 실측값까지 대조
 ```
 
 - **오류(종료코드 2)가 0건**이어야 한다. 경고(1)는 상시 몇 건이 정상이며 사람이 판단한다

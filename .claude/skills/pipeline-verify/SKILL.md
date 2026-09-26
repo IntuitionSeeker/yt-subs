@@ -29,7 +29,7 @@ python3 .claude/skills/pipeline-verify/scripts/mock_jobs_test.py   # 대시보�
 
 - 호스트에 yt_dlp가 없으므로 스크립트가 `sys.modules` 스텁을 사용한다. 새 로직을 추가했으면 **해당 스크립트에 케이스를 추가**한 뒤 실행하라 — 케이스 추가 없이 통과를 선언하지 않는다
 - `mock_jobs_test.py`의 필터 순서 차분 대조(프론트 `applyFilters` 참조 구현과 랜덤 입력 비교)는 V-D11의 전제다. 필터 로직을 건드렸으면 반드시 이 케이스가 통과해야 한다
-- Docker가 가능하면 `./yt.sh test`(pytest **223 passed / 1 skipped**, V-U1~V-U36 중 pytest 소관 전부 — 2026-09-26 기준선)도 병행
+- Docker가 가능하면 `./yt.sh test`(pytest **227 passed / 1 skipped**, V-U1~V-U36 중 pytest 소관 전부 — 2026-09-26 기준선)도 병행
 - V-U 번호↔테스트 대응은 **DESIGN §9.1a(번호 부여)·§9.1b(번호 미부여)**가 정본이며, 그 정본은 `tests/test_unit.py`의 섹션 헤더 주석이다. 새 테스트에 번호를 붙일 때는 §9.1과 테스트 주석을 **같은 커밋에서** 함께 갱신하고, 다음 번호는 **V-U35**부터 잇는다 (V-U3은 테스트 미구현 자리, V-U8·V-U9는 이 ② mock 스크립트 소관)
 
 ## ③ 빌드
@@ -62,7 +62,9 @@ docker build -t youtube-subs "$(git rev-parse --show-toplevel)"
 ./yt.sh doctor                 # 읽기 전용 전수 (10검사 · 실측 0.3초)
 ```
 
-- 출력을 `.claude/agents/qa-verifier.md`의 **doctor 발견 건수 기준선**과 대조한다
+- **기준선은 오류 0 · 경고 0 · 종료코드 0**이다(2026-09-26). 1건이라도 나오면 이번 변경이 만든 것인지 먼저 따진다 —
+  `[I]` 정보와 `예외적용`은 남아 있어도 정상이고, 상세 해석은 `.claude/agents/qa-verifier.md`의 **doctor 기준선** 항목을 본다
+  (단 `index-coverage` 경고는 추출 job이 인덱싱을 끝내기 전이면 정상이다)
 - 읽기 전용이므로 실데이터에 그대로 돌려도 된다(파일·디렉터리를 만들지 않는다 — V-U36이 고정)
 - 무인 운영(FR37)을 켠 뒤에는 릴리스·주기 점검 시 실행한다
 

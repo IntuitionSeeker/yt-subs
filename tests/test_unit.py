@@ -3306,13 +3306,14 @@ def test_doctor_index_coverage_schema_mismatch_is_skip(tmp_path, monkeypatch):
 
 
 def test_doctor_extract_log_hygiene(tmp_path, monkeypatch):
-    """ⓖ 완전 동일 행 = 경고 · **선두 BOM은 정상 파싱하고 침묵** · 열 수 불일치 = 오류."""
+    """ⓖ 완전 동일 행 = **정보**(append-only 정상) · **선두 BOM은 정상 파싱하고 침묵** · 열 수 불일치 = 오류."""
     out = _doctor_fixture(tmp_path, monkeypatch)
     row = ["v1", "20260101", "가", "new", "auto", "ok", "20260101_가"]
     _write_log(out / "ch1", [row, row, row], bom=True)       # BOM + 중복 2건
     r = _doctor_run(only=["doctor.extract-log"])
-    assert _codes(r) == [("doctor.extract-log", "ch1/duplicate-rows", "warn")], \
+    assert _codes(r) == [("doctor.extract-log", "ch1/duplicate-rows", "info")], \
         "선두 BOM(utf-8-sig)은 extractor가 의도적으로 쓴다 — 경고로 올리면 98/98 파일이 시끄럽다"
+    assert r["exit_code"] == 0, "설계상 정상인 중복이 종료코드를 올리면 상시 빨간 게이트가 된다"
     assert r["findings"][0].evidence["duplicate_rows"] == 2
     # 열 수 불일치·헤더 손상은 오류
     _write_log(out / "ch1", [row[:3]], header=["a", "b", "c", "d", "e", "f", "g"])
@@ -3492,3 +3493,129 @@ def test_doctor_channel_scope_skips_corpus_signal(tmp_path, monkeypatch):
     assert one["findings"][0].severity == "info" and one["exit_code"] == 0
     assert one["skipped"] and one["skipped"][0]["target"] == selfcheck.WHOLE_CHECK
     assert not any(f.check == "waiver.stale" for f in one["findings"])
+
+
+# ── doctor 기준선 0 유지 장치 (FR38.7 심각도 정정 · FR38.10 waiver) ──────────
+# 상시 오류·경고가 깔린 점검은 **꺼진 점검과 같다**(DQ-53 — `audit`에서 방금 없앤 그 문제).
+# 그래서 두 가지만 조정했다: ⓐ **설계상 정상**인 것(append-only 중복 행)은 정보로 내리고
+# ⓑ **해소된 과거 사건**(2026-09-24 FR13.7·DQ-38 이전의 멤버십 감지 화석)은 심각도를 그대로
+# 두고 `audit_waivers.yaml`에 **그 1건만** 등재한다.
+# 아래 4개는 그 조정이 **진짜 신호를 묻지 않는지**를 고정한다 — 특히 ⓑ에서 새 화석은
+# 여전히 오류여야 한다(규칙이 또 뚫렸다는 신호이므로 그것이 이 검사의 존재 이유다).
+_FOSSIL_KO = "ERROR: [youtube] aetOCkgzurM: 이 동영상은 변곡점주식VIP 회원 등급 이상의 채널 회"
+
+
+def _fossil_row(vid, msg):
+    return [vid, "0", "화석", "new", "none", "error:" + msg, ""]
+
+
+def _fossil_waiver(target):
+    return [{"check": "doctor.detector-fossils", "target": target,
+             "reason": "2026-09-24 FR13.7·DQ-38 이전의 화석", "added": "2026-09-26",
+             "expires": None, "invalid": None}]
+
+
+def test_doctor_extract_log_duplicate_downgrade_keeps_real_anomalies(tmp_path, monkeypatch):
+    """중복 행 **정보 강등이 다른 `extract-log` 이상을 묻지 않는다** — 양성·음성 쌍.
+
+    중복은 append-only 시도 기록의 정상 귀결이라 고칠 수단이 없다(기록을 지우는 것 말고는).
+    반면 열 수 불일치·헤더 계약 위반은 **파싱이 깨졌다**는 뜻이고, 중간 BOM은 append 경로
+    손상이다 — 전부 사람의 조치가 가능하므로 오류·경고를 유지한다.
+    """
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    row = ["v1", "20260101", "가", "new", "auto", "ok", "20260101_가"]
+    # 한 파일에 세 종류를 섞는다: 중복(정보) · 열 수 불일치(오류) · 중간 BOM(경고)
+    _write_log(out / "ch1", [row, row, row[:4]], bom=True, mid_bom=True)
+    r = _doctor_run(only=["doctor.extract-log"])
+    sev = {t: s for _, t, s in _codes(r)}
+    assert sev["ch1/duplicate-rows"] == "info", "설계상 정상인 것을 경고로 두면 영원히 사라지지 않는다"
+    assert sev["ch1/columns"] == "error" and sev["ch1/bom"] == "warn", \
+        "강등은 중복에만 적용된다 — 구조 손상까지 묻으면 검사 자체가 죽는다"
+    assert r["exit_code"] == 2
+    # 헤더 계약 위반도 그대로 오류
+    _write_log(out / "ch1", [row], header=["a", "b", "c", "d", "e", "f", "g"])
+    assert ("doctor.extract-log", "ch1/header", "error") in _codes(r := _doctor_run(
+        only=["doctor.extract-log"]))
+    assert r["exit_code"] == 2
+    # 음성 대조군 — 중복만 있으면 종료코드 0 (기준선을 빨갛게 만들지 않는다)
+    _write_log(out / "ch1", [row, row])
+    clean = _doctor_run(only=["doctor.extract-log"])
+    assert [s for _, _, s in _codes(clean)] == ["info"] and clean["exit_code"] == 0
+
+
+def test_doctor_fossil_waiver_exempts_only_the_declared_row(tmp_path, monkeypatch):
+    """**이번 작업의 핵심 회귀** — waiver는 등재된 1행만 면제하고 **새 화석은 오류다**.
+
+    심각도를 내리지 않은 이유가 여기 있다: 새 화석이 생기면 그것은 감지 규칙이 또 뚫렸다는
+    진짜 신호다(2026-09-09 사고의 재발). waiver는 `채널/video_id`까지 정확히 특정한다.
+    """
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    waiver = _fossil_waiver("ch1/aetOCkgzurM")
+    # ⓐ 등재된 화석만 있으면 → 발견 0 · 예외적용 1 · 종료코드 0
+    _write_log(out / "ch1", [_fossil_row("aetOCkgzurM", _FOSSIL_KO)])
+    r = _doctor_run(only=["doctor.detector-fossils"], waivers=waiver)
+    assert r["findings"] == [] and r["exit_code"] == 0
+    assert [(f.check, f.target) for f, _ in r["waived"]] == \
+           [("doctor.detector-fossils", "ch1/aetOCkgzurM")], "면제도 세어서 보여준다(FR38.10ⓑ)"
+    # ⓑ 같은 채널의 **새 화석**은 여전히 오류 — 한 건도 통과하지 못한다
+    new_ko = _FOSSIL_KO.replace("aetOCkgzurM", "NEWvid00000")
+    en = "ERROR: [youtube] ENvid: Join this channel to get access to members-only content"
+    _write_log(out / "ch1", [_fossil_row("aetOCkgzurM", _FOSSIL_KO),
+                             _fossil_row("NEWvid00000", new_ko),
+                             _fossil_row("ENvid", en)])
+    r = _doctor_run(only=["doctor.detector-fossils"], waivers=waiver)
+    assert _codes(r) == [("doctor.detector-fossils", "ch1/ENvid", "error"),
+                         ("doctor.detector-fossils", "ch1/NEWvid00000", "error")]
+    assert r["exit_code"] == 2 and len(r["waived"]) == 1
+    # ⓒ **같은 video_id가 다른 채널**에 나타나도 면제되지 않는다(와일드카드가 아니다)
+    _write_log(out / "G1" / "ch2", [_fossil_row("aetOCkgzurM", _FOSSIL_KO)])
+    r = _doctor_run(only=["doctor.detector-fossils"], waivers=waiver)
+    assert ("doctor.detector-fossils", "ch2/aetOCkgzurM", "error") in _codes(r)
+    # ⓓ 검사 전체를 끄는 형태(와일드카드)는 **무효**로 보고되고 면제하지 않는다
+    bad = [{"check": "doctor.detector-fossils", "target": "*", "reason": "x",
+            "added": "2026-09-26", "expires": None,
+            "invalid": "와일드카드·정규식을 쓸 수 없다(정확 일치만)"}]
+    r = _doctor_run(only=["doctor.detector-fossils"], waivers=bad)
+    codes = _codes(r)
+    assert ("waiver.invalid", "doctor.detector-fossils/*", "error") in codes
+    assert any(t == "ch1/aetOCkgzurM" for _, t, _ in codes), "무효 waiver는 아무것도 면제하지 않는다"
+
+
+def test_real_waiver_file_pins_the_known_fossil_narrowly():
+    """정본 `audit_waivers.yaml`의 화석 예외가 **넓어지지 않는지** 고정한다.
+
+    waiver는 "귀찮은 것 치우는 수단"이 아니다 — 근거(FR13.7·DQ-38·해소 날짜)를 파일에
+    남기는 것이 이 예외가 정당한 유일한 이유이고, 그 근거 문구도 함께 고정한다.
+    """
+    ws = selfcheck.load_waivers()
+    foss = [w for w in ws if w["check"] == "doctor.detector-fossils"]
+    assert len(foss) == 1, "화석 예외가 늘어나면 그것은 은폐의 시작이다 — 새 화석은 고쳐야 한다"
+    w = foss[0]
+    assert w["target"] == "변곡점주식/aetOCkgzurM", "target은 채널/영상까지 특정한다"
+    assert "*" not in w["target"] and "?" not in w["target"] and "/" in w["target"]
+    assert not w["invalid"] and w["added"]
+    for token in ("FR13.7", "DQ-38", "2026-09-24", "append-only"):
+        assert token in w["reason"], f"근거 {token}이 사라지면 다음 세션이 이유를 모른다"
+    assert all(x["target"] != selfcheck.WHOLE_CHECK for x in ws), \
+        "검사 전체를 끄는 예외는 정본에 두지 않는다"
+
+
+def test_doctor_channel_scope_does_not_stale_other_channel_waiver(tmp_path, monkeypatch):
+    """채널 한정 실행이 **다른 채널의 waiver를 stale로 오탐하지 않는다**(전수는 stale을 유지).
+
+    `doctor <채널>`은 다른 채널의 발견을 보지 못한다 — 그 상태로 "대응 발견이 없다"고 하면
+    전수 실행에서 0인 기준선이 채널 실행에서만 빨개진다(FR38.8).
+    """
+    out = _doctor_fixture(tmp_path, monkeypatch)
+    waiver = _fossil_waiver("ch2/aetOCkgzurM")
+    _write_log(out / "G1" / "ch2", [_fossil_row("aetOCkgzurM", _FOSSIL_KO)])
+    full = _doctor_run(only=["doctor.detector-fossils"], waivers=waiver)
+    assert full["findings"] == [] and len(full["waived"]) == 1 and full["exit_code"] == 0
+    one = _doctor_run(only=["doctor.detector-fossils"], channel="ch1", waivers=waiver)
+    assert not any(f.check == "waiver.stale" for f in one["findings"]), \
+        "부분 범위는 예외의 수명을 판정할 근거가 없다"
+    assert one["exit_code"] == 0
+    # 양성 대조군 — 전수 실행에서 화석이 사라지면 stale 경고가 **올라온다**(예외의 자기 신고)
+    _write_log(out / "G1" / "ch2", [["v3", "20260103", "다", "new", "auto", "ok", "20260103_다"]])
+    gone = _doctor_run(only=["doctor.detector-fossils"], waivers=waiver)
+    assert ("waiver.stale", "doctor.detector-fossils/ch2/aetOCkgzurM", "warn") in _codes(gone)

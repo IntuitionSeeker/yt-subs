@@ -1310,8 +1310,14 @@ def check_detector_fossils(ctx: DoctorContext) -> list:
 def check_extract_log(ctx: DoctorContext) -> list:
     """완전 동일 행 중복 · 헤더 열 수 불일치 · 중간 BOM.
 
-    append-only 누적은 설계 사실이므로 중복은 **경고 상한**이다. 선두 BOM은
-    `extractor.py`가 `utf-8-sig`로 의도적으로 쓰는 것이라 **정상 파싱하고 침묵**한다
+    **중복 행은 정보다**(경고가 아니다). `extract_log.csv`는 append-only 시도 기록이고
+    같은 영상을 다시 돌리면 같은 행이 또 쌓이는 것이 **설계상 정상 귀결**이다 —
+    기록을 지우는 것 말고는 해소 수단이 없으므로 경고로 두면 **영원히 사라지지 않는**
+    상시 경고가 된다(DQ-53: 상시 경고가 깔린 도구는 아무도 보지 않는다).
+    구조 손상(헤더 계약 위반·열 수 불일치 = 오류, 중간 BOM = 경고)은 **그대로 유지**한다 —
+    그것은 파싱·append 경로가 깨졌다는 뜻이고 사람의 조치가 실제로 가능하다.
+
+    선두 BOM은 `extractor.py`가 `utf-8-sig`로 의도적으로 쓰는 것이라 **정상 파싱하고 침묵**한다
     (98/98 파일에 있다 — 경고로 올리면 그것만으로 도구가 무시된다, FR38.8).
     """
     out = []
@@ -1333,8 +1339,11 @@ def check_extract_log(ctx: DoctorContext) -> list:
             counts[k] = counts.get(k, 0) + 1
         dup = sum(v - 1 for v in counts.values() if v > 1)
         if dup:
+            # 심각도 = 정보. 재실행이 같은 행을 또 남기는 것은 append-only 설계의 정상
+            # 귀결이다(위 docstring). 건수는 **세어서 보여준다** — 침묵시키지는 않는다.
             out.append(Finding("doctor.extract-log", f"{cd.name}/duplicate-rows",
-                               "완전 동일한 행이 누적돼 있다", Severity.WARN,
+                               "완전 동일한 행이 누적돼 있다(append-only 시도 기록 — 설계상 정상)",
+                               Severity.INFO,
                                {"duplicate_rows": dup, "total_rows": len(cd.log_rows)}))
         if cd.log_bom_offsets:
             out.append(Finding("doctor.extract-log", f"{cd.name}/bom",
@@ -1475,6 +1484,11 @@ def run(command: str, ctx, only=None, strict: bool = False, waivers=None, starte
         findings += produced
     if waivers is None:
         waivers = load_waivers()
+    # 부분 범위 실행(`doctor <채널>`)은 **예외의 수명을 판정할 근거가 없다** —
+    # 다른 채널의 발견을 보지 못한 채 "대응 발견이 없다"고 하면 그것이 오탐이다(FR38.8).
+    # 채널 한정 실행이 `waiver.stale` 경고를 만들면 전수 실행에서 0인 기준선이 깨진다.
+    if getattr(ctx, "only", None):
+        fully_run = set()
     kept, waived, stale = apply_waivers(findings, waivers, checks_run=fully_run)
     kept += stale
     elapsed = (datetime.datetime.now() - started).total_seconds()

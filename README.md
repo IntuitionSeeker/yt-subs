@@ -169,7 +169,7 @@ main.py (CLI)
 ## 검증
 
 ```bash
-./yt.sh test                # 단위 (223 passed / 1 skipped, 네트워크 불필요)
+./yt.sh test                # 단위 (227 passed / 1 skipped, 네트워크 불필요)
 ./yt.sh test --integration  # 통합 (V-I, 실 채널 필요)
 ./yt.sh audit               # 문서·코드 정합 감사 (읽기 전용, 1초 이내)
 ./yt.sh doctor              # 데이터 건전성 점검 (읽기 전용 전수)

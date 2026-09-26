@@ -2051,3 +2051,603 @@ def test_stale_scan_cache_targets_ghost_dir_without_invalidation(tmp_path, monke
     # 그래서 폐기가 유일한 해 — 폐기하면 이 경로에 애초에 도달하지 않는다
     mgr._scans["stale"] = {"channel": "옛이름", "created_at": 0}
     assert mgr.invalidate_scans(channel="옛이름") == 1
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U33 — 주기 자동 추출: 판정·계획·상태 파일 (FR37.1~37.16, DQ-44~50)
+#
+# 일 단위 동작을 초 단위로 검증하려면 판정이 순수 함수여야 한다 — `decide_cycle`은
+# 시계·busy·쿠키를 전부 인자로 받는다(DESIGN §2.13). 네트워크 0.
+# ════════════════════════════════════════════════════════════════════════════
+def _sched(tmp_path, monkeypatch):
+    """scheduler를 tmp로 격리 — 실 output/·channels.yaml을 절대 건드리지 않는다."""
+    out = _isolate(tmp_path, monkeypatch)
+    import scheduler
+    return out, scheduler
+
+
+def _now():
+    import datetime
+    return datetime.datetime(2026, 9, 24, 12, 0, 0)
+
+
+def _ago(days=0, minutes=0):
+    import datetime
+    return (_now() - datetime.timedelta(days=days, minutes=minutes)).isoformat(
+        timespec="seconds")
+
+
+def test_schedule_defaults_and_corrupt_state_fallback(tmp_path, monkeypatch):
+    """기본값 = 꺼짐·3일·30 (FR37.1·37.3·37.8). 손상 파일은 기본값 폴백 (FR37.13)."""
+    out, sch = _sched(tmp_path, monkeypatch)
+    st = sch.load_state()
+    assert st["enabled"] is False and st["interval_days"] == 3
+    assert st["max_videos_per_cycle"] == 30 and st["skip_cycles"] == 0
+
+    sch.state_file().write_text("{깨진 JSON", encoding="utf-8")
+    assert sch.load_state()["interval_days"] == 3, "손상 시 기본값 폴백 (죽지 않는다)"
+    sch.state_file().write_text('{"interval_days": 5, "max_videos_per_cycle": 9999}',
+                                encoding="utf-8")
+    st = sch.load_state()
+    assert st["interval_days"] == 3, "허용 집합 밖 값은 기본값으로 교정"
+    assert st["max_videos_per_cycle"] == sch.BUDGET_MAX
+
+
+def test_schedule_save_is_atomic_and_leaves_no_tmp(tmp_path, monkeypatch):
+    """`.tmp` + os.replace 원자 교체 — 임시 파일이 남지 않는다 (FR37.13)."""
+    out, sch = _sched(tmp_path, monkeypatch)
+    st = sch.load_state()
+    st["enabled"] = True
+    sch.save_state(st)
+    assert sch.state_file().exists()
+    assert not list(out.glob(".scheduler.json.tmp")), "임시 파일 잔재 없음"
+    assert sch.load_state()["enabled"] is True
+    assert "next_due_at" not in json.loads(sch.state_file().read_text()), \
+        "파생값은 저장하지 않는다"
+
+
+def test_schedule_toggle_does_not_run_immediately(tmp_path, monkeypatch):
+    """
+    `enabled`를 처음 켜면 `last_run_at`을 now로 채운다 (FR37.2·DESIGN §2.13).
+
+    비워 두면 "간격 경과"가 즉시 참이 되어 **토글하자마자 전 채널 추출**이 시작된다.
+    """
+    out, sch = _sched(tmp_path, monkeypatch)
+    view = sch.update(enabled=True)
+    assert view["enabled"] is True and view["last_run_at"], "켤 때 기준 시각을 박는다"
+    st = sch.load_state()
+    import datetime
+    action, reason, _ = sch.decide_cycle(
+        st, datetime.datetime.now(), busy=False, cookie_warning=False,
+        started_at=datetime.datetime.now() - datetime.timedelta(hours=1))
+    assert (action, reason) == ("idle", "not_due"), "토글 직후에는 돌지 않는다"
+
+
+def test_schedule_overdue_runs_once_not_per_missed_cycle(tmp_path, monkeypatch):
+    """밀린 주기는 1회만 — `last_run_at = now`(cron식 += interval 누적 금지, DQ-45)."""
+    out, sch = _sched(tmp_path, monkeypatch)
+    st = dict(sch.load_state(), enabled=True, last_run_at=_ago(days=30))
+    sch.save_state(st)          # 마감은 파일을 다시 읽는다(F1) — 사용자 설정은 파일이 정본
+    started = _now() - __import__("datetime").timedelta(hours=1)
+    action, reason, st2 = sch.decide_cycle(st, _now(), busy=False,
+                                           cookie_warning=False, started_at=started)
+    assert (action, reason) == ("run", "due")
+    st3 = sch._finish_cycle(sch._empty_result(_now(), "done"), aborted=False)
+    action2, reason2, _ = sch.decide_cycle(st3, _now(), busy=False,
+                                           cookie_warning=False, started_at=started)
+    assert action2 == "idle" and reason2 == "not_due", "30일치를 10번 돌지 않는다"
+
+
+def test_schedule_startup_grace(tmp_path, monkeypatch):
+    """기동 후 5분은 돌지 않는다 — 절전 복귀 직후 DNS 미비 (FR37.2)."""
+    out, sch = _sched(tmp_path, monkeypatch)
+    st = dict(sch.load_state(), enabled=True, last_run_at=_ago(days=10))
+    import datetime
+    action, reason, _ = sch.decide_cycle(
+        st, _now(), busy=False, cookie_warning=False,
+        started_at=_now() - datetime.timedelta(seconds=10))
+    assert (action, reason) == ("idle", "startup_grace")
+
+
+def test_schedule_busy_and_cookie_keep_last_run_at(tmp_path, monkeypatch):
+    """
+    busy·쿠키 경고는 **`last_run_at`을 갱신하지 않는다** (FR37.11·37.12).
+
+    갱신하면 사용자 작업 때문에 한 주기를 통째로 잃고, 쿠키 자가 치유도 깨진다.
+    """
+    out, sch = _sched(tmp_path, monkeypatch)
+    import datetime
+    started = _now() - datetime.timedelta(hours=1)
+    st = dict(sch.load_state(), enabled=True, last_run_at=_ago(days=10))
+
+    action, reason, st_busy = sch.decide_cycle(st, _now(), busy=True,
+                                               cookie_warning=False, started_at=started)
+    assert (action, reason) == ("idle", "busy")
+    assert st_busy["last_run_at"] == st["last_run_at"], "도래 상태 유지 → 60초 뒤 재시도"
+
+    action, reason, st_ck = sch.decide_cycle(st, _now(), busy=False,
+                                             cookie_warning=True, started_at=started)
+    assert (action, reason) == ("idle", "cookie")
+    assert st_ck["paused_reason"] == "cookie"
+    assert st_ck["last_run_at"] == st["last_run_at"], "쿠키를 고치면 다음 틱에 재개"
+    assert st_ck["enabled"] is True, "기계는 사용자 설정을 되돌려 쓰지 않는다 (DQ-49)"
+    # 쿠키가 나으면 paused_reason은 스스로 사라진다
+    action, reason, st_ok = sch.decide_cycle(st_ck, _now(), busy=False,
+                                             cookie_warning=False, started_at=started)
+    assert action == "run" and st_ok["paused_reason"] is None
+
+
+def test_schedule_backoff_is_consumed_before_cookie_and_busy(tmp_path, monkeypatch):
+    """
+    판정 순서 계약: skip_cycles 감소가 쿠키·busy보다 **먼저**다 (DESIGN §2.13).
+
+    뒤에 두면 쿠키가 만료된 기간 동안 백오프가 소모되지 않아 차단 회복 후에도 쉰다.
+    """
+    out, sch = _sched(tmp_path, monkeypatch)
+    import datetime
+    started = _now() - datetime.timedelta(hours=1)
+    st = dict(sch.load_state(), enabled=True, last_run_at=_ago(days=10), skip_cycles=2)
+    action, reason, st2 = sch.decide_cycle(st, _now(), busy=True, cookie_warning=True,
+                                           started_at=started)
+    assert (action, reason) == ("skip", "backoff")
+    assert st2["skip_cycles"] == 1
+    assert st2["last_run_at"] == sch._iso(_now()), "건너뛴 주기도 시계는 전진 (요청 0)"
+
+
+def test_schedule_backoff_resets_only_on_clean_cycle(tmp_path, monkeypatch):
+    """
+    429로 끝난 주기 → 1→2→4(상한 4). 리셋은 **429 없이 끝난 주기**에만 (FR37.10).
+
+    취소·429 중단으로 끝난 주기도 `last_run_at`은 갱신한다 (FR37.12).
+    """
+    out, sch = _sched(tmp_path, monkeypatch)
+    st = dict(sch.load_state(), enabled=True, last_run_at=_ago(days=10), skip_cycles=0)
+    sch.save_state(st)
+    for expected in (1, 2, 4, 4):
+        st = sch._finish_cycle(sch._empty_result(_now(), "aborted_429"), aborted=True)
+        assert st["skip_cycles"] == expected
+    assert st["last_run_at"], "429 중단 주기도 last_run_at 갱신 (사용자와 싸우지 않는다)"
+    assert st["enabled"] is True, "마감이 사용자 설정을 되돌려 쓰지 않는다 (DQ-49)"
+    st = sch._finish_cycle(sch._empty_result(_now(), "done"), aborted=False)
+    assert st["skip_cycles"] == 0, "'한 번 쉬었으니 괜찮다'를 가정하지 않는다 (DQ-48)"
+
+
+def test_schedule_update_validation(tmp_path, monkeypatch):
+    """`interval_days ∈ {3,7,14,28}` · 예산 1~200 — 위반은 ValueError(→400). FR37.3·37.8"""
+    out, sch = _sched(tmp_path, monkeypatch)
+    for bad in (1, 2, 5, 30, 0, -3):
+        with pytest.raises(ValueError):
+            sch.update(interval_days=bad)
+    for bad in (0, 201, -1):
+        with pytest.raises(ValueError):
+            sch.update(max_videos_per_cycle=bad)
+    view = sch.update(interval_days=7, max_videos_per_cycle=50)
+    assert view["interval_days"] == 7 and view["max_videos_per_cycle"] == 50
+    assert sch.load_state()["enabled"] is False, "검증 대상 외 필드는 건드리지 않는다"
+
+
+def test_schedule_request_now_makes_due_without_consuming_backoff(tmp_path, monkeypatch):
+    """`run-now` = 지금 도래시키기. 백오프는 그대로 둔다 (FR37.15·DQ-50)."""
+    out, sch = _sched(tmp_path, monkeypatch)
+    sch.save_state(dict(sch.load_state(), enabled=True, skip_cycles=3,
+                        last_run_at=_ago(minutes=1)))
+    view = sch.request_now()
+    assert view["skip_cycles"] == 3, "사용자가 눌러도 백오프는 소모하지 않는다"
+    import datetime
+    st = sch.load_state()
+    action, reason, st2 = sch.decide_cycle(
+        st, datetime.datetime.now(), busy=False, cookie_warning=False,
+        started_at=datetime.datetime.now() - datetime.timedelta(hours=1))
+    assert action == "skip", "도래는 했고, 안전장치(백오프)는 한 벌 그대로 탄다"
+    assert st2["skip_cycles"] == 2
+
+
+def test_schedule_build_plan_budget_cursor_and_truncated(tmp_path, monkeypatch):
+    """예산 절단 · 커서 회전(기아 방지) · RSS 15개 상한 노출 (FR37.6·37.8·DQ-47)."""
+    out, sch = _sched(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    for n in ("aa", "bb", "cc"):
+        reg.add(f"https://youtube.com/@{n}")
+    reg.add("https://youtube.com/@zz")
+    reg.set_auto_run("zz", False)                    # 검색 유입 채널은 제외 (FR37.5)
+    reg = ChannelRegistry()
+
+    new = {n: [{"id": f"{n}{i}", "title": f"{n} 영상{i}", "published": "2026-09-20"}
+               for i in range(4)] for n in ("aa", "bb", "cc")}
+    new["zz"] = [{"id": "zz0", "title": "검색 유입", "published": "2026-09-20"}]
+
+    st = dict(sch.load_state(), max_videos_per_cycle=6)
+    plan = sch.build_plan(new, st, reg)
+    assert plan["planned"] == 6, "예산 초과분은 계획 단계에서 절단"
+    assert list(plan["by_channel"]) == ["aa", "bb"]
+    assert "zz" not in plan["by_channel"], "auto_run:false 채널은 스케줄 대상이 아니다"
+    assert plan["cursor"] == "cc", "다음 주기는 담지 못한 채널부터 (기아 방지)"
+    entry = plan["by_channel"]["aa"]["entries"][0]
+    assert set(entry) == {"id", "title"}, "published를 upload_date로 넘기지 않는다"
+    view = plan["videos_view"][0]
+    assert view["members_only"] is False and view["playlists"] == []
+    assert view["content_type"] == "video" and view["channel"] == "aa"
+
+    # 다음 주기는 cursor부터 회전 → 굶주리던 cc가 먼저
+    plan2 = sch.build_plan(new, dict(st, cursor=plan["cursor"]), reg)
+    assert list(plan2["by_channel"]) == ["cc", "aa"]
+
+    # RSS 상한 도달 감지 (무시하되 노출)
+    big = {"aa": [{"id": f"x{i}", "title": "t"} for i in range(sch.RSS_FEED_LIMIT)]}
+    assert sch.build_plan(big, st, reg)["truncated"] == ["aa"]
+
+
+def test_schedule_run_cycle_no_new_makes_no_job(tmp_path, monkeypatch):
+    """새 영상 0이면 job을 만들지 않고 주기를 끝낸다 — 요청 0 (FR37.4)."""
+    out, sch = _sched(tmp_path, monkeypatch)
+    ChannelRegistry().add("https://youtube.com/@aa")
+    import rss_monitor
+    seen = {}
+
+    def fake_check(names=None):
+        seen["names"] = names
+        return {"channels": {}, "errors": {"aa": "RSS 조회 실패: timeout"}}
+
+    monkeypatch.setattr(rss_monitor, "check_new_videos", fake_check)
+
+    class NoManager:
+        def is_busy(self): return False
+        def status(self): return {}
+        def start_schedule(self, plan): raise AssertionError("job을 만들면 안 된다")
+
+    result = sch.run_cycle(NoManager(), sch.load_state())
+    assert seen["names"] == ["aa"], "대상 채널만 RSS 조회 (FR37.4)"
+    assert result["outcome"] == "no_new" and result["rss_errors"]
+    assert sch.load_state()["last_run_at"], "무동작 주기도 시계는 전진"
+
+
+def test_schedule_run_cycle_records_result_and_backoff(tmp_path, monkeypatch):
+    """주기 결과 기록 + 429면 백오프 승급, busy 경합은 삼키고 미룬다 (FR37.10·37.12)."""
+    out, sch = _sched(tmp_path, monkeypatch)
+    ChannelRegistry().add("https://youtube.com/@aa")
+    import rss_monitor
+    monkeypatch.setattr(rss_monitor, "check_new_videos",
+                        lambda names=None: {"channels": {
+                            "aa": [{"id": "v1", "title": "새 영상"}]}, "errors": {}})
+
+    class FakeManager:
+        def __init__(self, snap, busy_error=False):
+            self.snap, self.busy_error, self.plans = snap, busy_error, []
+
+        def is_busy(self): return False
+
+        def status(self): return self.snap
+
+        def start_schedule(self, plan):
+            if self.busy_error:
+                raise RuntimeError("이미 실행 중인 작업이 있습니다.")
+            self.plans.append(plan)
+            return {"job_id": "J1"}
+
+    snap = {"job_id": "J1", "status": "done", "done": 1, "aborted_429": True,
+            "stats": {"new": 0, "error": 5}}
+    st0 = dict(sch.load_state(), enabled=True)
+    result = sch.run_cycle(FakeManager(snap), st0)
+    assert result["outcome"] == "aborted_429" and result["videos_planned"] == 1
+    assert sch.load_state()["skip_cycles"] == 1, "429로 끝난 주기 → 백오프 승급"
+
+    # 점유 실패는 삼키고 last_run_at을 갱신하지 않는다 (다음 틱 재시도)
+    before = sch.load_state()
+    assert sch.run_cycle(FakeManager(snap, busy_error=True), before) is None
+    assert sch.load_state()["last_run_at"] == before["last_run_at"]
+
+
+def test_schedule_api_contract(tmp_path, monkeypatch):
+    """`GET/POST /schedule` · `POST /schedule/run-now` 응답 shape·400 (FR37.14)."""
+    pytest.importorskip("fastapi")
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv("SCHEDULER_DISABLED", "1")     # 테스트가 스레드를 띄우지 않는다
+    out, sch = _sched(tmp_path, monkeypatch)
+    import server
+    client = TestClient(server.app)
+
+    body = client.get("/schedule").json()
+    for key in ("enabled", "interval_days", "max_videos_per_cycle", "last_run_at",
+                "next_due_at", "skip_cycles", "paused_reason", "running", "last_result",
+                "last_skip_at"):
+        assert key in body, f"index.html이 읽는 필드 누락: {key}"
+    assert body["enabled"] is False and body["interval_days"] == 3
+
+    r = client.post("/schedule", json={"interval_days": 5})
+    assert r.status_code == 400 and "주기" in r.json()["detail"]
+    r = client.post("/schedule", json={"max_videos_per_cycle": 0})
+    assert r.status_code == 400
+
+    r = client.post("/schedule", json={"enabled": True, "interval_days": 7})
+    assert r.status_code == 200
+    body = r.json()
+    assert body["enabled"] is True and body["interval_days"] == 7
+    assert body["last_run_at"], "켜는 순간 폭주하지 않도록 기준 시각을 박는다"
+    assert body["next_due_at"] > body["last_run_at"]
+
+    r = client.post("/schedule/run-now")
+    assert r.status_code == 202
+    assert r.json()["last_run_at"] < body["last_run_at"], "간격만큼 과거로 당긴다"
+    # 설정 API는 작업 중에도 409를 내지 않는다 (전용 상태 파일 하나만 쓴다)
+    import jobs
+    jobs.MANAGER._busy = True
+    try:
+        assert client.get("/schedule").status_code == 200
+        assert client.post("/schedule", json={"enabled": False}).status_code == 200
+    finally:
+        jobs.MANAGER._busy = False
+
+
+def test_schedule_cycle_never_reverts_user_settings(tmp_path, monkeypatch):
+    """
+    **주기 도중 바꾼 설정이 마감으로 원복되면 안 된다** (NFR3 ⓓ·DQ-49·DQ-46).
+
+    주기는 수십 분이 걸릴 수 있고, 사용자가 "끄기"를 누르는 순간은 대개
+    "지금 뭔가 잘못 돌고 있다"는 순간이다 — 그때 비상 정지가 조용히 무효가 된다.
+    원복 방향도 하필 *더 자주·더 많이* 도는 쪽이었다(28일→3일, 5개→30개).
+    """
+    out, sch = _sched(tmp_path, monkeypatch)
+    assert not (set(sch.USER_FIELDS) & set(sch.SCHEDULER_FIELDS)), "소유가 겹치면 안 된다"
+    assert set(sch.USER_FIELDS) | set(sch.SCHEDULER_FIELDS) == set(sch.DEFAULTS), \
+        "모든 필드는 사용자 소유/스케줄러 소유 중 하나여야 한다 (새 필드 추가 시 분류 필수)"
+
+    ChannelRegistry().add("https://youtube.com/@aa")
+    import rss_monitor
+    monkeypatch.setattr(rss_monitor, "check_new_videos",
+                        lambda names=None: {"channels": {
+                            "aa": [{"id": "v1", "title": "새 영상"}]}, "errors": {}})
+    sch.update(enabled=True)
+    st0 = sch.load_state()           # 틱이 주기 시작 시점에 들고 가는 스냅샷
+
+    class MidCycleManager:
+        """주기가 도는 동안 사용자가 `POST /schedule`로 끄고 값을 줄인다."""
+
+        def is_busy(self): return False
+
+        def status(self):
+            return {"job_id": "J1", "status": "done", "done": 1, "stats": {"new": 1}}
+
+        def start_schedule(self, plan):
+            sch.update(enabled=False, interval_days=28, max_videos_per_cycle=5)
+            return {"job_id": "J1"}
+
+    result = sch.run_cycle(MidCycleManager(), st0)
+    st = sch.load_state()
+    assert st["enabled"] is False, "마감이 '끄기'를 덮으면 비상 정지가 실패한다"
+    assert st["interval_days"] == 28 and st["max_videos_per_cycle"] == 5, \
+        "주기·예산도 스냅샷으로 되돌아가면 안 된다"
+    # 스케줄러 소유 필드는 정상 기록된다 (병합이 기록을 빠뜨리지 않는지)
+    assert result["outcome"] == "done" and st["last_result"]["outcome"] == "done"
+    assert st["last_run_at"] >= st0["last_run_at"] and st["skip_cycles"] == 0
+    assert st["cursor"] == "aa", "커서(스케줄러 소유)는 병합 저장으로 기록된다"
+
+
+def test_schedule_backoff_skip_keeps_last_result(tmp_path, monkeypatch):
+    """
+    백오프로 건너뛴 주기는 `last_result`를 **덮지 않는다**.
+
+    덮이는 값은 십중팔구 이 백오프를 유발한 `aborted_429` 기록이다(백오프는 429로만
+    생긴다). 사용자가 "왜 멈췄나"를 봐야 하는 3~12일 동안 증거가 0으로 채워진
+    레코드로 교체됐다. "건너뜀"은 `skip_cycles` 배너가 더 정확히 말한다.
+    """
+    import datetime
+    out, sch = _sched(tmp_path, monkeypatch)
+    prev = dict(sch._empty_result(_now(), "aborted_429"), aborted_429=True,
+                channels_with_new=4, videos_planned=12, videos_done=5,
+                stats={"new": 5, "error": 5}, truncated_channels=["aa"])
+    sch.save_state(dict(sch.load_state(), enabled=True, last_run_at=_ago(days=10),
+                        skip_cycles=2, last_result=prev))
+    monkeypatch.setattr(sch, "_cookie_warning", lambda: False)
+
+    class IdleManager:
+        def is_busy(self): return False
+
+        def status(self): return {}
+
+        def start_schedule(self, plan):
+            raise AssertionError("백오프 주기는 요청을 내지 않는다")
+
+    th = sch.SchedulerThread(IdleManager())
+    th.started_at = datetime.datetime.now() - datetime.timedelta(hours=1)
+    th.tick()
+
+    st = sch.load_state()
+    assert st["skip_cycles"] == 1, "건너뛰며 백오프를 소모한다"
+    assert st["last_result"] == prev, "429 증거를 지우면 사후 확인이 불가능하다"
+    assert st["last_skip_at"], "건너뜀 사실은 별도 필드에 남긴다"
+    assert st["enabled"] is True, "틱의 저장 경로도 사용자 설정을 쓰지 않는다"
+
+
+def test_schedule_re_enable_resets_the_clock(tmp_path, monkeypatch):
+    """껐다가 한참 뒤 다시 켜도 **켜자마자 돌지 않는다** (FR37.2 옵트인 취지)."""
+    import datetime
+    out, sch = _sched(tmp_path, monkeypatch)
+    sch.update(enabled=True)
+    sch.save_state(dict(sch.load_state(), enabled=False, last_run_at=_ago(days=40)))
+
+    view = sch.update(enabled=True)      # 40일 만에 다시 켠다
+    assert view["last_run_at"] > _ago(days=1), "켤 때마다 기준 시각을 박는다"
+    action, reason, _ = sch.decide_cycle(
+        sch.load_state(), datetime.datetime.now(), busy=False, cookie_warning=False,
+        started_at=datetime.datetime.now() - datetime.timedelta(hours=1))
+    assert (action, reason) == ("idle", "not_due"), "다시 켠 직후에도 폭주하지 않는다"
+
+
+def test_schedule_sanitize_guards_enabled_and_last_run_at(tmp_path, monkeypatch):
+    """
+    손상 값 교정 — `enabled`는 JSON 불리언만, 깨진 `last_run_at`은 "즉시 도래"가 아니다.
+
+    `bool("no")`는 True이고, `last_run_at`이 읽히지 않으면 `next_due_at=None`(즉시)이라
+    손상 파일 하나가 무인 전체 추출을 촉발할 수 있다 — 양쪽 다 보수적으로 막는다.
+    """
+    import datetime
+    out, sch = _sched(tmp_path, monkeypatch)
+    sch.state_file().write_text(json.dumps(
+        {"enabled": "yes", "last_run_at": "언젠가", "cursor": 5,
+         "last_result": "망가짐", "skip_cycles": "x"}), encoding="utf-8")
+    st = sch.load_state()
+    assert st["enabled"] is False, "문자열은 '켜짐'이 아니다 (모호하면 꺼짐)"
+    assert sch._parse(st["last_run_at"]) is not None, "깨진 시각은 지금으로 교정"
+    assert st["cursor"] is None and st["last_result"] is None and st["skip_cycles"] == 0
+
+    action, reason, _ = sch.decide_cycle(
+        dict(st, enabled=True), datetime.datetime.now(), busy=False,
+        cookie_warning=False, started_at=datetime.datetime.now()
+        - datetime.timedelta(hours=1))
+    assert (action, reason) == ("idle", "not_due"), "손상 파일이 즉시 실행을 부르면 안 된다"
+
+
+def test_schedule_cycle_is_finished_even_if_wait_raises(tmp_path, monkeypatch):
+    """
+    작업 대기 중 예외가 나도 **마감(`last_run_at` 갱신)은 한다**.
+
+    마감을 못 하면 도래 상태가 그대로라 다음 틱이 같은 주기를 다시 돌린다 — 무인이라
+    아무도 보지 못한 채 요청이 두 배가 된다.
+    """
+    import datetime
+    out, sch = _sched(tmp_path, monkeypatch)
+    ChannelRegistry().add("https://youtube.com/@aa")
+    import rss_monitor
+    monkeypatch.setattr(rss_monitor, "check_new_videos",
+                        lambda names=None: {"channels": {
+                            "aa": [{"id": "v1", "title": "새 영상"}]}, "errors": {}})
+    sch.update(enabled=True)
+    st0 = dict(sch.load_state(), last_run_at=_ago(days=10))
+    sch.save_state(st0)
+
+    class BoomManager:
+        def is_busy(self): return False
+
+        def status(self): raise RuntimeError("도커 소켓이 끊겼다")
+
+        def start_schedule(self, plan): return {"job_id": "J1"}
+
+    result = sch.run_cycle(BoomManager(), st0)
+    assert result["outcome"] == "error", "실패를 done으로 보고하지 않는다"
+    st = sch.load_state()
+    assert st["last_result"]["outcome"] == "error"
+    action, reason, _ = sch.decide_cycle(
+        st, datetime.datetime.now(), busy=False, cookie_warning=False,
+        started_at=datetime.datetime.now() - datetime.timedelta(hours=1))
+    assert (action, reason) == ("idle", "not_due"), "같은 주기를 한 번 더 돌지 않는다"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U34 — 429 회로차단 전파 (FR37.9, DQ-48)
+#
+# `run()`이 연속 429로 중단해도 호출자가 그 사실을 **구별할 수 없어서**
+# `_run_grouped`가 다음 채널로 넘어가 계속 두드리던 기존 결함의 회귀 시험이다
+# (재생목록 FR24·검색 FR34에도 있던 결함 — 스케줄러 이전의 문제).
+# ════════════════════════════════════════════════════════════════════════════
+def test_run_flags_aborted_429_without_touching_stat_keys(tmp_path, monkeypatch):
+    """연속 429 중단 → `stats["aborted_429"]`. 카운터(_STAT_KEYS)에는 넣지 않는다."""
+    _isolate(tmp_path, monkeypatch)
+    sys.modules.setdefault("yt_dlp", mock.MagicMock())
+    import extractor as ext_mod
+    import jobs
+
+    ext = ext_mod.Extractor({"name": "ch429",
+                             "url": "https://www.youtube.com/@ch429/videos"})
+    entries = [{"id": f"v{i}", "title": f"영상{i}"} for i in range(5)]
+
+    def always_429(self, vid, action="new", **kw):
+        raise Exception("HTTP Error 429: Too Many Requests")
+
+    with mock.patch.object(ext_mod.Extractor, "process_video", always_429), \
+            mock.patch("extractor.time.sleep"):
+        stats = ext.run(entries=entries, pl_map={})
+
+    assert stats.get("aborted_429") is True, "호출자가 구별할 수 있어야 한다"
+    assert "cancelled" not in stats, "사용자 취소가 아니다"
+    assert "aborted_429" not in jobs._STAT_KEYS, \
+        "카운터에 섞으면 job stats 등식(V-D11: 미리보기 수 = 처리 수)이 깨진다"
+
+
+def _grouped_fixture(tmp_path, monkeypatch, abort_on=None):
+    """채널 3개 그룹 추출 — `abort_on` 채널에서 429 중단 표식을 낸다."""
+    import types
+    _isolate(tmp_path, monkeypatch)
+    import jobs
+    reg = ChannelRegistry()
+    for n in ("c1", "c2", "c3"):
+        reg.add(f"https://youtube.com/@{n}")
+    called = []
+
+    class FakeExtractor:
+        def __init__(self, cfg):
+            self.name = cfg["name"]
+
+        def run(self, **kw):
+            called.append(self.name)
+            base = {"new": 1, "updated": 0, "skip": 0, "no_sub": 0,
+                    "members_only": 0, "error": 0, "date_skip": 0, "live_wait": 0}
+            if self.name == abort_on:
+                base["error"] = 1
+                base["aborted_429"] = True
+            return base
+
+    monkeypatch.setattr(jobs, "_app_extractor",
+                        lambda: types.SimpleNamespace(
+                            Extractor=FakeExtractor, BatchRest=lambda **kw: None))
+    entry = {"channel": "", "url": "",
+             "by_channel": {n: {"url": f"https://youtube.com/@{n}/videos",
+                                "entries": [{"id": f"{n}v", "title": "t"}]}
+                            for n in ("c1", "c2", "c3")},
+             "videos_view": [{"id": f"{n}v", "title": "t", "channel": n,
+                              "content_type": "video", "playlists": [],
+                              "members_only": False, "extracted": False}
+                             for n in ("c1", "c2", "c3")]}
+    mgr = jobs.JobManager()
+    job = mgr._new_job("schedule_run", "자동 추출", "")
+    mgr._job = job
+    mgr._cancel.clear()
+    mgr._run_grouped(job, entry, {"include_members": True}, False,
+                     group_title=None, merge_categories=False, auto_run=True)
+    return job, called
+
+
+def test_aborted_429_breaks_group_loop(tmp_path, monkeypatch):
+    """
+    429 중단 표식을 보면 **남은 채널을 돌지 않는다** — 작업은 `done`, 사유는 경고.
+
+    대조군: 표식이 없으면 세 채널을 전부 호출한다(= 수정 전의 동작).
+    """
+    job, called = _grouped_fixture(tmp_path, monkeypatch, abort_on="c1")
+    assert called == ["c1"], f"차단 뒤에도 계속 두드리면 안 된다: {called}"
+    assert job["status"] == "done", "사용자가 취소한 게 아니다 (cancelled 아님)"
+    assert job["aborted_429"] is True
+    assert any("429" in w and "2개" in w for w in job["warnings"]), job["warnings"]
+
+    job2, called2 = _grouped_fixture(tmp_path, monkeypatch, abort_on=None)
+    assert called2 == ["c1", "c2", "c3"], "정상 주기는 전 채널 순회 (회귀 방지)"
+    assert job2["aborted_429"] is False and job2["status"] == "done"
+    assert job2["stats"]["new"] == 3
+
+
+def test_start_schedule_fixed_arguments(tmp_path, monkeypatch):
+    """스케줄 워커 고정 인자 — include_members·group_title=None·index (FR37.7)."""
+    import time as _time
+    _isolate(tmp_path, monkeypatch)
+    import jobs
+    mgr = jobs.JobManager()
+    captured = {}
+
+    def fake_grouped(job, entry, filters, index, group_title=None,
+                     merge_categories=True, auto_run=True):
+        captured.update(filters=filters, index=index, group_title=group_title,
+                        merge_categories=merge_categories, entry=entry, job=job)
+
+    mgr._run_grouped = fake_grouped
+    plan = {"by_channel": {"c1": {"url": "u", "entries": [{"id": "v1", "title": "t"}]}},
+            "videos_view": [{"id": "v1", "title": "t"}]}
+    job = mgr.start_schedule(plan)
+    for _ in range(100):
+        if not mgr.is_busy():
+            break
+        _time.sleep(0.02)
+    assert job["kind"] == "schedule_run"
+    assert captured["filters"] == {"include_members": True}, \
+        "빼면 apply_filters 기본값이 멤버십 영상을 조용히 지운다"
+    assert captured["index"] is True and captured["group_title"] is None
+    assert captured["merge_categories"] is False
+    assert captured["entry"]["by_channel"] == plan["by_channel"]

@@ -6,13 +6,15 @@
 #       ./yt.sh review [--llm]
 #       ./yt.sh index
 #       ./yt.sh ask 채널 "질문" [--multistep]
-#       ./yt.sh serve        (대시보드)
+#       ./yt.sh serve        (대시보드, 포그라운드 — 터미널을 닫으면 종료)
+#       ./yt.sh serve --detach   (상시 운용: -d --restart unless-stopped, FR37.18)
 #       ./yt.sh migrate-groups [--apply [--yes]] [--rollback] [--unlock] [--no-backup]
 #       ./yt.sh backfill-tickers [채널] [--apply]   (기본 dry-run, FR12.2)
 # ─────────────────────────────────────────────────────────────
 set -e
 
 IMAGE="youtube-subs"
+CONTAINER="yt-subs-dashboard"      # serve --detach 전용 이름 (FR37.18)
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # 이미지 없으면 자동 빌드 (FR8.5)
@@ -82,11 +84,31 @@ if [ "$1" = "serve" ]; then
   echo "▢ 대시보드: http://localhost:8800"
 fi
 
+# ── serve --detach: 상시 운용 기동 (FR37.18) ──
+# 주기 자동 추출(FR37)은 serve 프로세스 안에서만 살아 있다. 기본(포그라운드)
+# 동작은 그대로 두고, --detach일 때만 -d + 재시작 정책 + 고정 이름으로 띄운다.
+# 마운트 구성은 아래 docker run 한 곳을 공유하므로 포그라운드와 동일하다.
+DETACH=0
+ARGS=()
+for a in "$@"; do
+  if [ "$1" = "serve" ] && [ "$a" = "--detach" ]; then DETACH=1; continue; fi
+  ARGS+=("$a")
+done
+RUN_OPTS=(--rm -it)
+if [ "$DETACH" = "1" ]; then
+  RUN_OPTS=(-d --restart unless-stopped --name "$CONTAINER")
+  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+    echo "▢ 기존 컨테이너 교체: $CONTAINER"
+    docker rm -f "$CONTAINER" >/dev/null
+  fi
+  echo "▢ 백그라운드 기동 (로그: docker logs -f $CONTAINER · 중지: docker stop $CONTAINER)"
+fi
+
 # HuggingFace 캐시를 호스트와 공유 (모델 재다운로드 방지)
 HF_CACHE="$HOME/.cache/huggingface"
 mkdir -p "$HF_CACHE"
 
-docker run --rm -it \
+docker run "${RUN_OPTS[@]}" \
   $PORT_OPT \
   $COOKIE_OPT \
   "${FF_OPT[@]}" \
@@ -94,4 +116,4 @@ docker run --rm -it \
   -v "$DIR/channels.yaml:/app/channels.yaml" \
   -v "$HF_CACHE:/root/.cache/huggingface" \
   -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
-  "$IMAGE" "$@" "${EXTRA_ARGS[@]}"
+  "$IMAGE" "${ARGS[@]}" "${EXTRA_ARGS[@]}"

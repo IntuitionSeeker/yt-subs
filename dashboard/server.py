@@ -78,6 +78,13 @@ class ExtractRequest(BaseModel):
     index: bool = True
 
 
+class ScheduleRequest(BaseModel):
+    """주기 자동 추출 설정 부분 갱신. FR37.14ⓑ — 지정한 필드만 바뀐다."""
+    enabled: bool | None = None
+    interval_days: int | None = None
+    max_videos_per_cycle: int | None = None
+
+
 class VideoDeleteRequest(BaseModel):
     channel: str
     basename: str
@@ -284,6 +291,50 @@ def channels_new():
     """RSS로 등록 채널의 새 영상 감지 (수동 트리거 전용). FR29.2"""
     import rss_monitor            # 지연 임포트
     return rss_monitor.check_new_videos()
+
+
+# ─── 주기 자동 추출 (FR37.14) ────────────────────────────────────────────────
+# 셋 다 `_reject_if_busy()`를 부르지 않는다 — 쓰는 대상이 전용 상태 파일
+# (`output/.scheduler.json`) 하나뿐이라 진행 중 작업·channels.yaml과 경합하지 않는다
+# (FR31.5·FR36.11의 409 사유가 성립하지 않는다).
+@app.get("/schedule")
+def schedule_get():
+    """설정 + 상태(파생값 `next_due_at`·`running` 포함). FR37.14ⓐ"""
+    import scheduler                     # 지연 임포트
+    return scheduler.get_view(MANAGER)
+
+
+@app.post("/schedule")
+def schedule_set(req: ScheduleRequest):
+    """부분 갱신 후 전체 상태 반환. 검증 위반은 400. FR37.14ⓑ"""
+    import scheduler
+    fields = {}
+    for key in ("enabled", "interval_days", "max_videos_per_cycle"):
+        value = getattr(req, key, None)
+        if value is not None:
+            fields[key] = value
+    try:
+        return scheduler.update(**fields)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/schedule/run-now", status_code=202)
+def schedule_run_now():
+    """이번 주기를 지금 도래시킨다 — 별도 실행 경로가 아니다. FR37.15 (DQ-50)"""
+    import scheduler
+    return scheduler.request_now()
+
+
+@app.on_event("startup")
+def _start_scheduler():
+    """스케줄러 스레드 기동 (FR37.1). `SCHEDULER_DISABLED=1`이면 건너뛴다."""
+    import os
+    if os.environ.get("SCHEDULER_DISABLED") == "1":
+        print("⏰ 스케줄러 비활성 (SCHEDULER_DISABLED=1)")
+        return
+    import scheduler
+    scheduler.start(MANAGER)
 
 
 @app.post("/channels/group")

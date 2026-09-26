@@ -648,6 +648,8 @@ class JobManager:
             "stats": {k: 0 for k in _STAT_KEYS},
             "events": [],           # 영상별 결과 이벤트 (FR26.2, 캡 1000)
             "warnings": [],         # 작업 경고 (폴더 자동 지정 건너뜀 등, FR35.13)
+            # 429 연속 차단으로 남은 채널을 건너뛰었는가 (FR37.9) — stats 카운터가 아니다
+            "aborted_429": False,
             "error": None,
             "started_at": _now_iso(),
             "finished_at": None,
@@ -786,6 +788,44 @@ class JobManager:
                           group_title=entry.get("folder") or entry.get("query"),
                           merge_categories=False, auto_run=False)
 
+    # ── 스케줄 워커 (FR37.7) ─────────────────────────────────────────────────
+    def start_schedule(self, plan: dict) -> dict:
+        """
+        주기 자동 추출 시작 — 호출자는 `scheduler.run_cycle` 하나다 (FR37.7).
+
+        점유 실패(`JobBusyError`)는 **호출자가 삼킨다** — 사용자에게 보일 오류가 아니라
+        "이번 틱은 미룬다"는 신호다 (FR37.12).
+        """
+        entry = {"channel": "", "url": "",
+                 "by_channel": plan["by_channel"],
+                 "videos_view": plan["videos_view"]}
+        job = self._new_job("schedule_run", "자동 추출", "")
+        self._acquire()
+        try:
+            with self._lock:
+                self._cancel.clear()
+                self._job = job
+                self._thread = threading.Thread(
+                    target=self._wrap, args=(self._run_schedule, (job, entry)),
+                    daemon=True)
+                self._thread.start()
+        except Exception:
+            self._release()
+            raise
+        return _copy(job)
+
+    def _run_schedule(self, job: dict, entry: dict):
+        """
+        스케줄 주기 추출 — 재생목록·검색과 **같은 그룹 워커**를 쓴다 (FR37.7).
+
+        고정 인자: `include_members=True`(RSS 엔트리에는 availability가 없어 사전 제외가
+        불가능하다 — 빼면 `apply_filters` 기본값이 멤버십 영상을 조용히 지운다) ·
+        `group_title=None`(폴더 자동 지정 없음 — 대상이 전부 기등록 채널) ·
+        `merge_categories=False`(pl_map={} → 재생목록 스캔 요청 0) · `index=True`.
+        """
+        self._run_grouped(job, entry, filters={"include_members": True}, index=True,
+                          group_title=None, merge_categories=False, auto_run=True)
+
     def _run_grouped(self, job: dict, entry: dict, filters: dict, index: bool,
                      group_title: str = None, merge_categories: bool = True,
                      auto_run: bool = True):
@@ -818,7 +858,8 @@ class JobManager:
             base_done = 0
             changed = []                          # new+updated>0 채널 → 인덱싱 대상
             cancelled = False
-            for name, ch_url, g_entries in groups:
+            aborted = False                       # 429 연속 차단 (FR37.9)
+            for gi, (name, ch_url, g_entries) in enumerate(groups):
                 if self._cancel.is_set():
                     cancelled = True
                     break
@@ -877,11 +918,22 @@ class JobManager:
                 if stats.get("cancelled") or self._cancel.is_set():
                     cancelled = True
                     break
+                # FR37.9 — 한 채널이 연속 429로 끊겼으면 남은 채널을 두드리지 않는다.
+                # 사용자가 취소한 게 아니므로 status는 `done`이고, 사유만 경고로 남긴다.
+                if stats.get("aborted_429"):
+                    aborted = True
+                    remain = len(groups) - gi - 1
+                    self._update(job, aborted_429=True)
+                    self._append_warning(
+                        job, f"429 연속 차단 — 남은 채널 {remain}개 건너뜀 "
+                             f"(차단된 채널: {name})")
+                    log.warning(f"⛔ 429 연속 차단 — 남은 채널 {remain}개 건너뜀")
+                    break
 
             with self._lock:
                 for k in _STAT_KEYS:
                     job["stats"][k] = agg[k]
-                if not cancelled:
+                if not cancelled and not aborted:
                     job["done"] = base_done
 
             # 변경 있는 채널만 각각 인덱싱, 취소 시 생략 (FR24.5 · FR17.9 준용)

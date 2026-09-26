@@ -776,3 +776,82 @@ assert mgr13.invalidate_scans() == 1 and mgr13._scans == {}, "channel=None이면
 print("✓ JobManager.invalidate_scans: channel/by_channel 정확 일치 · 전체 비움 · 폐기 후 start 400 (FR36.8)")
 
 print("\n스캔 캐시 무효화(FR36) 검증 통과")
+
+# ── 14. 429 회로차단이 그룹 루프를 끊는다 (FR37.9 · DQ-48) ───────────────────
+# 실제 `Extractor.run()`을 태워 표식 생성(extractor) → 소비(_run_grouped)까지 잇는다.
+# 대조군은 표식을 지워 **수정 전 동작(전 채널 순회)** 을 재현한다.
+def _mk_group_entry(names, per=3):
+    vids = {n: [{"id": f"{n}v{i}", "title": f"{n} 영상{i}", "content_type": "video"}
+                for i in range(per)] for n in names}
+    return {"kind": "search", "query": "429", "folder": None,
+            "videos_view": [dict(v, playlists=[], members_only=False, extracted=False)
+                            for n in names for v in vids[n]],
+            "by_channel": {n: {"url": f"https://www.youtube.com/@{n}/videos",
+                               "entries": vids[n]} for n in names}}
+
+
+NAMES14 = ["ach", "bch", "cch"]
+reg14 = mock.MagicMock()
+reg14.names.return_value = NAMES14
+reg14.get.side_effect = lambda n: {"name": n,
+                                   "url": f"https://www.youtube.com/@{n}/videos",
+                                   "lang": "ko"}
+
+
+def _run_group_429(strip_flag=False):
+    """ach에서만 429를 던진다 → 연속 5회(영상당 재시도 1회 포함)로 run()이 중단."""
+    touched = []
+
+    def pv(self, vid, action="new", **kw):
+        touched.append(self.channel)
+        if self.channel == "ach":
+            raise Exception("HTTP Error 429: Too Many Requests")
+        return "ok"
+
+    orig_run = _extractor_mod.Extractor.run
+
+    def run_no_flag(self, **kw):
+        stats = orig_run(self, **kw)
+        stats.pop("aborted_429", None)        # 수정 전 상태 재현
+        return stats
+
+    patches = [
+        mock.patch.object(_extractor_mod.Extractor, "process_video", pv),
+        mock.patch.object(_extractor_mod.time, "sleep", lambda s: None),
+        mock.patch.object(jobs, "ChannelRegistry",
+                          mock.MagicMock(return_value=reg14, extract_handle=str,
+                                         normalize_url=lambda u: u)),
+    ]
+    if strip_flag:
+        patches.append(mock.patch.object(_extractor_mod.Extractor, "run", run_no_flag))
+    with patches[0], patches[1], patches[2]:
+        if strip_flag:
+            with patches[3]:
+                job = _do_run_group(touched)
+        else:
+            job = _do_run_group(touched)
+    return job, [n for i, n in enumerate(touched) if i == 0 or touched[i - 1] != n]
+
+
+def _do_run_group(touched):
+    job = mgr._new_job("schedule_run", "자동 추출", "")
+    mgr._job = job
+    mgr._cancel.clear()
+    mgr._run_grouped(job, _mk_group_entry(NAMES14), {"include_members": True}, False,
+                     group_title=None, merge_categories=False, auto_run=True)
+    return job
+
+
+job14, order14 = _run_group_429()
+assert order14 == ["ach"], f"차단 뒤에도 남은 채널을 두드렸다: {order14}"
+assert job14["status"] == "done", f"사용자 취소가 아니므로 done: {job14['status']}"
+assert job14["aborted_429"] is True, job14
+assert any("429" in w for w in job14["warnings"]), job14["warnings"]
+assert "aborted_429" not in job14["stats"], "stats 카운터를 오염시키면 V-D11 등식이 깨진다"
+
+job14b, order14b = _run_group_429(strip_flag=True)
+assert order14b == NAMES14, f"대조군(표식 없음)은 전 채널 순회여야 결함 재현: {order14b}"
+assert job14b["aborted_429"] is False, job14b
+print("✓ 429 회로차단: 표식 생성→소비로 그룹 루프 중단 · 대조군 전 채널 순회 (FR37.9)")
+
+print("\n429 회로차단(FR37.9) 전파 검증 통과")

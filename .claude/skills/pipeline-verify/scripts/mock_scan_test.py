@@ -481,4 +481,25 @@ assert s21c["members_only"] == 0 and s21c["error"] == 1, s21c
 assert "m3" not in st21c, "429는 state 미기록(다음 run 재시도)"
 print("✓ 멤버십 감지(DQ-38): availability 1차 · 한/영 메시지 폴백 · 429 우선")
 
+# ── 22. 연속 429 중단은 stats에 표식을 싣는다 (FR37.9) ──────────────────────
+# 표식이 없으면 호출자(_run_grouped)가 "여기까지"를 구별하지 못해 다음 채널로
+# 넘어가 계속 두드린다 — 스케줄러 이전에 재생목록·검색에 이미 있던 결함이다.
+e22 = fresh("abort429")
+with mock.patch.object(Extractor, "process_video",
+                       lambda self, vid, action="new", **kw:
+                       (_ for _ in ()).throw(
+                           Exception("HTTP Error 429: Too Many Requests"))), \
+     mock.patch("extractor.time.sleep"):
+    s22 = e22.run(entries=[dict(x) for x in ENTRIES5], pl_map={})
+assert s22.get("aborted_429") is True, f"429 연속 차단 표식이 없다: {s22}"
+assert "cancelled" not in s22, "사용자 취소가 아니다 (status는 done)"
+assert s22["new"] == 0 and s22["error"] >= 1, s22
+# 정상 종료에는 표식이 없다 (CLI 동작·기존 소비자 무영향, FR18.1)
+e22b = fresh("ok429")
+with mock.patch.object(Extractor, "process_video",
+                       lambda self, vid, action="new", **kw: "ok"):
+    s22b = e22b.run(entries=[dict(x) for x in ENTRIES5], pl_map={})
+assert "aborted_429" not in s22b, s22b
+print("✓ run(): 연속 429 중단 시 stats['aborted_429'] · 정상 종료는 무표식 (FR37.9)")
+
 print("\n모든 mock 단위 검증 통과")

@@ -1,8 +1,8 @@
 # DESIGN — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v5.9  
+> **버전:** v5.10  
 > **작성일:** 2026-08-09  
-> **연계 문서:** REQUIREMENTS.md v5.9 (FR1~FR36)  
+> **연계 문서:** REQUIREMENTS.md v5.10 (FR1~FR37)  
 > **주요 변경:** 질의 인터페이스(FR9)·질의 하네스(FR10)·웹 대시보드(FR11~12) 설계 편입,
 > 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20) 설계 추가,
@@ -32,6 +32,7 @@
 > **v5.7 (버그 수정):** 멤버십 감지 언어 비의존화(FR13.7, §2.2·§2.10) — **DQ-20(`extractor_args.youtube.lang=ko`)이 YouTube가 주는 오류 `reason` 문구까지 한국어로 번역해** 영어 키워드만 보던 `Extractor._is_members_only`가 2026-09-09 이후 모든 멤버십 영상을 조용히 `error`로 분류했다(실측 `_workspace/30`). 판정을 신규 잎 모듈 `video_access.py`로 모아 **1차 `availability`(언어 비의존)·2차 메시지(영/한)** 로 바꾸고 추출 경로와 대시보드 스캔(FR17.6)이 같은 규칙을 공유한다. 429는 멤버십 판정보다 **먼저** 확정한다(오분류 시 `_mark_skip`으로 영구 스킵). DQ-20에 **언어 결합 관계**를 명문화. 신규 결정 DQ-38, 검증 V-U29
 > **v5.8:** 채널 메모 · 추출 탭 이름 변경 · 탭 간 자동 갱신(FR36, §2.1·§2.9·§2.9b·§2.10·§5.1·§5.9) — 메모는 **신규 스키마가 아니다**: `channels.yaml`의 `note`는 `add()`가 이미 쓰고 FR7.7이 보존까지 약속하지만 **읽는 곳이 0이라 죽어 있던 필드**이며(77채널 전부 `""`), `ChannelRegistry.set_note` + `POST /channels/note` + `/channels/stats.note` 세 접점만으로 살린다(DQ-39). 표시·입력은 기존 채널 카드와 `prompt`를 재사용한다(한 줄·200자, DQ-39). 추출 탭 이름 변경은 **기존 `POST /channels/rename`을 그대로 호출**하고, 그 과정에서 드러난 기존 결함 — 옛 이름으로 캐시된 `scan_id`가 `output/<옛이름>/` **유령 폴더**를 만드는 경로 — 를 `JobManager.invalidate_scans()`로 끊는다(DQ-41, 기존 400 계약 재사용). 갱신은 **`/channels/stats` 단일 출처 + 공통 헬퍼 `refreshChannelViews({names})`**로 통일하되 비활성 탭은 무효화 플래그로 지연 로드하고, 이관은 `renameChannel` 한 곳만 한다(DQ-40). 메모 저장은 `ChannelRegistry`의 read-modify-write 특성 때문에 작업 중 409다(DQ-42). 신규 결정 DQ-39~DQ-42, 검증 V-U30·V-U31·V-D20
 > **v5.9 (버그 수정):** 종목코드 추출 문맥화(FR12.2·12.5~12.7, §2.4·§5.3) — 구 규칙 `_TICKER_KR = re.compile(r'\b(\d{6})\b')`은 **6자리 숫자면 무엇이든** 채택했고, 실측 441개 meta에서 `tickers`가 **100% 오탐**이었다(값 있는 26개 = 제목 날짜 `260819` 22종 + 계좌번호 조각 `241686`, `_workspace/34_ticker_bug.md`). 날짜·계좌·전화·사업자번호·URL 조각이 전부 같은 모양이므로 **숫자만 보는 방식 자체가 성립하지 않는다** → `extract_tickers`를 후보 스캔 + 근거/배제 판정으로 재작성한다(강한 근거 = 종목 전용 라벨·거래소 표기 / 약한 근거 = 일반 `코드:`·괄호 단독·나열 / 공통 배제 = URL·숫자 나열 / 약한 근거에만 YYMMDD 배제, DQ-43). 기존 데이터는 신규 CLI `backfill-tickers`(기본 dry-run, meta+desc 재계산이라 네트워크 불필요)로 정리한다. **정상 결과가 빈 값**임을 FR12.6에 못박았다. 검증 V-U32
+> **v5.10:** 주기 자동 추출(FR37, §2.2·§2.9·§2.10·§2.13·§3.11·§5.7·§5.9·§5.10·§7) + **NFR3 개정** — 스케줄러는 **serve 프로세스 안의 단일 데몬 스레드**다(신규 잎 모듈 `scheduler.py`). 별도 컨테이너·호스트 cron을 쓰지 않는 이유는 `JobManager._busy`가 **프로세스 지역 싱글턴**이라 외부 프로세스의 추출은 사용자의 대시보드 작업과 동시에 돌기 때문이다(DQ-44). 주기 판정은 맥북 절전 때문에 **정시가 아니라 경과 시간**이고 밀린 주기는 1회만 따라잡는다(DQ-45). 기본 주기는 **3일**이다(선택지 3·7·14·28일, 대시보드에서 변경 — 근거는 FR37.3: RSS 15개 상한 구멍 축소·주기당 버스트 감소·예산 30 적정화·백오프 상한 12일). 상태·설정은 `output/.scheduler.json` 한 파일(원자 교체, DQ-46 — `channels.yaml`의 read-modify-write lost update를 피한다). 실행은 **RSS 선행 → 새 영상 있는 채널만 `_run_grouped` 재사용**(`pl_map={}`·`group_title=None`)이고 RSS 15개 상한은 **무시하되 감지·노출**한다(DQ-47). 무인 전용 안전장치로 **429 2단 회로차단**을 신설했다 — ⓐ `Extractor.run`이 429 중단을 `stats["aborted_429"]`로 **알리게 하고**(현재는 호출자가 구별할 수 없어 `_run_grouped`가 차단 상태로 다음 채널을 계속 두드린다 — **재생목록·검색 경로에도 이미 있던 결함**) ⓑ 주기 간 지수 백오프 `skip_cycles` 1→2→4(DQ-48). 쿠키 경고·백오프는 **상태로만 표현**하고 사용자 설정(`enabled`)을 기계가 되돌려 쓰지 않는다(DQ-49). `run-now`는 우회 경로가 아니라 "지금 도래시키기"다(DQ-50). 신규 결정 DQ-44~DQ-50, 검증 V-U33~V-U34·V-D21
 
 > **v5.5 정합 정정 (2026-09-20, 문서 전용):** §9.1을 전면 재정렬해 V-U 번호 충돌·누락을 해소했다 — **정본은 `tests/test_unit.py`**(실행되는 것이 진실). 구 목록의 `V-U12 reflow_sentences`·`V-U13 live guard`는 테스트 파일이 쓰는 `V-U12 채널 폴더(FR25.1)`·`V-U13 챕터 정규화(FR27.1)`에 자리를 내주고 번호를 폐기(검증 자체는 §9.1b에 존치), 누락돼 있던 V-U14(Whisper SRT 조립)·V-U15(RSS 파싱)·V-U16(이름 변경)·V-U11b(재생목록 URL 분류)를 편입했다. 코드·FR 변경 없음
 
@@ -124,7 +125,7 @@ channels.yaml│
 | `_is_429(msg)` / `_is_no_tab(msg)` | 429·탭 부재 판별. 둘 다 **yt-dlp/urllib가 생성한 문구**(+숫자 `429`)라 로케일 영향을 받지 않음이 실측 확인됐다 — 번역되는 것은 **YouTube가 준 `reason`뿐**이다(DQ-38의 경계표) |
 | `_fetch_vtt(url)` | 자막 직접 다운로드: 자체 딜레이 + 쿠키 + 브라우저 UA (FR13.4) |
 | `_report(progress, phase, done, total, current_title, stats)` | 진행 콜백 호출 헬퍼(FR18.1~2). `progress=None`이면 즉시 `True` 반환(CLI 경로 무영향), 콜백 내부 예외는 삼키고 "계속"으로 간주. `stats`는 얕은 복사본으로 전달(폴링 스레드의 직렬화 레이스 방지) |
-| `run(force_vid, limit, progress, entries, pl_map, date_range, rest_state)` | 채널 루프: 429 지수 백오프(FR14.3)·배치 휴식(FR14.2)·연속 429 중단(FR13.5)·카나리아 `--limit`(FR14.5)·멤버십 감지 스킵(**429를 먼저 판정한 뒤** 비-429 실패에만 멤버십 판정을 적용한다 — 멤버십 영상의 일시 429를 `members_only`로 오분류하면 `_mark_skip`으로 영구 스킵된다, DQ-38). **신규 4인자가 모두 None이면 기존 CLI 동작과 완전 동일**(FR18.1, 반환 dict에 `date_skip:0` 키만 추가). `entries`/`pl_map`이 주어지면 `scan_channel()`/`scan_playlists()`를 건너뛰고 대시보드 스캔 캐시를 그대로 사용(DQ-13). `date_range`는 해석 없이 `process_video`로 전달(DQ-12). `rest_state`(`BatchRest`)를 주면 배치 휴식 카운터를 **호출 경계를 넘어 공유**한다 — 그룹 추출은 채널마다 `run()`을 새로 부르므로 지역 카운터로는 휴식이 오지 않는다(FR14.2, 검색은 영상당 채널이 달라 치명적). None이면 이 호출 전용 상태를 새로 만든다(기존 CLI 동작). `progress`가 False를 반환하면 우아한 취소 — 루프 break → `finishing` 보고 → `state.save()` → (`pl_map` 있으면) `_backfill_meta()` → 최종 로그 → `stats["cancelled"]=True`로 반환 (FR18.2). 인덱싱은 이 함수 범위 밖(DQ-14) |
+| `run(force_vid, limit, progress, entries, pl_map, date_range, rest_state)` | 채널 루프: 429 지수 백오프(FR14.3)·배치 휴식(FR14.2)·연속 429 중단(FR13.5)·카나리아 `--limit`(FR14.5)·멤버십 감지 스킵(**429를 먼저 판정한 뒤** 비-429 실패에만 멤버십 판정을 적용한다 — 멤버십 영상의 일시 429를 `members_only`로 오분류하면 `_mark_skip`으로 영구 스킵된다, DQ-38). **신규 4인자가 모두 None이면 기존 CLI 동작과 완전 동일**(FR18.1, 반환 dict에 `date_skip:0` 키만 추가). `entries`/`pl_map`이 주어지면 `scan_channel()`/`scan_playlists()`를 건너뛰고 대시보드 스캔 캐시를 그대로 사용(DQ-13). `date_range`는 해석 없이 `process_video`로 전달(DQ-12). `rest_state`(`BatchRest`)를 주면 배치 휴식 카운터를 **호출 경계를 넘어 공유**한다 — 그룹 추출은 채널마다 `run()`을 새로 부르므로 지역 카운터로는 휴식이 오지 않는다(FR14.2, 검색은 영상당 채널이 달라 치명적). None이면 이 호출 전용 상태를 새로 만든다(기존 CLI 동작). `progress`가 False를 반환하면 우아한 취소 — 루프 break → `finishing` 보고 → `state.save()` → (`pl_map` 있으면) `_backfill_meta()` → 최종 로그 → `stats["cancelled"]=True`로 반환 (FR18.2). 인덱싱은 이 함수 범위 밖(DQ-14). **v5.10 —** 연속 429 중단(FR13.5)으로 루프를 빠져나온 경우 반환 dict에 `stats["aborted_429"]=True`를 싣는다. `stats["cancelled"]`와 같은 계열의 **불리언 표식**이며 `_STAT_KEYS` 카운터가 아니므로 `_merge_stats`의 화이트리스트를 통과하지 않는다(job `stats` 등식 불변 — V-D11). 이 표식이 없으면 호출자는 "429로 끊겼다"와 "오류 1건 나고 끝났다"를 구별할 수 없고, 그래서 `_run_grouped`가 차단 상태로 다음 채널을 계속 두드린다 (FR37.9·DQ-48) |
 
 #### progress 콜백 계약 (FR18.1~18.2 — extractor ↔ jobs 경계)
 
@@ -218,8 +219,10 @@ dict 단일 인자 규약이라 필드를 추가해도 시그니처가 깨지지
 | `POST /channels/rename` (v5.8 확장) | 확장 | 기존 동작(FR31.1) 뒤에 **`MANAGER.invalidate_scans(channel=옛이름)`** 한 줄을 더한다 (FR36.8·DQ-41). 실패해도 이름 변경은 이미 성공했으므로 예외를 삼키지 않고 그대로 두되, 호출 순서는 **rename 성공 후**다(rename이 409/400이면 캐시는 건드리지 않는다) |
 | `POST /channels/delete` | 구현됨 | 채널 삭제 (FR21.2) — `ChannelRegistry.remove`로 등록 해제(없으면 404). `purge=true`면 `channel_dir().resolve()`가 `OUTPUT_BASE` 하위인지 재확인 후 `shutil.rmtree` — 등록 해제만으로는 `output/` 폴더가 disk에 남지만 `/channels/stats`가 registry 기준이라 라이브러리 UI에서는 즉시 사라진다. `MANAGER.is_busy()`면 409  **v5.8 —** 삭제 성공 후 `MANAGER.invalidate_scans(channel=)`를 부른다 (FR36.8): 남겨 두면 옛 `scan_id`로 온 추출이 `_run_channel`의 `reg.add()`로 채널을 **되살린다** |
 
+| `GET /schedule` · `POST /schedule` · `POST /schedule/run-now` | **신규 (v5.10)** | 주기 자동 추출 설정·상태 (FR37.14). 전부 `scheduler` 모듈에 위임하는 얇은 어댑터다 — `GET`은 상태 파일 + 파생값(`next_due_at`·`running`), `POST`는 부분 갱신(검증 위반 `ValueError`→400), `run-now`는 `scheduler.request_now()` 호출 후 202. **`_reject_if_busy()`를 부르지 않는다** — 쓰는 대상이 전용 상태 파일 하나뿐이라 `channels.yaml` lost update(FR36.11·DQ-42)나 디렉터리 이동 위험이 없다. 기동 배선은 `@app.on_event("startup")`에서 `scheduler.start(MANAGER)` 한 줄이며 `SCHEDULER_DISABLED=1`이면 건너뛴다(CLI·테스트) |
+
 > 요청 모델(Pydantic): `ScanRequest{url}` · `Filters{latest, since, until, categories, include_members, keyword}` · `ExtractRequest{url, scan_id, filters, index=True}` ·
-> `VideoDeleteRequest{channel, basename}` · `ChannelDeleteRequest{channel, purge=False}` · **`ChannelNoteRequest{channel, note}`(v5.8)**.
+> `VideoDeleteRequest{channel, basename}` · `ChannelDeleteRequest{channel, purge=False}` · **`ChannelNoteRequest{channel, note}`(v5.8)** · **`ScheduleRequest{enabled=None, interval_days=None, max_videos_per_cycle=None}`(v5.10 — 셋 다 Optional, 준 것만 갱신)**.
 > `JobBusyError`→409 `{detail, job}`, `ValueError`→400 `{detail}`로 매핑한다.
 
 ### 2.9b dashboard/index.html — 채널 카드 공통 갱신 (FR36.5~36.10)
@@ -250,6 +253,9 @@ dict 단일 인자 규약이라 필드를 추가해도 시그니처가 깨지지
 | `is_busy()` (FR21.4) | `_busy` 플래그를 락 하에 읽어 반환하는 공개 헬퍼. `server.py`의 삭제 엔드포인트가 진행 중인 추출·스캔과 파일 정리가 겹치지 않도록 이 값으로 409를 판단한다(사설 속성 직접 접근 대신) |
 | `is_busy()` v5.6 확장 (FR35.10) | 반환값에 `folder_ops.is_locked()`를 **OR로 합산**한다 — CLI 마이그레이션 컨테이너와 serve 컨테이너는 job 상태를 공유할 수 없으므로 `output/.migration.lock` 파일을 통해서만 서로를 인지한다. 이 덕분에 마이그레이션 중 `/extract`·삭제·이름 변경·폴더 이동이 모두 409로 막힌다 |
 | `invalidate_scans(channel=None)` (FR36.8, 신규) | 락 하에 `self._scans`를 훑어 **해당 채널을 참조하는 항목을 전부 삭제**한다 — 채널 스캔은 `entry["channel"]`, 재생목록·검색 스캔은 `entry["by_channel"]`의 키가 판정 대상이다(대소문자·NFC는 `resolve_name`과 달리 **정확 일치**로 충분하다: 캐시에 들어간 이름은 이미 레지스트리 표기 그대로다). `channel=None`이면 전체 비운다. 삭제된 `scan_id`로 오는 `POST /extract`는 **기존 400 "scan_id가 만료되었습니다"** 경로를 그대로 탄다(§5.9 판정 규칙 5 — 신규 오류 코드 없음). 호출부는 `server.py`의 **`/channels/rename`·`/channels/delete` 성공 직후** 두 곳이다 (삭제도 같은 구멍이다 — 옛 `scan_id`로 추출하면 `_run_channel`의 `reg.add()`가 채널을 **되살린다**) |
+| `start_schedule(plan)` (FR37.7, 신규) | 스케줄러 전용 진입점. `plan`(`{by_channel:{채널:{url, entries}}, videos_view}`)을 받아 `_new_job("schedule_run", "자동 추출", "")` → `_acquire()` → `_run_schedule` 스레드 시작. **`start()`와 같은 점유·취소 규약**을 쓰므로 사용자 작업과 상호 409/취소가 그대로 성립한다. 점유 실패(`JobBusyError`)는 예외가 아니라 **스케줄러가 삼켜 "이번 틱 무동작"으로 처리**한다(FR37.12 — 사용자에게 보일 오류가 아니다) |
+| `_run_schedule(job, entry)` (FR37.7, 신규) | `_run_grouped(job, entry, filters={"include_members": True}, index=True, group_title=None, merge_categories=False, auto_run=True)` 한 줄. 인자 조합의 의미: `group_title=None` → 폴더 자동 지정 없음(대상이 전부 기등록 채널) · `merge_categories=False` + `pl_title=None` → **`pl_map={}`** 이라 재생목록 스캔·백필 0회(FR34와 같은 이유, DQ-28) · `include_members=True` → RSS 엔트리에 `availability`가 없어 `apply_filters`의 기본 멤버십 제외가 **조용히 대상을 지우는 것**을 막는다(판정은 추출 시 FR13.7이 한다) |
+| `_run_grouped` 429 중단 (FR37.9) | 그룹 루프에서 `stats.get("aborted_429")`를 `cancelled`와 **같은 위치에서** 검사해 루프를 빠져나온다. 단 `status`는 `cancelled`가 아니라 **`done`** 이고(사용자가 취소한 게 아니다), `_append_warning`에 "429 연속 차단 — 남은 채널 N개를 건너뜀"을 남긴다. **이 변경은 스케줄 경로 전용이 아니다** — 재생목록(FR24)·검색(FR34) 추출도 지금까지 차단 상태로 다음 채널을 계속 두드리고 있었다(잠재 결함 동반 수정) |
 | 자동 폴더 지정 충돌 (FR35.13) | `_run_grouped`가 신규 채널에 폴더를 지정할 때 `folder_ops.set_channel_group(..., on_conflict="skip")`을 쓴다 — 충돌 시 예외 대신 건너뛰고 로그·job 경고만 남겨 **배치 추출 전체가 죽지 않게** 한다 |
 
 **검색 추출 (FR34) — 재생목록 경로의 소스 치환**
@@ -315,6 +321,27 @@ dict 단일 인자 규약이라 필드를 추가해도 시그니처가 깨지지
 ### 2.12 yt.sh — FR8
 
 이미지 자동 빌드, channels.yaml 파일 보장, cookies.txt 존재 시 ro 마운트, serve 시 8800 포트, HF 캐시 공유, ANTHROPIC_API_KEY 전달.
+
+### 2.13 scheduler.py (신규, v5.10) — FR37
+
+주기 자동 추출의 **판정·계획·상태**를 전담한다. 의존은 `config`·`channel_registry`·`rss_monitor`·`cookie_health`뿐이고,
+`dashboard/jobs`는 **주입받는다**(`start(manager)`) — 잎 모듈로 두어야 `jobs → scheduler → jobs` 순환이 생기지 않고
+판정 로직을 네트워크 없이 단위 검증할 수 있다(V-U33).
+
+| 함수·클래스 | 설계 |
+|---|---|
+| `load_state()` / `save_state(st)` / `save_scheduler_state(st)` | `output/.scheduler.json` 읽기·쓰기. 쓰기는 **`.tmp` 기록 → `os.replace`** 원자 교체. **필드 소유가 코드 상수다** — `USER_FIELDS`(`enabled`·`interval_days`·`max_videos_per_cycle`)는 `update()`만, `SCHEDULER_FIELDS`(`last_run_at`·`skip_cycles`·`cursor`·`paused_reason`·`last_result`·`last_skip_at`)는 기계만 쓴다. 기계 쪽 쓰기는 전부 `save_scheduler_state()`를 거쳐 **저장 직전 재적재 후 자기 필드만 병합**한다(주기 스냅샷이 주기 중의 설정 변경을 덮는 lost update 차단 — NFR3 ⓓ·DQ-49·DQ-46). `update()`도 대칭으로 사용자 필드만 얹는다. 파일 부재·JSON 손상·키 누락은 전부 **기본값 병합으로 폴백**하고 다음 저장에서 정상 파일로 재생성한다 — 상태 파일 하나 때문에 대시보드가 죽지 않는다 (FR37.13) |
+| `get_view()` | `GET /schedule` 응답 조립 — 저장값 + 파생값(`next_due_at = last_run_at + interval`, `running = 현재 job이 schedule_run이고 running`). 파생값은 **저장하지 않는다**(간격을 바꾸면 즉시 새 값이 나와야 한다) |
+| `update(**fields)` | `POST /schedule` 부분 갱신. `interval_days ∈ {3,7,14,28}`(기본 **3**)·`max_videos_per_cycle ∈ [1,200]`(기본 30) 위반은 `ValueError`(→400). **사용자 소유 필드를 쓰는 유일한 경로**다. `enabled`를 **켤 때마다 `last_run_at = now`** 로 갱신한다 — "비어 있을 때만"이면 껐다가 한참 뒤 다시 켤 때 "간격 경과"가 이미 참이라 토글하자마자 36채널 추출이 시작된다(옵트인의 취지를 배반한다). 첫 실행을 당기고 싶으면 `run-now`를 쓴다 |
+| `request_now()` | `POST /schedule/run-now`. `last_run_at`을 **간격만큼 과거로 당겨** 도래 상태로 만들고 틱 이벤트를 `set()`한다. 실행 경로는 평상시와 동일하다(DQ-50). `skip_cycles`는 **소모하지 않는다**(백오프는 그대로 두고 이번 실행만 허용) |
+| `decide_cycle(st, now, *, busy, cookie_warning, started_at)` | **순수 함수** — 부수효과 없이 `("run" \| "skip" \| "idle", 사유, 갱신된 st)`를 돌려준다. 판정 순서 고정: ① `enabled`? ② `now - started_at >= 300초`(기동 유예, FR37.2) ③ 도래(`now >= last_run_at + interval`)? ④ `skip_cycles > 0` → **1 감소 + `last_run_at = now`** 후 `skip`(요청 0, FR37.10) ⑤ `cookie_warning` → `paused_reason="cookie"`로 `idle`(**`last_run_at` 미갱신** — 쿠키를 고치면 다음 틱에 곧바로 돈다, FR37.11) ⑥ `busy` → `idle`(미갱신, 60초 뒤 재시도, FR37.12) ⑦ `run`. **순서가 계약이다** — ④를 ⑤·⑥보다 뒤에 두면 쿠키가 만료된 동안 백오프가 소모되지 않아 차단 회복 후에도 계속 쉰다 |
+| `build_plan(new_by_channel, st, reg)` | RSS 결과 → 실행 계획. ⓐ 채널 순서는 레지스트리 순서에 **`cursor`부터 회전**(FR37.8 기아 방지) ⓑ `max_videos_per_cycle`까지만 담고 다음 채널을 새 `cursor`로 기록 ⓒ 채널별 새 영상 수가 **15(`rss_monitor` 피드 상한)에 도달하면 `truncated`** 표시(DQ-47) ⓓ `by_channel[name] = {"url": 등록 URL, "entries": [{"id","title"}]}` + `videos_view`(같은 영상들을 `members_only:False`·`playlists:[]`로) 조립 — `_run_grouped`가 기대하는 스캔 캐시와 **같은 모양**이다. **`published`를 `upload_date`로 넘기지 않는다**(형식 불일치 + FR2.6과 같은 보수 원칙) |
+| `run_cycle(manager)` | 한 주기 실행: 대상 채널(`names(auto_only=True)`) → `rss_monitor.check_new_videos(names=)` → `build_plan` → 계획이 비면 **job 없이 종료** → 아니면 `manager.start_schedule(plan)`. 작업 종료를 폴링으로 기다렸다가 job 스냅샷에서 `last_result`를 채우고 `aborted_429`면 `skip_cycles`를 1→2→4로 승급, 아니면 0으로 리셋한다. `last_run_at = now`는 **취소·429 중단으로 끝난 주기에도 갱신**한다(FR37.12 — 갱신을 빠뜨리면 60초 뒤 같은 작업이 되살아나 사용자와 싸운다). 마감(`_finish_cycle`)은 **주기 시작 시점 st를 받지 않고 상태를 다시 읽어** 스케줄러 소유 필드만 병합하며, 작업 대기 중 예외가 나도 `try/finally`로 **반드시 마감한다**(마감 누락 = 같은 주기 재실행) |
+| `SchedulerThread` / `start(manager)` / `stop()` | `threading.Thread(daemon=True)` 1개. 대기는 `threading.Event.wait(60)`이라 `request_now()`·종료 신호에 **즉시 깨어난다**(sleep 폴링 아님). 루프 본문은 `try/except`로 전부 감싸 **어떤 예외도 스레드를 죽이지 못하게** 한다(죽으면 조용히 영원히 멈춘다 — 무인 기능의 최악 실패 모드). 기동은 `server.py`의 `startup` 훅, `SCHEDULER_DISABLED=1`이면 기동하지 않는다 |
+
+> **왜 `jobs.py`가 아니라 별도 모듈인가:** `JobManager`는 "요청 하나를 실행하는 것"이고 스케줄러는 "언제 요청할지 정하는 것"이다.
+> 후자는 시계·상태 파일·백오프라는 **완전히 다른 상태 기계**이며, `decide_cycle`을 순수 함수로 분리해야
+> 일 단위 동작을 초 단위 단위 테스트로 검증할 수 있다(V-U33 — 실제로 3일을 기다려 검증할 수는 없다).
 
 ---
 
@@ -437,6 +464,41 @@ GET /cookies → present·mtime + (detected_at ≥ 쿠키 mtime ? 경고 : 해�
    (channels.yaml 은 한 글자도 바뀌지 않는다)
 ```
 
+### 3.11 주기 자동 추출 (FR37)
+
+```
+[틱 — 60초마다, serve 프로세스 내 데몬 스레드]        네트워크 0
+  decide_cycle(state, now, busy=MANAGER.is_busy(), cookie_warning=get_status().warning)
+   ├ enabled=false ─────────────────────────────> idle (기본값 — 배포만으로는 아무 일도 없음)
+   ├ 기동 후 5분 미만 ──────────────────────────> idle (절전 복귀·자동 시작 직후 DNS 미비)
+   ├ now < last_run_at + interval ──────────────> idle   (interval 기본 3일, 선택 3·7·14·28)
+   ├ skip_cycles > 0 ─> skip_cycles-- · last_run_at=now · last_skip_at=now ─> skip  (백오프, FR37.10)
+   │                    ※ last_result는 건드리지 않는다 — 직전 429 기록이 증거다
+   ├ 쿠키 warning ────> paused_reason="cookie"  ─> idle  (last_run_at 미갱신 = 자가 치유)
+   ├ is_busy() ───────────────────────────────> idle  (미갱신 → 60초 뒤 재시도, FR37.12)
+   └ run ↓
+
+[주기 실행]
+  대상 = ChannelRegistry.names(auto_only=True)         ← 검색 유입 채널 제외 (FR37.5, 실측 77→36)
+  rss_monitor.check_new_videos(names=대상)             ← 429 예산과 무관 (FR29.4)
+   ├ errors[채널] ─────> 이번 주기 제외 + 결과에 기록 (전체 스캔으로 승격하지 않음)
+   └ channels[채널] = [{id,title,published}]  (피드 상한 15 — 도달 시 truncated 표시, DQ-47)
+  build_plan  → cursor부터 회전 · max_videos_per_cycle까지 절단 (FR37.8)
+   └ 계획이 비면 ──────> job 없이 주기 종료 (요청 0, "새 영상 없음")
+  MANAGER.start_schedule(plan)      job kind="schedule_run"
+   └ _run_grouped(filters={include_members:True}, group_title=None, merge_categories=False)
+        채널 순차: Extractor.run(entries=[{id,title}], pl_map={}, rest_state=공유 BatchRest)
+          ├ stats.aborted_429 ──> 남은 채널 중단 + job 경고           ← 주기 내 회로차단 (FR37.9)
+          └ 변경 있는 채널만 index_all(on_progress=)                  ← FR33 증분
+  결과 기록(마감은 try/finally로 보장 · 상태를 다시 읽어 스케줄러 소유 필드만 병합):
+            last_run_at=now(취소·중단이어도 갱신) · last_result ·
+            aborted_429면 skip_cycles 1→2→4, 아니면 0으로 리셋        ← 주기 간 백오프 (FR37.10)
+            ※ 주기 중 바뀐 enabled·interval_days·예산은 **덮지 않는다** (NFR3 ⓓ)
+```
+
+- 카테고리(재생목록)는 이 경로에서 매핑하지 않는다 — `pl_map={}`이라 요청 0이고, 다음 전체 run의 백필(FR15.5)이 채운다.
+- 자막 **수정 감지**(FR2.2)는 이 경로의 대상이 아니다 — RSS "새 영상"은 state에 없는 영상이라는 뜻이다(FR37.17).
+
 ---
 
 ## 4. 출력 폴더 구조
@@ -548,7 +610,7 @@ channels:
 ```json
 {
   "job_id": "20260802-153012",
-  "kind": "channel_run | single_video | playlist_run | search_run",
+  "kind": "channel_run | single_video | playlist_run | search_run | schedule_run",
   "channel": "두두감자", "url": "입력 URL",
   "status": "running | done | cancelled | error",
   "phase": "registering | extracting | indexing | finishing",
@@ -567,6 +629,7 @@ channels:
 - `done`은 skip된 영상도 포함해 증가한다(진행률이 `total`에 도달). 따라서 **`total == new+updated+skip+no_sub+members_only+error+date_skip`**(V-D11의 등식).
   **검색 작업(`search_run`)에서는 `live_wait`를 등식에 포함한다** — 채널·재생목록 스캔은 `live_status`로 진행 중 라이브를 사전 제외하지만
   검색 flat에는 그 필드가 없어(실측 0/15) 진행 중 라이브가 대상에 남고 처리 시 FR16.5 가드가 `live_wait`로 집계하기 때문이다 (DQ-26).
+- **`schedule_run`(v5.10, FR37.7)** 은 스케줄러가 만든 job이다. 구조·phase·stats 규약은 `playlist_run`/`search_run`과 완전히 같고(같은 `_run_grouped`), `channel`에는 표시용 문자열 `"자동 추출"`이 들어간다. 429 연속 차단으로 남은 채널을 건너뛴 경우 `status`는 `done`이고 사유는 `warnings`에 남는다(FR37.9).
 - `status`는 `done|cancelled|error`로 끝나며 마지막 job은 메모리에 유지된다. `{"status":"idle"}`는 프로세스 기동 후 한 번도 작업이 없었을 때만.
 
 ### 5.8 output/.cookie_status.json (FR19.2)
@@ -593,6 +656,9 @@ channels:
 | `POST /channels/group` | `{channel, group?}` | `{channel, group, moved: bool}` | 404 미등록 / **400 그룹명 검증 실패(FR35.4 — 디스크 무변경)** / **409 이름공간 충돌(FR35.6)·작업 중·마이그레이션 락(FR35.10)** / 500 이동 실패(보상 롤백 완료 여부를 `detail`에 명시) |
 | `POST /folders/rename` | `{old, new}` | `{old, new, channels: n, moved: bool}` | **400 이름 검증 실패** / **409 충돌·작업 중·락** / 500 이동 실패 |
 | `GET /subtitle` | `?channel=&basename=` | `{basename, text}` (txt 전문) | 400 경로탈출(`channel`·`basename` 양쪽 검사), 404 파일 없음 |
+| `GET /schedule` (v5.10) | – | `{enabled, interval_days, max_videos_per_cycle, last_run_at, next_due_at, skip_cycles, paused_reason, running, last_result, last_skip_at}` | – |
+| `POST /schedule` (v5.10) | `{enabled?, interval_days?, max_videos_per_cycle?}` (준 것만 갱신) | `GET /schedule`과 **같은 전체 상태** | 400 `interval_days ∉ {3,7,14,28}` · `max_videos_per_cycle ∉ [1,200]` — **409 없음**(FR37.14) |
+| `POST /schedule/run-now` (v5.10) | – | 202 `{queued:true, …상태}` | – (작업 중이어도 202 — 틱이 busy를 보고 알아서 미룬다, FR37.12·37.15) |
 | `GET /videos` | `?channel=` | `{videos:[{video_id,title,upload_date,basename,tickers,playlists,content_type,sub_type,duration,duration_string,url}]}` (날짜 역순) | 400 채널 누락·경로탈출 |
 
 **`POST /extract` 요청 판정 규칙 (전부 400 `{detail}`):**
@@ -615,6 +681,54 @@ channels:
 **`GET /channels/stats` 계산 정의:** 채널 목록·`url`·`lang`·`added_at`은 channels.yaml(registry) 기준,
 통계는 state.json 집계 — `extracted = count(sub_type ∈ {manual, auto})`, `members_only`, `no_sub = count(sub_type=="none")`,
 `total_known = len(state)`, `last_extracted = max(extracted_at)`(빈 문자열 제외, 없으면 `""`, ISO 문자열).
+
+### 5.10 output/.scheduler.json (FR37.13, v5.10)
+
+```json
+{
+  "enabled": false,
+  "interval_days": 3,
+  "max_videos_per_cycle": 30,
+  "last_run_at": "2026-09-24T03:10:00",
+  "skip_cycles": 0,
+  "cursor": "두두감자",
+  "paused_reason": null,
+  "last_skip_at": null,
+  "last_result": {
+    "started_at": "2026-09-24T03:10:00", "finished_at": "2026-09-24T03:41:12",
+    "channels_checked": 36, "channels_with_new": 3,
+    "videos_planned": 7, "videos_done": 7,
+    "stats": {"new": 7, "updated": 0, "skip": 0, "no_sub": 0,
+              "members_only": 0, "error": 0, "date_skip": 0, "live_wait": 0},
+    "rss_errors": {"채널명": "RSS 조회 실패: …"},
+    "truncated_channels": ["채널명"],
+    "aborted_429": false,
+    "outcome": "done | cancelled | aborted_429 | no_new | error"
+  }
+}
+```
+
+- **쓰는 주체는 serve 프로세스 하나뿐**이다(CLI 컨테이너는 읽지도 쓰지도 않는다). 그래도 쓰기는 `.tmp` + `os.replace`
+  원자 교체다 — 절전·강제 종료로 부분 기록된 JSON이 남으면 무인 기능이 조용히 죽는다.
+- `interval_days` **기본값은 3**이고 허용 집합은 `{3, 7, 14, 28}`이다(FR37.3 — 값 선택 근거). `max_videos_per_cycle` 기본 30.
+- **필드 소유가 나뉜다** — `enabled`·`interval_days`·`max_videos_per_cycle`은 **사용자 소유**(`POST /schedule`만 쓴다),
+  나머지(`last_run_at`·`skip_cycles`·`cursor`·`paused_reason`·`last_result`·`last_skip_at`)는 **스케줄러 소유**다.
+  기계는 저장 직전 파일을 다시 읽어 **자기 소유 필드만 병합**한다 — 주기가 수십 분 걸릴 수 있으므로 주기 시작 시점
+  스냅샷을 통째로 저장하면 그 사이의 설정 변경(특히 "끄기")이 조용히 원복된다(DQ-46이 `channels.yaml`을 기각한
+  lost update를 전용 파일 안에서 재현하는 꼴). 필드를 추가하면 `scheduler.USER_FIELDS`/`SCHEDULER_FIELDS` 중
+  하나에 반드시 등록한다(코드 `assert`가 강제한다).
+- **`last_result`는 실제로 실행한 주기만 기록한다** — 백오프로 건너뛴 주기는 `last_skip_at`만 남긴다.
+  `outcome`에 `skipped_backoff`가 없는 이유다: 덮일 값은 십중팔구 그 백오프를 유발한 `aborted_429` 기록인데,
+  사용자가 "왜 멈췄나"를 확인해야 하는 3~12일 동안 그 증거가 0으로 채워진 레코드로 교체된다.
+  "건너뛰는 중"은 `skip_cycles` 배너가 더 정확히 말한다. `outcome="error"`는 job이 오류로 끝났거나
+  작업 대기 자체가 실패한 주기다(오류를 `done`으로 보고하지 않는다).
+- **손상 값 교정(`_sanitize`)** — `enabled`는 JSON 불리언만 인정한다(`bool("no")`가 True인 함정을 피한다:
+  모호하면 꺼짐). `last_run_at`이 파싱되지 않으면 `now`로 교정한다 — 비워 두면 "기록 없음 = 즉시 도래"라
+  손상 파일 하나가 무인 전체 추출을 촉발한다.
+- `next_due_at`·`running`은 **저장하지 않는 파생값**이다(§2.13 `get_view`).
+- `cursor`는 "다음 주기에 이 채널부터 계획한다"는 **회전 시작점**이며, 그 채널이 삭제·개명되면 목록에 없으므로 첫 채널로 폴백한다.
+- 위치가 `output/`인 근거는 DQ-11(`.cookie_status.json`)·FR35.10(`.migration.lock`)의 선례이며,
+  `channels.yaml`을 쓰지 않는 근거는 **lost update**다(DQ-46·DQ-42).
 
 ---
 
@@ -646,10 +760,11 @@ yt-subs/
 ├── kl_query.py            # FR9·12·15.4
 ├── kl_harness.py          # FR10 질의 하네스 (제품 내)
 ├── cookie_health.py       # FR19 (YDLLogger·상태 영속·get_status)
+├── scheduler.py           # FR37 주기 자동 추출 — 판정(decide_cycle)·계획(build_plan)·상태 파일·틱 스레드
 ├── video_access.py        # 멤버십 판정 공유 규칙 (FR13.7·17.6, DQ-38) — 의존성 없는 잎 모듈
 ├── dashboard/
 │   ├── server.py          # FastAPI (FR11·17~20)
-│   ├── jobs.py            # JobManager·classify_url·apply_filters·재생목록/검색 워커 (FR17~18·24·34)
+│   ├── jobs.py            # JobManager·classify_url·apply_filters·재생목록/검색/스케줄 워커 (FR17~18·24·34·37)
 │   └── index.html         # 단일 파일 UI (질의·라이브러리·추출 3탭)
 ├── tests/                 # test_unit.py · test_integration.py · conftest.py
 ├── COOKIES_GUIDE.md       # 쿠키 추출 절차 (FR13 연계)
@@ -691,9 +806,9 @@ yt-subs/
 > 섹션 헤더 주석과 **1:1**로 맞춘 것이다. 목록에 없는 V-U 번호는 존재하지 않고, 테스트에 있는
 > 검증은 번호가 없더라도 §9.1b에 전부 기록한다. **v5.6에서 V-U22~V-U27을 FR35·FR7.7~7.9용으로 선점**했다 —
 > 구현 시 `tests/test_unit.py`에 같은 번호의 섹션 헤더 주석을 **같은 커밋에서** 넣어야 정본이 성립한다.
-> **v5.8에서 V-U30~V-U31을 FR36용으로 선점**했다(문서 선행 — 구현 커밋이 같은 번호의 섹션 헤더를 넣는다). 다음 신규 번호는 **V-U32**다.
+> **v5.8에서 V-U30~V-U31을 FR36용으로 선점**했다(문서 선행 — 구현 커밋이 같은 번호의 섹션 헤더를 넣는다). **v5.10에서 V-U33~V-U34를 FR37용으로 선점**했다(문서 선행 — 구현 커밋이 같은 번호의 섹션 헤더를 넣는다). 다음 신규 번호는 **V-U35**다.
 
-#### 9.1a 번호 부여 항목 (V-U1~V-U31)
+#### 9.1a 번호 부여 항목 (V-U1~V-U34)
 
 | ID | 대상 | FR·DQ | 위치 |
 |---|---|---|---|
@@ -731,9 +846,12 @@ yt-subs/
 | V-U31 | **스캔 캐시 무효화**(FR36.8) — 채널 스캔(`entry["channel"]`)·재생목록/검색 스캔(`entry["by_channel"]` 키) 양쪽에서 대상 채널 항목만 삭제되고 **다른 채널 캐시는 남는다**(정확 일치 — 부분 문자열로 남의 캐시를 지우지 않는다) / 삭제된 `scan_id`로 `POST /extract` 시 **기존 400**("만료") / rename이 **400·409로 실패하면 캐시 무변경**(성공 후에만 무효화) / **채널 삭제도 무효화**(옛 `scan_id`로 되살아나지 않는다) / `channel=None`이면 전체 비움 / **결함 재현 대조군:** 무효화 없이 옛 이름 캐시로 `_run_channel`을 돌리면 `config.channel_dir(옛이름)`(=레지스트리에 없는 평면 경로)에 쓰려 한다 | FR36.8·DQ-41 | `tests/test_unit.py` §V-U31 (구현됨 — `test_invalidate_scans_targets_only_referencing_entries`·`test_rename_invalidates_scan_and_extract_is_400`·`test_rename_failure_keeps_scan_cache`·`test_delete_channel_invalidates_scan_cache`·`test_stale_scan_cache_targets_ghost_dir_without_invalidation`), mock_jobs_test §13 병행 |
 
 | V-U32 | **종목코드 문맥 판정**(FR12.2·12.5~12.7) — 실측 오탐 고정: 제목 날짜 `[주식] 260819 …` 3종·계좌번호 `우리은행 /1002 763 241686 /`·사업자/전화번호·URL 숫자 조각·근거 없는 맨 6자리·`쿠폰코드 123456`·약한 근거+날짜(`인증코드: 260819`·`(260819)`) **전부 `[]`** / 채택: 강한 라벨(`종목코드:`·`단축코드`·`티커`)·거래소 표기(`KRX:`·`.KS`)·괄호 단독·일반 `코드:`·나열(`005930, 000660`)·`$AAPL` / **강한 라벨이면 날짜형 코드(`010130`)도 채택** / 백필은 dry-run에서 **파일 무변경**, `--apply`에서만 기록하고 재실행 시 변경 0(멱등) | FR12.2·12.5~12.7·DQ-43 | `tests/test_unit.py` §V-U32 (`test_extract_tickers_rejects_noise`(13케이스)·`test_extract_tickers_accepts_with_context`(10케이스)·`test_backfill_tickers_dry_run_then_apply`) |
+| V-U33 | **스케줄 판정 상태 기계**(FR37) — `decide_cycle`을 **가짜 시계**로 구동: ⓐ `enabled=false`면 항상 `idle`(기본 설치 상태에서 네트워크 0) ⓑ 기동 후 5분 미만이면 `idle` ⓒ 도래 전/도래 후 경계(`last_run_at + interval_days`) ⓓ **8일·30일·90일 잠든 뒤 깨어나도 실행은 1회**(밀린 만큼 반복 없음)이고 `last_run_at`은 `now`로 갱신(cron식 `+=` 누적 아님) ⓔ `skip_cycles>0`이면 실행 대신 1 감소 + `last_run_at` 갱신 ⓕ 쿠키 `warning`이면 `idle` + `paused_reason="cookie"` + **`last_run_at` 미갱신**이고 warning이 내려가면 다음 틱에 `run`(자가 치유) ⓖ `busy`면 `idle` + 미갱신 → 다음 틱 `run` ⓗ **판정 순서**(백오프 감소가 쿠키·busy보다 먼저) ⓘ `update()` 검증 — `interval_days` **3(기본)**/7/14/28 통과·1·5·30 `ValueError`, **기본 설정 파일의 `interval_days`가 3**, 예산 1~200 경계, **켤 때마다 `last_run_at`이 `now`로 채워짐**(토글 즉시 대량 추출 방지 — 껐다가 한참 뒤 다시 켜는 경우 포함) ⓙ `request_now()`가 도래시키되 `skip_cycles`를 소모하지 않음 ⓚ 상태 파일 — 원자 교체·손상 JSON·부재·미지 키에서 기본값 폴백 ⓛ **주기 도중 `POST /schedule {enabled:false}` → 주기 마감 후에도 `false`**(주기 길이만큼의 창 동안 비상 정지가 무효화되던 결함의 회귀 시험 — 마감은 `USER_FIELDS`를 쓰지 않는다, NFR3 ⓓ) ⓜ 백오프 skip이 **`last_result`를 덮지 않고**(직전 `aborted_429` 증거 보존) `last_skip_at`만 남김 ⓝ `_sanitize` — `enabled`는 **JSON 불리언만**(`"yes"`는 꺼짐), 깨진 `last_run_at`은 `now`로 교정("즉시 도래" 금지) ⓞ 작업 대기 중 예외가 나도 **주기를 마감**한다(`last_run_at` 갱신 → 같은 주기 재실행 없음, `outcome="error"`) | FR37.2~37.3·37.10~37.15·DQ-45·DQ-49·DQ-50 | `tests/test_unit.py` §V-U33 (구현됨 — `test_schedule_*` 17케이스) |
+| V-U34 | **RSS 선행 계획·429 중단 전파**(FR37) — ⓐ `check_new_videos(names=)`가 **준 채널만** 조회(`auto_run:false` 채널에 요청 0)하고 인자 없이 부르면 **기존 전 채널 동작 그대로**(FR29.2 회귀) ⓑ 새 영상 0이면 `build_plan`이 빈 계획 → **job 생성 0** ⓒ RSS 실패 채널은 계획에서 빠지고 `rss_errors`에 기록 ⓓ 채널 새 영상이 15건이면 `truncated_channels`에 오르고 **전체 스캔으로 승격하지 않음**(DQ-47) ⓔ 예산 절단 — 합계가 `max_videos_per_cycle`을 넘지 않고, **커서 회전으로 다음 주기에 뒷 채널이 먼저 잡힘**(기아 방지) ⓕ 계획 → `by_channel`/`videos_view` 모양이 `_run_grouped` 기대와 일치하고 `published`가 `upload_date`로 새지 않음 ⓖ **`stats["aborted_429"]`**: `run()`이 연속 429 중단 시 표식을 싣고 `_STAT_KEYS` 합산·job `stats` 등식(V-D11)을 오염시키지 않음 ⓗ `_run_grouped`가 표식을 보면 **남은 채널의 `run()`을 호출하지 않고**(대조군: 표식 없으면 전 채널 호출 = 현행 결함 재현) `status="done"` + 경고 1건 ⓘ 주기 결과가 `aborted_429`면 `skip_cycles` 1→2→4(상한 4), 정상 종료면 0으로 리셋 | FR37.4~37.9·DQ-47·DQ-48 | `tests/test_unit.py` §V-U34 + `mock_jobs_test.py` ⑭ (구현됨) |
 
-기준선: 2026-09-24 기준 `./yt.sh test` = **163 passed / 1 skipped** (skip 1건은 컨테이너 이미지에 node가
-없는 `fmtDuration` node 실행 테스트 — 호스트 node 22에서 통과 확인).
+기준선: 2026-09-24 기준 `./yt.sh test` = **185 passed / 1 skipped** (FR37 주기 자동 추출 V-U33·V-U34 +
+FR37 QA 결함 수정분 포함. skip 1건은 컨테이너 이미지에 node가 없는 `fmtDuration` node 실행 테스트 —
+호스트 node 22에서 통과 확인).
 
 
 #### 9.1b 번호 미부여 검증 (테스트는 있으나 V-U 번호 없음 — FR 헤더로 식별)
@@ -785,6 +903,7 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | V-D18 | 폴더 이동 e2e (FR35.6~35.9) — 합성 테스트 채널로 그룹 지정 → 변경 → 해제 → 폴더 이름 변경 | 각 단계마다 디스크 경로가 실제로 이동하고 자막·ChromaDB가 따라감(`/videos`·`POST /search` 정상) · 기존 채널명과 같은 그룹명 시도 **409** · `../`·절대경로·제어문자 그룹명 **400이며 `output/` 밖·안 모두에 디렉터리 생성 0** · 추출 작업 중 시도 **409** · 마이그레이션 락 존재 시 **409** | ⏳ 미검증 (FR35 구현 시) |
 | V-D19 | `./yt.sh add` 재등록 회귀 (FR7.7~7.9) — 이미 `group`·`auto_run`·`channel_id`가 있는 채널의 URL로 다시 `add` | 세 필드 **전부 보존**되고 `url`·`lang`만 갱신 · 채널 출력 경로 **불변**(라이브러리에서 채널이 사라지지 않음) · 개명 채널(등록명≠핸들) URL로 add해도 `channels.yaml` 항목 수 불변 · 신규 URL은 종전대로 등록+추출 시작 | ⏳ 미검증 (FR35 구현 시) |
 | V-D20 | **메모·추출 탭 이름 변경·탭 간 갱신 (FR36)** — 합성 테스트 채널로: ① 추출 탭 카드의 📝로 메모 저장 → **라이브러리 탭으로 전환하면 같은 메모가 보인다**(새로고침 없이) ② 라이브러리에서 메모를 지우면 두 탭 모두 메모 줄이 사라지고 `channels.yaml`에 `note: ""`가 남는다(필드 제거 아님) ③ 추출 탭 ✏️로 이름 변경 → 라이브러리·추출·질의 탭 채널 목록이 **전부 새 이름**이고 질의 탭의 **선택 채널이 첫 채널로 튕기지 않는다**(FR36.10) ④ 스캔 조건 화면을 띄운 채 그 채널의 이름을 바꾸면 화면이 닫히고 안내가 뜨며, 옛 `scan_id`로 `POST /extract` 시 **400** ⑤ 추출 작업 중 메모 저장·이름 변경 **둘 다 409** ⑥ 201자 메모 **400**(절삭되지 않음) ⑦ ✏️·📝 클릭이 **스캔을 시작시키지 않는다**(FR36.7 전파 차단) ⑧ 메모가 빈 기존 채널들의 카드 외형이 **v5.7과 동일**(FR36.5) | 위 8항목 전부 관찰 일치 | ⏳ 미검증 (FR36 구현 완료 — 재빌드 후 브라우저 확인 대기) |
+| V-D21 | **주기 자동 추출 (FR37)** — 합성/실채널 혼합으로: ① 배포 직후 기본 상태에서 **`GET /schedule.enabled == false`이고 서버를 30분 띄워도 yt-dlp 요청·RSS 요청이 0**(옵트인 실증) ② 켠 직후에도 즉시 실행되지 않고 `next_due_at`이 **기본 주기(3일) 뒤**(FR37.3·`update` 규약) ③ `POST /schedule/run-now` → 몇 초 내 `kind="schedule_run"` job 생성, **RSS 조회는 `auto_run:false` 채널을 제외한 수만큼**(실측 36) 발생 ④ 새 영상이 없는 채널에는 영상 페이지 요청 0이고, 전부 없으면 **job 자체가 만들어지지 않음** ⑤ 새 영상이 있는 채널만 추출되고 결과물은 **원채널(그룹) 폴더**에 저장, `meta.playlists`가 **덮어써지지 않음**(`pl_map={}`) ⑥ 실행 중 `POST /extract` → **409**, 취소 버튼 → `cancelled`이고 **`last_run_at`이 갱신돼 60초 뒤 재시작하지 않음** ⑦ 사용자 작업 중에 주기를 도래시키면 **그 틱에는 아무 일도 없고** 작업 종료 후 자동 시작 ⑧ 쿠키 경고를 주입하면 실행되지 않고 배너 표시, 쿠키 갱신 후 **자동 재개**(설정 토글 불필요) ⑨ 429 중단을 주입하면 **남은 채널이 돌지 않고**(`warnings` 1건) 다음 주기가 `skip_cycles`로 건너뛰며 UI에 재개 예정이 뜬다 ⑩ `interval_days=5` 요청 **400**(3·7·14·28만 허용) · `interval_days=7`로 바꾸면 `next_due_at`이 그에 맞게 이동(주기는 **고정값이 아니다**) ⑪ 컨테이너 재시작 후에도 설정·`last_run_at`이 유지(`output/.scheduler.json`) ⑫ `SCHEDULER_DISABLED=1`로 띄우면 스레드가 뜨지 않음 | 위 12항목 전부 관찰 일치 | ⏳ 미검증 (FR37 구현 시) |
 
 > **2026-08-08 FR21 실검증**: `POST /videos/delete`·`POST /channels/delete`를 합성 테스트 채널(등록·인덱싱까지 완료한
 > 가짜 영상 1건)로 검증 — 실채널 데이터는 전혀 건드리지 않았다. 스캔 진행 중 삭제 시도 시 409 확인(FR21.4).
@@ -854,6 +973,13 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | DQ-41 | 채널 이름 변경은 **그 채널을 참조하는 스캔 캐시를 버린다** — 캐시를 새 이름으로 고쳐 쓰지 않는다 (기존 결함) | `_run_channel`은 스캔 캐시에 박힌 `entry["channel"]`(스캔 시점의 이름)을 끝까지 쓴다. 이름이 바뀌면 `channel not in reg.names()`가 참이 되어 `reg.add(url)`을 부르지만, **`add()`의 반환값을 받지 않으므로** 지역 변수 `channel`은 옛 이름 그대로이고 뒤이은 `reg.get(옛이름)`은 `KeyError` → 폴백 cfg로 진행한다. 결과적으로 `config.channel_dir(옛이름)`이 **레지스트리에 없는 평면 경로**를 만들고 자막·state·ChromaDB가 **유령 폴더**에 쌓인다(라이브러리에는 나타나지 않는다). **캐시 재작성(rewrite)을 기각한 이유:** 캐시에는 `channel` 말고도 `by_channel` 키·`url`·`entries`가 얽혀 있고, 이름 변경 중 부분 갱신은 새로운 불일치를 만든다. 반면 **폐기는 단 한 줄이고 기존 400 계약**("scan_id가 만료되었습니다. 다시 스캔하세요")에 그대로 착지한다 — 스캔 재실행 비용은 1+N회 요청이지만 이름을 바꾸는 빈도는 매우 낮다. 이 결함은 FR31(v5.1)부터 존재했으나 이름 변경이 라이브러리 탭에만 있어 드러나지 않았고, 추출 탭에 ✏️를 다는 FR36.7이 **스캔 결과 화면 바로 옆에** 방아쇠를 놓는다. **채널 삭제도 같은 계열**이다 — 삭제 뒤 옛 `scan_id`로 추출하면 `reg.add()`가 채널을 되살려 "삭제했는데 다시 생긴다"가 되므로, 한 줄짜리 같은 해법을 `/channels/delete`에도 건다 (FR36.8) |
 | DQ-42 | 메모 저장도 작업 중 **409**다 — 이유는 파일 경합이 아니라 **`channels.yaml` lost update** | "메모는 디렉터리를 건드리지 않으니 409가 과하다"는 반론이 자연스러우므로 근거를 남긴다. `ChannelRegistry`는 **생성 시 yaml 전체를 읽고 `_save()`가 전체를 덮어쓰는** read-modify-write이고, 그룹 추출 워커 `_run_grouped`는 `reg = ChannelRegistry()`를 **작업 시작 시 한 번 만들어 수십 분짜리 루프 내내 재사용**하면서 `add`·`set_auto_run`·`set_group`으로 `_save()`를 반복한다. 작업 도중 다른 요청이 메모를 쓰면 워커의 다음 `_save()`가 **그 메모를 조용히 되돌린다** — 실패도 로그도 없는 소실이다. 대안(저장 시 yaml 재읽기 후 필드만 갱신, 또는 파일 락)은 registry 전반의 동시성 모델을 바꾸는 일이라 "간단한 메모"의 범위를 넘는다. 사용자 비용은 **추출 중 몇 분간 메모를 못 적는 것**이고 이득은 소실 0이며, 이름 변경(FR31.5)·`auto_run` 토글이 이미 같은 이유로 409다 (FR36.11) |
 | DQ-43 | 종목코드는 **문맥 근거가 있을 때만** 채택한다 — 정규식을 다듬는 방식을 기각 | 구 규칙 `\b(\d{6})\b`의 실측 결과는 **오탐률 100%**(441개 meta 중 값이 있는 26개 전부 오탐: 제목 앞머리 날짜 `[주식] 260819 …` 22종 + 설명 고정문구의 계좌번호 조각 `우리은행 /1002 763 241686 /`). **정규식 보정을 기각한 이유:** 6자리 숫자라는 모양은 종목코드·YYMMDD 날짜·계좌/전화/사업자번호 조각·URL 경로가 전부 공유한다 — 문맥 없이 숫자만 보면 어떤 패턴을 써도 이 넷을 가를 수 없다. 그래서 판정을 **후보(6자리) → 근거(라벨·거래소 표기·괄호·나열) → 배제(URL·숫자 나열·날짜)** 로 재구성했다. **날짜 배제를 약한 근거에만 적용한 이유:** KRX 코드의 약 3.7%(전체 6자리 공간 기준 37,200/1,000,000)가 YYMMDD로도 읽히므로(`010130` 고려아연, `000120` CJ대한통운) 일괄 배제하면 진짜 코드를 놓친다 — `종목코드 010130`처럼 **종목 전용 라벨**이 있으면 날짜 해석보다 라벨이 강하다고 본다. **채택 규칙을 더 넓히지 않은 이유:** 이 코퍼스에는 근거 있는 코드가 한 건도 없어(실측 새 규칙 채택 0건) 넓히는 근거 자체가 없다 — 한국 주식 유튜버는 종목을 **이름**으로 부른다. 따라서 **빈 값이 정확한 결과**이며, "티커가 안 잡힌다"는 관찰은 규칙을 느슨하게 되돌릴 근거가 **아니다**(FR12.6). 종목명 기반 추출은 사전이 필요한 별개 기능이라 범위 밖이다. **백필을 dry-run 기본으로 둔 이유:** 대상이 사용자 실데이터(441개 meta)이고 `migrate-groups`(DQ-36)가 세운 선례와 같다 — 재계산은 네트워크 없이 결정적이므로 언제든 다시 돌릴 수 있고, 잘못 쓰는 쪽만 되돌리기 어렵다 (FR12.2·12.5~12.7) |
+| DQ-44 | 스케줄러는 **serve 프로세스 안의 스레드**다 — 별도 컨테이너·호스트 cron·launchd를 전부 기각 | 결정적 근거는 **동시 실행 제어**다. `JobManager`의 점유 플래그(`_busy`)는 **모듈 싱글턴**이고 스캔 캐시·취소 이벤트·진행 상태도 전부 프로세스 메모리에 있다. 스케줄러가 다른 프로세스(cron이 띄우는 `./yt.sh run`, 별도 컨테이너)에 있으면 사용자가 대시보드에서 추출하는 **바로 그 순간에 두 번째 추출이 시작**돼 429 위험이 배가되고, 이를 막으려면 파일 락 기반 프로세스 간 배타 제어를 새로 만들어야 한다(`.migration.lock`이 그 비용을 보여준다 — FR35.10). 같은 프로세스에 두면 `is_busy()` 한 줄로 끝나고 진행율(FR18)·이벤트(FR26)·취소(FR17.8)·인덱싱(FR33)이 **전부 공짜로 재사용**된다. 대가는 "대시보드 컨테이너가 떠 있어야 한다"는 운영 전제이며, 이는 사용자의 요구("맥북이 켜져 있으면 계속 떠 있어야 함")와 정확히 일치한다 (FR37.1·37.18) |
+| DQ-45 | 주기 판정은 **정시(cron)가 아니라 "마지막 실행 + 간격"**, 밀린 주기는 **1회만** 따라잡는다 | 운용 호스트가 **맥북**이라 덮개를 닫으면 컨테이너가 통째로 멈춘다(NFR6 개정). "매주 일요일 3시" 같은 정시 모델은 그 시각에 잠들어 있으면 **영원히 실행되지 않거나**, 깨어난 뒤 밀린 실행을 몰아서 터뜨린다. 경과 시간 모델은 깨어난 다음 틱에 자연히 따라잡고 시계·타임존 변경에도 둔감하다. 밀린 주기를 **누적 실행하지 않는 이유**는 작업이 state.json 기반 멱등이기 때문이다 — 3주를 건너뛰었어도 한 번 돌면 그동안의 신규 영상을 (RSS 상한 내에서) 전부 잡고, 두 번째 실행은 "새 영상 없음"으로 요청만 낭비한다. `last_run_at`은 cron식 `+= interval`이 아니라 **`= now`** 로 갱신한다(누적식은 깨어난 직후 연속 실행을 유발한다). 기본 간격은 **3일**이며 선택지는 3·7·14·28일이다(값 선택 근거는 FR37.3) (FR37.2~37.3) |
+| DQ-46 | 스케줄 설정·상태는 **`output/.scheduler.json`** — `channels.yaml` 기각 | ⓐ **lost update:** `ChannelRegistry`는 인스턴스 생성 시 yaml 전체를 읽고 `_save()`로 전체를 덮어쓰는 read-modify-write이며, 그룹 워커는 **작업 내내 같은 인스턴스**를 들고 있다(FR36.11·DQ-42가 메모 저장을 409로 만든 바로 그 이유). 스케줄러는 주기마다 `last_run_at`을 쓰므로 이 경합을 **정면으로** 맞는다 — 게다가 그 쓰기는 무인이라 아무도 알아채지 못한다. ⓑ 스케줄 설정은 **전역**인데 `channels.yaml`에는 전역 섹션이 없다(최상위가 `channels:` 하나) — 없는 층을 새로 만들면 `add`·`rename`·`set_*` 전부가 그 층을 보존해야 한다. ⓒ `output/`은 CLI·serve가 공유하는 **유일한 쓰기 마운트**라는 선례가 이미 둘 있다(DQ-11 `.cookie_status.json`, FR35.10 `.migration.lock`). ⓓ 설정과 런타임 상태를 **한 파일**에 둔 것은 쓰는 주체가 serve 프로세스 하나뿐이라 분리 이익이 없고, 파일이 늘수록 부분 기록 조합이 늘기 때문이다(원자 교체 1회로 끝낸다) (FR37.13) |
+| DQ-47 | RSS **15개 상한**은 무시하되 **감지·노출**한다 — 주기적 전체 스캔 폴백을 기각 | 한 채널이 한 주기에 15개를 넘게 올리면 피드가 오래된 쪽을 잘라낸다. 그래도 ⓐ **유실이 아니라 지연**이다 — 잘린 영상은 state.json에 없으므로 다음 수동 `./yt.sh run`이 정상 처리한다(무엇도 영구히 사라지지 않는다). ⓑ 폴백으로 "가끔 전체 채널 스캔"을 넣으면 **무인 요청량이 채널 수만큼 곱해지고**(36채널 × 2탭 + 재생목록) 그것은 "무작정 전체 run 하지 않는다"는 이 기능의 전제 자체를 무너뜨린다 — RSS 선행을 채택한 이유가 사라진다. ⓒ 그렇다고 조용히 넘기지는 않는다: **새 영상 수가 15에 도달하면 `truncated`** 로 표시해 "전체 run 권장" 안내를 띄운다(감지 비용 = 배열 길이 비교 = 0). 판단은 사람에게 남기고, 기계는 요청을 늘리지 않는다. **ⓓ 주기 길이가 이 타협의 발생 빈도를 직접 좌우한다** — 상한에 걸리려면 *한 주기 안에* 15개를 넘겨야 하므로, 기본 주기를 7일이 아니라 **3일**로 잡은 것 자체가 이 구멍을 줄이는 1차 수단이다(FR37.3ⓐ). 즉 이 DQ의 "무시"는 주기가 짧다는 전제 위에서 성립하며, 사용자가 주기를 28일로 늘리면 `truncated` 경고가 그만큼 자주 뜨는 것이 정상 동작이다 (FR37.6) |
+| DQ-48 | 429 회로차단을 **2단**으로 올린다 — ⓐ 주기 내 즉시 중단(신호 `aborted_429` 신설) ⓑ 주기 간 지수 백오프(1→2→4) | 현행 방어는 **사람이 지켜보는 실행** 전제다: 연속 429 5회면 `run()`이 중단하고 로그로 "30분~1시간 후 다시"라고 말한다 — 읽는 사람이 있을 때만 작동하는 방어다. 무인에서는 두 구멍이 난다. **ⓐ 같은 주기 안:** `run()`이 중단 사실을 호출자에게 **구별 가능하게 알리지 않아**(`stats["error"] += 1`이 전부) `_run_grouped`가 차단 상태에서 다음 채널로 넘어가 계속 두드린다 — 이것은 스케줄러 이전에 **재생목록(FR24)·검색(FR34) 추출에 이미 있던 결함**이며, 사람이 보고 있으면 취소할 수 있었을 뿐이다. `stats["cancelled"]`와 같은 계열의 불리언 표식을 추가해 그룹 루프가 즉시 멈추게 한다. **ⓑ 다음 주기:** 아무 조치가 없으면 일주일 뒤 같은 조건으로 다시 들어간다. 차단은 "회복될 때까지 누적되는 압력"이므로 **성공한 주기만** 백오프를 0으로 되돌리고, 실패는 1→2→4주기로 물러선다(상한 4 = **기본 주기 3일 기준 최대 12일**. 주 단위 기본이었다면 약 한 달이라 과했다 — 기본 주기 3일이 이 상한을 합리적 범위에 두는 전제다, FR37.3ⓓ). 백오프 중에도 **사용자의 수동 추출은 막지 않는다** — 사람은 상황을 보고 판단할 수 있고, 막으면 복구 수단까지 빼앗는 것이다 (FR37.9~37.10) |
+| DQ-49 | 쿠키 만료·백오프는 **상태**로 표현한다 — 기계가 사용자 설정(`enabled`)을 끄지 않는다 | "쿠키 만료 시 스케줄 정지"를 `enabled = false` 기록으로 구현하면 ⓐ 사용자가 **켜 둔 적 없는 상태**로 되돌아가 나중에 "왜 안 돌지"를 겪고 ⓑ 쿠키를 고쳐도 **누군가 다시 켜야** 하며 ⓒ 설정 파일만 봐서는 사용자 의도와 기계 개입을 구별할 수 없다. 대신 매 틱마다 `cookie_health.get_status().warning`을 **조건으로 평가**하고 `paused_reason`으로 노출한다 — FR19.3이 쿠키 갱신 시 warning을 자동 해제하므로 스케줄은 **스스로 재개**한다. 같은 원칙이 `skip_cycles`(429)와 busy 경합에도 적용된다: 전부 판정 입력이지 설정 변경이 아니다. NFR3 ⓓ로 이 원칙을 못박았다 (FR37.11·37.12). **v5.10 보강(QA F1):** 원칙을 말로만 두면 저장 경로에서 깨진다 — 주기 마감이 *주기 시작 시점 스냅샷*을 통째로 저장해 그 사이의 `enabled`·`interval_days`·`max_videos_per_cycle` 변경을 되돌려 썼다(끄기가 듣지 않고, 원복 방향이 하필 더 자주·더 많이 도는 쪽). 그래서 소유를 **코드 상수**(`USER_FIELDS`/`SCHEDULER_FIELDS`)로 못박고 기계 쪽 쓰기를 전부 `save_scheduler_state()` **재적재 후 병합**으로 돌렸다. 같은 이유로 백오프 skip은 `last_result`(직전 429 증거)를 덮지 않고 `last_skip_at`만 남긴다 |
+| DQ-50 | `run-now`는 **별도 실행 경로가 아니다** — "지금 도래시키기"로 구현한다 | 수동 트리거를 "바로 추출 시작"으로 구현하면 busy·쿠키·백오프·예산 검사를 **두 벌** 갖게 되고, 경험상 안전장치는 반드시 둘 중 한쪽에서 빠진다(무인 기능에서 그 누락은 429 차단으로 돌아온다). `request_now()`는 `last_run_at`을 간격만큼 과거로 당기고 틱 이벤트를 깨우기만 하며, 실제 실행은 평상시와 **완전히 같은 `decide_cycle` → `run_cycle`** 경로다. 부수 효과로 검증이 가능해진다 — 최소 주기가 7일이라 `run-now` 없이는 V-D21을 실행할 방법이 없다. `skip_cycles`를 소모하지 않는 것은 사용자가 상황을 보고 누른 예외 실행이기 때문이다 (FR37.15) |
 
 ---
 
@@ -880,7 +1006,7 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | 게이트 | 실행 주체 | 대응 검증 |
 |---|---|---|
 | 정적 | pipeline-verify ① | py_compile 전체 |
-| 단위 | pipeline-verify ② | V-U1~V-U27 (§9.1a — pytest + mock 스크립트, 네트워크 없음). V-U3은 테스트 미구현, V-U8·V-U9는 mock 스크립트, **V-U22~27 구현 완료(2026-09-21)** |
+| 단위 | pipeline-verify ② | V-U1~V-U34 (§9.1a — pytest + mock 스크립트, 네트워크 없음). V-U3은 테스트 미구현, V-U8·V-U9는 mock 스크립트, **V-U33~34는 FR37용 선점(구현 예정)** |
 | 빌드 | pipeline-verify ③ | docker build |
 | 카나리아 | pipeline-verify ④⑤ | V-D2 + 회귀(스킵 수 유지·429 없음) |
 | 인덱스/스모크 | pipeline-verify ⑥⑦ | V-D9 일부 (curl /videos·/search) |

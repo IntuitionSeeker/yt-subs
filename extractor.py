@@ -574,6 +574,11 @@ class Extractor:
             log.warning("  💡 30분~1시간 후 './yt.sh run' 으로 이어받기 하세요.")
             log.warning("  💡 cookies.txt 를 추가하면 차단이 크게 줄어듭니다.")
             log.warning("━" * 50)
+            # FR37.9 — 호출자가 "여기까지"를 구별할 수 있게 표식을 싣는다.
+            # `_STAT_KEYS` 카운터가 아니라 `cancelled`와 같은 계열의 **불리언**이다
+            # (카운터에 섞으면 job stats 등식(V-D11: 미리보기 수 = 처리 수)이 깨진다).
+            # CLI 로그·동작은 무변경(FR18.1) — 읽는 쪽은 대시보드 그룹 워커다.
+            stats["aborted_429"] = True
         if cancelled:
             stats["cancelled"] = True
         return stats

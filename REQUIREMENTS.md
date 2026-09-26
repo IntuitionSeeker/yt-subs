@@ -763,6 +763,7 @@ RSS 감지(FR29) → 그룹 추출 워커(FR24·FR34의 `_run_grouped`) → 진�
 |---|---|---|
 | FR1.1~1.6 | `Extractor` | srt/, txt/ |
 | FR2.1~2.5 | `StateManager` | state.json, extract_log.csv |
+| FR2.6 | `StateManager.is_updated` (비교값 `new_mod`가 None이면 무변경 → `decide`가 `skip`) · `Extractor.run` 루프 (flat 엔트리의 `modified_date`·`upload_date`를 해석 없이 `state.decide`로 전달 — **둘 다 없는 것이 정상**) · `Extractor._out_of_range` (`upload_date == "00000000"`은 판정 불가 → 통과) — 제약의 근거는 DQ-12 | extract_log.csv `skip` 행 · meta.json `upload_date` `"00000000"` (doctor.meta-fields 정보 항목) |
 | FR3.1~3.4 | `MetaCollector` | meta/*.json, desc/*.txt |
 | FR4.1~4.5 | `QualityChecker` | review_report.csv |
 | FR5.1~5.3 | `Reprocessor` (Extractor 재사용) | srt/, txt/ 덮어쓰기 |
@@ -773,7 +774,12 @@ RSS 감지(FR29) → 그룹 추출 워커(FR24·FR34의 `_run_grouped`) → 진�
 | FR9.1~9.6 | `KLQuery` | (질의 API) |
 | FR10.1~10.6 | `KLHarness` (질의 하네스) | (answer·trace) |
 | FR11.1~11.4 | `dashboard/server.py` · `index.html` | (대시보드) |
+| FR11.5 | `dashboard/index.html` (`send` → `render` — 파이프 표를 table로 변환·URL 자동 링크화 · `addMsg` 말풍선 · `data.trace` 요약 줄 · `summarize` 요약 패널) · `dashboard/server.py` (`POST /ask`·`POST /summary`) — 검증 결과(⚠ 표시)는 `kl_harness.SYSTEM_PROMPT` 원칙 2~3이 생성한 텍스트를 그대로 렌더 | (질의 결과 패널) |
+| FR11.6 | `kl_indexer.index_subtitles` (`source_url`에 `&t=<start_sec>s` 부착) · `kl_query.ask` (프롬프트 컨텍스트에 `source_url` 포함) · `kl_harness.SYSTEM_PROMPT` (출처·타임스탬프 링크 명시 지시) · `dashboard/index.html` `render` (URL → 새 탭 앵커) | 답변 내 `watch?v=…&t=…s` 링크 |
+| FR11.7 | `dashboard/index.html` (`channelSel` select · `loadChannels` — 현재 선택 보존 FR36.10 → `loadVideos`) · `dashboard/server.py` (`GET /channels`) | (채널 전환) |
 | FR12.1~12.4 | `MetaCollector.extract_tickers` · `KLQuery` | meta tickers 필드 |
+| FR12.5~12.6 | `meta_collector.extract_tickers` (문맥 스캐너 — 강한 근거 `_LABEL_STRONG`·`_EX_PREFIX`·`_EX_SUFFIX` / 약한 근거 `_LABEL_WEAK`·`_PAREN_OPEN`·`_LIST_SEP` / 공통 배제 `_URL_HINT`·`_numeric_neighbor` / 약한 근거 추가 배제 `_is_date_like` / 미국 티커 `_TICKER_US`) · `tickers_from_meta` (제목+태그+설명 합산 — 저장·백필 공용) · `MetaCollector.save` (저장 시 호출) — FR12.6의 "빈 값이 정답"은 `audit_waivers.yaml`의 doctor.meta-fields `tickers/all-empty` 예외로 고정 | meta.json `tickers` (실측 전건 빈 배열) |
+| FR12.7 | `meta_collector.backfill_tickers` (기본 dry-run · `apply` 인자가 True일 때만 기록 · 반환 `scanned`/`changed`/`removed`/`added`/`samples`) · `main.cmd_backfill_tickers` (`backfill-tickers` 서브파서) · `yt.sh` (사용법 주석) — meta와 `desc/*.txt`만 읽으므로 네트워크·재추출·재인덱싱 없음 | meta.json `tickers` 재계산 (차분 출력 → `--apply` 시 기록) |
 | FR13.1~13.5 | `config.resolve_cookiefile` · `Extractor._fetch_vtt` | /tmp 쿠키 작업본 |
 | FR13.6 | `config.firefox_profile_dir`·`has_auth` · `Extractor._ydl_opts`(cookiesfrombrowser)·`_fetch_vtt` · `yt.sh`(프로필 자동 감지 마운트) · `cookie_health.get_status`(source) | (Firefox 쿠키 직접 읽기) |
 | FR13.7 | `video_access.py`(`MEMBERS_AVAILABILITY`·`is_members_availability`·`is_members_message`) · `Extractor._is_members_only(msg, availability)`·`run()` 루프(429 선판정) · `dashboard/jobs.py`(`_is_members_availability` 위임·단일영상 워커) | state.json `sub_type="members_only"` |
@@ -790,6 +796,8 @@ RSS 감지(FR29) → 그룹 추출 워커(FR24·FR34의 `_run_grouped`) → 진�
 | FR23.1~23.3 | `subtitle_utils.reflow_sentences` · `srt_to_txt` | txt/ (문장 단위 개행) |
 | FR24.1~24.6 | `dashboard/jobs.py` (`classify_url` playlist 분기 · `_do_scan_playlist` · `_run_playlist` · `_merged_pl_map`) · `dashboard/index.html` (kind 표시·채널 배지) | 원채널 output/ + playlists.json 병합 |
 | FR25.1~25.7 | `channel_registry.set_group` · `dashboard/server.py` (`POST /channels/group`·stats group) · `dashboard/jobs.py` (`_run_playlist` 자동 폴더) · `dashboard/index.html` (폴더 섹션·전체 보기·📁 버튼) | channels.yaml `group` 필드 |
+| FR25.8 | `dashboard/index.html` `libSearch` (폴더 모드 분기 — `libStats`에서 `extracted`>0 채널만 추려 채널당 `POST /search` top_k 5, 동시 3채널 `CONC`, 실패 채널은 빈 배열로 건너뜀, `score` 내림차순 병합 후 상위 10건 · 결과 행에 원채널 배지 `_ch`) | (폴더 내용 검색 결과) |
+| FR25.9 | `dashboard/index.html` `loadExtChannels` (폴더 그룹핑·헤더에 채널 수·추출 합계) · `extCollapsed`·`extSeenGroups` (라이브러리와 **별도** 접기 상태 · 처음 보는 폴더는 접힘) · `extChanCards`의 chan-group-head 클릭 위임 — 카드 클릭은 기존 `extSelectChannel` 유지 | (추출 탭 폴더 표시) |
 | FR26.1~26.5 | `extractor.py` (`_event`·`_report(event=)`) · `dashboard/jobs.py` (`job["events"]` 축적·`_append_event`) · `dashboard/index.html` (통계 칩·이벤트 패널) | /extract/status.events |
 | FR27.1~27.4 | `meta_collector.save`(chapters) · `dashboard/server.py`(/subtitle.chapters) · `dashboard/index.html`(챕터 목록) | meta.json `chapters` |
 | FR28.1~28.2 | `dashboard/server.py`(/export/markdown) · `dashboard/index.html`(⬇ MD 버튼) | (파생 문서) |

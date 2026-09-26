@@ -100,6 +100,9 @@
   .live { color: var(--warn); border: 1px solid var(--warn);
     border-radius: 4px; padding: 0 4px; }
   .subtype { color: var(--muted); }
+  /* 출처 배지 (FR39.9) — 값이 없는 영상은 배지 자체가 없다 */
+  .origin { color: var(--muted); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 5px; }
 
   .main { display: flex; flex-direction: column; overflow: hidden; }
   .main-head {
@@ -364,6 +367,10 @@
     </select>
     <button class="icon-btn cat-rename" title="선택된 카테고리 이름 변경"
             onclick="renameCategory()">✏️</button>
+    <!-- 출처 필터 (FR39.9ⓑ) — 폴더 전체 보기에서도 같은 배열에 같은 조건이 걸린다 -->
+    <select id="libOriginSel" onchange="renderLibList()">
+      <option value="">전체 출처</option>
+    </select>
     <input type="text" id="libSearchQ" placeholder="🔍 자막 내용 검색 (Enter)…"
            style="flex:1" onkeydown="if(event.key==='Enter')libSearch()">
   </div>
@@ -747,6 +754,7 @@ async function libSelect(name) {
   document.getElementById("libCategorySel").innerHTML =
     `<option value="">전체 카테고리</option>` +
     cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  buildOriginOptions(videos);                  // 출처 필터 선택지 (FR39.9ⓑ)
   renderLibList();
 }
 
@@ -773,7 +781,96 @@ async function libSelectGroup(g) {
   document.getElementById("libCategorySel").innerHTML =
     `<option value="">전체 카테고리</option>` +
     cats.map(c => `<option value="${esc(c)}">${esc(c)}</option>`).join("");
+  buildOriginOptions(all);                     // 폴더 전체 보기도 같은 필터 (FR39.9ⓒ)
   renderLibList();
+}
+
+/* ═══ 출처 배지·필터 (FR39.9) ═══
+
+   `origin`은 리스트이고 보통 원소 1개다(FR39.3~39.4). **값이 없으면 배지를 만들지
+   않는다** — 561편이 빈 값인 것이 정상이므로 "알 수 없음" 배지를 붙이면 화면이
+   그것으로 도배된다.
+
+   필터 선택지는 **로드된 목록에서만** 조립한다(서버 왕복 없음). 옵션 폭발(P2)은
+   2층으로 막았다: ⓐ kind 단위 "전체" 옵션은 항상 있고 ⓑ 검색어·재생목록 제목은
+   최근 순 상위 `ORIGIN_SUB_MAX`개만 하위 옵션으로 만든다. 상한에 걸려 빠진 값도
+   ⓐ가 받으므로 **조용히 걸러지는 영상은 없다**. */
+const ORIGIN_LABELS = { channel: "채널", playlist: "재생목록", search: "검색",
+                        video: "단일 URL", scheduler: "자동(주기)", transcribe: "전사" };
+const ORIGIN_ORDER = ["search", "playlist", "channel", "scheduler", "video", "transcribe"];
+const ORIGIN_SUB_MAX = 20;
+let libOriginOpts = [];       // select 값(인덱스 문자열) → {kind, key}
+
+function originKey(o) {
+  /* kind별 "구체 출처"를 한 문자열로. 부가 키가 없는 kind는 빈 문자열 */
+  if (!o) return "";
+  if (o.kind === "search") return o.query || "";
+  if (o.kind === "playlist") return o.playlist_title || "";
+  return "";
+}
+
+function fmtOrigin(origin) {
+  /* 배지 문구. 값이 없으면 "" → 호출부가 배지를 만들지 않는다 (FR39.9ⓐ) */
+  const o = (origin || [])[0];
+  if (!o || !o.kind) return "";
+  const label = ORIGIN_LABELS[o.kind] || o.kind;
+  const key = originKey(o);
+  return key ? `${label}: ${key}` : label;
+}
+
+function originTitle(origin) {
+  /* 툴팁 — 시각(at)과 경로(via·folder)까지. `at`은 `extracted_at`과 같은 시계다 */
+  const o = (origin || [])[0];
+  if (!o) return "";
+  const bits = [fmtOrigin(origin)];
+  if (o.via) bits.push(`경로: ${o.via}`);
+  if (o.folder) bits.push(`폴더: ${o.folder}`);
+  if (o.at) bits.push(`기록: ${o.at}`);
+  return bits.join(" · ");
+}
+
+function buildOriginOptions(videos) {
+  const kinds = new Map();            // kind → Map(key → 최근 at)
+  for (const v of videos || []) {
+    const o = (v.origin || [])[0];
+    if (!o || !o.kind) continue;
+    if (!kinds.has(o.kind)) kinds.set(o.kind, new Map());
+    const key = originKey(o);
+    if (!key) continue;
+    const at = String(o.at || "");
+    const cur = kinds.get(o.kind).get(key) || "";
+    if (at > cur) kinds.get(o.kind).set(key, at);
+  }
+  const hasNone = (videos || []).some(v => !(v.origin || []).length);
+  libOriginOpts = [];
+  let html = `<option value="">전체 출처</option>`;
+  for (const kind of ORIGIN_ORDER) {
+    if (!kinds.has(kind)) continue;
+    const label = ORIGIN_LABELS[kind] || kind;
+    libOriginOpts.push({ kind, key: "" });
+    html += `<option value="${libOriginOpts.length - 1}">${esc(label)} 전체</option>`;
+    const subs = [...kinds.get(kind).entries()]
+      .sort((a, b) => String(b[1]).localeCompare(String(a[1])))
+      .slice(0, ORIGIN_SUB_MAX);
+    for (const [key] of subs) {
+      libOriginOpts.push({ kind, key });
+      html += `<option value="${libOriginOpts.length - 1}">` +
+              `  ${esc(label)}: ${esc(key)}</option>`;
+    }
+  }
+  if (hasNone) html += `<option value="none">출처 없음</option>`;
+  document.getElementById("libOriginSel").innerHTML = html;
+}
+
+function originSelPass(v) {
+  const sel = document.getElementById("libOriginSel").value;
+  if (!sel) return true;
+  const list = v.origin || [];
+  if (sel === "none") return list.length === 0;
+  const want = libOriginOpts[Number(sel)];
+  if (!want) return true;                      // 선택지가 재조립된 직후 방어
+  return list.some(o => o && o.kind === want.kind &&
+                        (!want.key || originKey(o) === want.key));
 }
 
 /* ═══ 이름 변경 (FR31) ═══ */
@@ -904,7 +1001,8 @@ function renderLibList() {
   const cat = document.getElementById("libCategorySel").value;
   const vids = libVideos.filter(v =>
     (!kw || (v.title || "").toLowerCase().includes(kw)) &&
-    (!cat || (v.playlists || []).includes(cat)));
+    (!cat || (v.playlists || []).includes(cat)) &&
+    originSelPass(v));
   document.getElementById("libList").innerHTML = vids.map(v => `
     <div class="lib-row" data-basename="${esc(v.basename)}">
       <div class="video-title">${esc(v.title || "(제목없음)")}</div>
@@ -916,6 +1014,8 @@ function renderLibList() {
         ${v.content_type === "live" ? `<span class="live">LIVE</span>` : ""}
         ${v.sub_type ? `<span class="subtype">${v.sub_type === "manual" ? "📝수동" : v.sub_type === "whisper" ? "🎤전사" : "🤖자동"}</span>` : ""}
         ${(v.playlists||[]).map(p=>`<span class="playlist">${esc(p)}</span>`).join("")}
+        ${fmtOrigin(v.origin)
+          ? `<span class="origin" title="${esc(originTitle(v.origin))}">📍 ${esc(fmtOrigin(v.origin))}</span>` : ""}
         <a class="ext-link" href="${esc(v.url || '#')}" target="_blank">↗ 원본</a>
         <button class="icon-btn video-rename" title="제목 변경">✏️</button>
         <button class="icon-btn video-del" title="영상 삭제">🗑</button>

@@ -13,6 +13,10 @@ import config
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 log = logging.getLogger("main")
 
+# CLI로 들어온 영상의 출처 (FR39.2 진입점 매핑). `add`·`run` 두 곳이 공유한다 —
+# `reextract`는 재처리이므로 **출처를 주지 않는다**(FR39.4ⓒ).
+CLI_ORIGIN = {"kind": "channel", "via": "cli"}
+
 
 def cmd_add(args):
     """채널 등록 + 전체 자막 추출 자동 시작. FR7.2"""
@@ -25,7 +29,7 @@ def cmd_add(args):
     log.info(f"✅ 기존 채널 갱신: {name} (폴더·설정 보존)" if existed
              else f"✅ 채널 등록: {name}")
     log.info("자막 추출을 시작합니다...\n")
-    Extractor(reg.get(name)).run()
+    Extractor(reg.get(name)).run(origin=CLI_ORIGIN)
 
 
 def bulk_targets(reg, channel: str = None) -> list:
@@ -49,7 +53,7 @@ def cmd_run(args):
         log.info("등록된 채널이 없습니다. './yt.sh add URL' 로 추가하세요.")
         return
     for name in targets:
-        Extractor(reg.get(name)).run(limit=args.limit)
+        Extractor(reg.get(name)).run(limit=args.limit, origin=CLI_ORIGIN)
 
 
 def cmd_transcribe(args):

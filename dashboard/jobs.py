@@ -11,7 +11,7 @@ import datetime
 import importlib
 import threading
 from pathlib import Path
-from urllib.parse import unquote, quote_plus, unquote_plus
+from urllib.parse import unquote, quote_plus, unquote_plus, urlparse, parse_qs
 
 import config
 import video_access
@@ -120,6 +120,21 @@ def classify_url(url: str) -> tuple:
     if _HANDLE_RE.search(decoded) or _CHANNEL_RE.search(decoded):
         return ("channel", raw)
     raise ValueError(f"영상·재생목록·검색·채널 URL로 판별할 수 없습니다: {raw[:80]}")
+
+
+def _playlist_id_from_url(url: str) -> str:
+    """재생목록 URL의 `list=` 파라미터 (FR39.2 부가 키 `playlist_id`).
+
+    스캔 캐시에는 `playlist_title`만 있고 id는 여기서만 얻을 수 있다. **얻어지면 싣고
+    없으면 키를 생략한다** — 빈 문자열을 저장하면 "id를 모른다"와 "id가 비어 있다"가
+    구별되지 않는다. 판별 불가는 예외가 아니라 빈 문자열(출처 기록이 추출을 막지 않는다).
+    """
+    try:
+        vals = parse_qs(urlparse((url or "").strip()).query).get("list") or [""]
+    except ValueError:                                # pragma: no cover - 방어적
+        return ""
+    pid = (vals[0] or "").strip()
+    return pid if re.fullmatch(r"[\w-]{2,64}", pid) else ""
 
 
 def search_query_from_url(url: str) -> str:
@@ -760,7 +775,8 @@ class JobManager:
             stats = ext.run(entries=target_entries, pl_map=entry["pl_map"],
                             date_range=date_range, progress=self._make_cb(job),
                             rest_state=_ext_mod.BatchRest(
-                                cancel_check=self._cancel.is_set))
+                                cancel_check=self._cancel.is_set),
+                            origin={"kind": "channel", "via": "dashboard"})
             self._merge_stats(job, stats)
 
             cancelled = bool((stats or {}).get("cancelled")) or self._cancel.is_set()
@@ -773,9 +789,13 @@ class JobManager:
     # ── 재생목록 워커 (FR24.3~24.5) ──────────────────────────────────────────
     def _run_playlist(self, job: dict, entry: dict, filters: dict, index: bool):
         """재생목록 추출 — 제목을 카테고리로 병합한다 (FR24.4)."""
+        origin = {"kind": "playlist", "playlist_title": entry["playlist_title"]}
+        pid = _playlist_id_from_url(entry.get("url"))
+        if pid:                          # 얻어지면 싣고, 없으면 키를 만들지 않는다 (FR39.2)
+            origin["playlist_id"] = pid
         self._run_grouped(job, entry, filters, index,
                           group_title=entry["playlist_title"],
-                          merge_categories=True, auto_run=True)
+                          merge_categories=True, auto_run=True, origin=origin)
 
     # ── 검색 워커 (FR34.9) ───────────────────────────────────────────────────
     def _run_search(self, job: dict, entry: dict, filters: dict, index: bool):
@@ -784,9 +804,14 @@ class JobManager:
           ① 신규 등록 채널을 `folder`로 묶고 `auto_run: false`를 기록한다 (FR34.7)
           ② 검색어를 카테고리로 병합하지 않는다 (`merge_categories=False`, DQ-28)
         """
+        query = entry.get("query") or ""
+        folder = entry.get("folder") or ""
+        origin = {"kind": "search", "query": query}
+        if folder and folder != query:   # 검색어와 같으면 정보가 늘지 않는다 (FR39.2)
+            origin["folder"] = folder
         self._run_grouped(job, entry, filters, index,
                           group_title=entry.get("folder") or entry.get("query"),
-                          merge_categories=False, auto_run=False)
+                          merge_categories=False, auto_run=False, origin=origin)
 
     # ── 스케줄 워커 (FR37.7) ─────────────────────────────────────────────────
     def start_schedule(self, plan: dict) -> dict:
@@ -824,12 +849,17 @@ class JobManager:
         `merge_categories=False`(pl_map={} → 재생목록 스캔 요청 0) · `index=True`.
         """
         self._run_grouped(job, entry, filters={"include_members": True}, index=True,
-                          group_title=None, merge_categories=False, auto_run=True)
+                          group_title=None, merge_categories=False, auto_run=True,
+                          origin={"kind": "scheduler"})
 
     def _run_grouped(self, job: dict, entry: dict, filters: dict, index: bool,
                      group_title: str = None, merge_categories: bool = True,
-                     auto_run: bool = True):
-        """채널별 그룹 순차 실행 — 결과물은 각 영상의 원채널 폴더에 저장."""
+                     auto_run: bool = True, origin: dict = None):
+        """채널별 그룹 순차 실행 — 결과물은 각 영상의 원채널 폴더에 저장.
+
+        `origin`(FR39.2): 호출자가 만든 출처 서술자. 그룹 루프 **전체에 같은 값**을 쓴다
+        (한 job = 한 출처). 해석·병합은 저장 계층이 한다.
+        """
         pl_title = group_title
         try:
             _ext_mod = _app_extractor()
@@ -908,8 +938,8 @@ class JobManager:
                 stats = ext.run(entries=g_entries, pl_map=pl_map,
                                 date_range=date_range, rest_state=rest_state,
                                 progress=self._make_group_cb(job, agg, base_done,
-                                                             total, channel=name)
-                                ) or {}
+                                                             total, channel=name),
+                                origin=origin) or {}
                 for k in _STAT_KEYS:
                     agg[k] += stats.get(k, 0)
                 base_done += len(g_entries)
@@ -1027,7 +1057,8 @@ class JobManager:
                         "live_wait": "라이브 종료 대기 — 다음 run에서 재시도",
                         "no_sub": "자막 없음"}
             try:
-                result = ext.process_video(vid, "new", content_type=content_type, info=info)
+                result = ext.process_video(vid, "new", content_type=content_type,
+                                           info=info, origin={"kind": "video"})
                 if result == "ok":
                     self._bump(job, "new")
                     kind = "new"

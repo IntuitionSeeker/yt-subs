@@ -133,6 +133,104 @@ META_FIELDS = [
 ]
 
 
+# ─── 출처 기록 (FR39) ────────────────────────────────────────────────────────
+# `origin` = "이 영상의 자막·메타를 이 저장소에 들여온 추출 run의 출처". 리스트이고
+# 기록은 **최초 1회**다(FR39.4). 열거 밖 kind는 조용히 섞이면 필터가 침묵으로 틀리므로
+# ValueError로 거부한다(FR39.2).
+ORIGIN_KINDS = ("channel", "playlist", "search", "video", "scheduler", "transcribe")
+ORIGIN_MAX = 10                      # FR39.4ⓓ — 규칙상 도달 불가한 방어 상한
+# kind별 **허용 부가 키**. 열거 밖 키는 저장하지 않는다(V-U37ⓕ) — 진입점이 디버그용
+# 잡동사니를 실어 보내도 코퍼스에 남지 않는다.
+ORIGIN_EXTRA_KEYS = {
+    "channel": ("via",),                            # "cli" | "dashboard"
+    "playlist": ("playlist_title", "playlist_id"),   # id는 얻어지면만 (FR39.2)
+    "search": ("query", "folder"),
+    "video": (),
+    "scheduler": (),
+    "transcribe": (),
+}
+
+# ─── 필드 소유권 (FR39.6 · DQ-59) ────────────────────────────────────────────
+# `META_SCHEMA` = `meta/*.json`에 쓰는 키 **전체**(정본). 아래 두 상수가 그 전체를
+# 빠짐없이 분담해야 하며, 그렇지 않으면 **모듈 임포트가 실패한다**.
+#   · DERIVED   : info·규칙에서 매번 새로 계산 → 덮어써도 무손실
+#   · PRESERVED : **기존 파일에서 이어받는다** — 재추출이 지우면 안 되는 필드
+# 이 프로젝트는 "새로 조립해 통째로 쓰는 코드가 남의 필드를 지우는" 사고를 세 번
+# 겪었다(FR7.7 `add()` · FR37 QA F1 `_finish_cycle` · DQ-42 `_save()`). 세 번 다
+# "조심하자"로는 막히지 않았고, 실제로 막은 것은 F1의 임포트 시 assert였다.
+META_SCHEMA = tuple(META_FIELDS) + (
+    "sub_type", "playlists", "content_type", "chapters", "tickers",
+    "extracted_at", "origin",
+)
+DERIVED_FIELDS = tuple(META_FIELDS) + (
+    "sub_type", "playlists", "content_type", "chapters", "tickers", "extracted_at",
+)
+PRESERVED_FIELDS = ("origin",)
+
+
+def _check_field_ownership(schema, derived, preserved) -> bool:
+    """저장 스키마 전체가 DERIVED/PRESERVED로 **빠짐없이** 분류됐는지 (FR39.6).
+
+    임포트 시점에 `assert`로 호출한다 — 분류하지 않은 필드를 `META_SCHEMA`에 추가하면
+    `ImportError`가 난다. 문서는 읽지 않아도 되지만 임포트 실패는 무시할 수 없다.
+    """
+    s, d, p = set(schema), set(derived), set(preserved)
+    if s - d - p:
+        raise AssertionError(f"meta 필드 소유가 분류되지 않았다: {sorted(s - d - p)} "
+                             f"— DERIVED_FIELDS 또는 PRESERVED_FIELDS에 넣어라 (FR39.6)")
+    if d & p:
+        raise AssertionError(f"필드가 두 집합에 동시에 있다: {sorted(d & p)}")
+    if (d | p) - s:
+        raise AssertionError(f"META_SCHEMA에 없는 필드를 분류했다: {sorted((d | p) - s)}")
+    return True
+
+
+assert _check_field_ownership(META_SCHEMA, DERIVED_FIELDS, PRESERVED_FIELDS)
+
+
+def _origin_entry(entry: dict, at: str) -> dict:
+    """출처 서술자 1개를 **저장 형태**로 정규화 (FR39.1~39.2).
+
+    `kind` 검증 + kind별 허용 부가 키만 남기고 `at`을 채운다. `at`을 저장 계층이
+    채우는 이유는 `extracted_at`과 같은 시계를 쓰기 위해서다 — 워커가 채우면 그룹
+    추출에서 job 시작 시각으로 고정돼 영상별 시각이 사라진다.
+    """
+    kind = (entry.get("kind") or "").strip()
+    if kind not in ORIGIN_KINDS:
+        raise ValueError(f"알 수 없는 origin kind: {entry.get('kind')!r} "
+                         f"(허용: {', '.join(ORIGIN_KINDS)})")
+    out = {"kind": kind, "at": at}
+    for key in ORIGIN_EXTRA_KEYS[kind]:
+        val = entry.get(key)
+        if val is None:
+            continue
+        val = str(val).strip()
+        if val:                       # 빈 문자열은 키를 만들지 않는다 (FR39.2 · P3)
+            out[key] = val
+    return out
+
+
+def _merge_origin(prev_origin, entry: dict = None, at: str = None) -> list:
+    """`origin` 병합 — **최초 1회**만 기록한다 (FR39.4).
+
+    ⓐ 기존이 비었고(키 부재·`[]`) 서술자가 있으면 원소 1개 ⓑ 기존에 원소가 있으면
+    **그대로**(추가·수정·`at` 갱신 없음) ⓒ 서술자가 None이면 보존만 ⓓ 상한 10개.
+
+    "다른 출처면 추가"를 기각한 이유(DQ-60): `StateManager.decide()`가 수정 감지(FR2.2)와
+    **멤버십 영상 매 run 재시도**(FR19.1)로 `updated`를 상시 내므로, 그 규칙이면 검색으로
+    들어온 영상이 채널 run에 재취득될 때마다 `channel` 원소가 붙어 출처가 희석된다.
+    손상 값(리스트 아님·dict 아닌 원소)은 예외 없이 보수적으로 버린다.
+    """
+    prev = [e for e in prev_origin if isinstance(e, dict)] \
+        if isinstance(prev_origin, list) else []
+    if prev:
+        return prev[:ORIGIN_MAX]                  # ⓑ 이미 있으면 손대지 않는다
+    if not entry or not isinstance(entry, dict):
+        return prev                               # ⓒ 보존만 (= [])
+    at = at or datetime.datetime.now().isoformat(timespec="seconds")
+    return [_origin_entry(entry, at)]             # ⓐ 최초 1회
+
+
 class MetaCollector:
 
     def __init__(self, channel: str):
@@ -153,12 +251,35 @@ class MetaCollector:
                 continue
         return out
 
+    @staticmethod
+    def _read_prev(meta_path) -> dict:
+        """기존 meta 읽기 (FR39.5). 부재·손상은 **빈 dict** — 추출을 실패로 뒤집지 않는다."""
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError) as exc:
+            log.warning(f"  ⚠️ 기존 meta 읽기 실패 — 보존 없이 진행: "
+                        f"{meta_path.name} ({exc})")
+            return {}
+        return data if isinstance(data, dict) else {}
+
     def save(self, info: dict, basename: str, sub_type: str,
-             playlists: list = None, content_type: str = "video") -> dict:
+             playlists: list = None, content_type: str = "video",
+             origin_entry: dict = None) -> dict:
         """
         meta/*.json + desc/*.txt 저장.
         반환: 저장된 meta dict.
+
+        `origin_entry`: 이 run의 출처 서술자 dict 또는 None (FR39.5). 병합·판정은
+        **이 함수 한 곳**에서만 일어난다 — 진입점은 "내가 누구인지"만 말한다.
         """
+        self.dirs["meta"].mkdir(parents=True, exist_ok=True)
+        meta_path = self.dirs["meta"] / f"{basename}.json"
+        # ① 기존 파일 읽기 → ② PRESERVED 이어받기 → ③ DERIVED 새로 계산 → ④ origin 병합
+        # ②가 없으면 ③이 파일을 통째로 대체해 `origin`이 첫 재추출에 사라진다(FR39.5).
+        prev = self._read_prev(meta_path)
+
         meta = {k: info.get(k) for k in META_FIELDS}
         meta["sub_type"] = sub_type
         meta["playlists"] = playlists or []      # 재생목록 카테고리 (FR15.2)
@@ -169,9 +290,17 @@ class MetaCollector:
         # 종목/티커 추출 (제목 + 설명 + 태그). 백필과 같은 함수를 쓴다 (FR12.2)
         meta["tickers"] = tickers_from_meta(meta, info.get("description") or "")
 
+        # ② 보존 필드 — 기존 파일 값을 그대로 이어받는다 (FR39.6 PRESERVED_FIELDS).
+        # **보존은 이 루프가 유일한 경로다** — `origin`을 PRESERVED_FIELDS에서 빼면
+        # (임포트 assert를 뚫더라도) 아래 병합이 이어받을 값을 못 보고 덮어쓴다.
+        for key in PRESERVED_FIELDS:
+            if key in prev:
+                meta[key] = prev[key]
+        # ④ 출처 병합 — `at`은 `extracted_at`과 같은 시계·같은 값 (FR39.4)
+        meta["origin"] = _merge_origin(meta.get("origin"), origin_entry,
+                                       at=meta["extracted_at"])
+
         # meta json 저장
-        self.dirs["meta"].mkdir(parents=True, exist_ok=True)
-        meta_path = self.dirs["meta"] / f"{basename}.json"
         with open(meta_path, "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 

@@ -233,10 +233,12 @@ calls = {}
 
 class RunExtractor(FakeExtractor):
     def run(self, force_vid=None, limit=None, progress=None,
-            entries=None, pl_map=None, date_range=None, rest_state=None):
+            entries=None, pl_map=None, date_range=None, rest_state=None,
+            origin=None):
         calls["entries"] = entries
         calls["pl_map"] = pl_map
         calls["date_range"] = date_range
+        calls["origin"] = origin
         assert progress({"phase": "extracting", "done": 0, "total": len(entries),
                          "current_title": "영상1", "stats": {},
                          "event": {"id": "v1", "title": "영상1",
@@ -278,13 +280,17 @@ _cb("subtitle", 7, 100, "인덱싱 중인 영상")
 assert job["index_stage"] == "subtitle" and job["index_done"] == 7 \
     and job["index_total"] == 100, job
 assert (job["done"], job["total"]) == _before, "인덱싱 진행이 추출 done/total을 덮지 않는다"
+assert calls["origin"] == {"kind": "channel", "via": "dashboard"}, \
+    f"대시보드 채널 추출의 출처 서술자 (FR39.2): {calls['origin']}"
 print("✓ _run_channel: 멤버십 사전 제외 · 캐시 entries/pl_map 재사용 · date_range 전달 · 인덱싱")
+print("✓ _run_channel: origin={kind:channel, via:dashboard} 전달 (FR39.2)")
 print("✓ _maybe_index: on_progress 콜백 → index_stage/done/total, 추출 done/total 보존 (FR33.3)")
 
 # 취소면 인덱싱 생략 (사용자 확정 ①)
 class CancelExtractor(FakeExtractor):
     def run(self, force_vid=None, limit=None, progress=None,
-            entries=None, pl_map=None, date_range=None, rest_state=None):
+            entries=None, pl_map=None, date_range=None, rest_state=None,
+            origin=None):
         mgr._cancel.set()
         assert progress({"phase": "extracting", "done": 1, "total": 2,
                          "stats": {"new": 1}}) is False, "취소 시 콜백 False"
@@ -340,9 +346,10 @@ pv_calls = []
 
 class SingleExtractor(FakeExtractor):
     def process_video(self, vid, action="new", content_type="video",
-                      playlists_map=None, info=None, date_range=None):
+                      playlists_map=None, info=None, date_range=None,
+                      origin=None):
         pv_calls.append({"vid": vid, "action": action, "info": info,
-                         "content_type": content_type})
+                         "content_type": content_type, "origin": origin})
         return "ok"
 
 class FakeReg:
@@ -369,11 +376,15 @@ with mock.patch.object(_extractor_mod, "Extractor", SingleExtractor), \
 
 assert FakeReg.added == [], "이미 등록된 채널이면 add() 호출 금지 (모호점 #16)"
 assert pv_calls[0] == {"vid": "abcdefghijk", "action": "new", "info": INFO,
-                       "content_type": "video"}, pv_calls
+                       "content_type": "video",
+                       "origin": {"kind": "video"}}, pv_calls
 assert job3["channel"] == "기존채널" and job3["status"] == "done"
 assert job3["total"] == 1 and job3["done"] == 1 and job3["stats"]["new"] == 1
 assert idx3.return_value.index_all.called
+assert pv_calls[-1]["origin"] == {"kind": "video"}, \
+    f"단일 URL 추출의 출처 서술자 (FR39.2): {pv_calls[-1]['origin']}"
 print("✓ _run_single: info 재사용 process_video · 기존 채널 add 금지 · stats/인덱싱")
+print("✓ _run_single: origin={kind:video} 전달 (FR39.2)")
 
 # 미등록 채널 → add(조립 URL) 1회
 INFO = {"uploader_id": "@새채널", "title": "새 영상", "live_status": "was_live"}
@@ -447,10 +458,11 @@ runs9 = []
 
 class PlaylistExtractor(FakeExtractor):
     def run(self, force_vid=None, limit=None, progress=None,
-            entries=None, pl_map=None, date_range=None, rest_state=None):
+            entries=None, pl_map=None, date_range=None, rest_state=None,
+            origin=None):
         runs9.append({"name": self.cfg["name"],
                       "ids": [e["id"] for e in entries], "pl_map": pl_map,
-                      "rest": rest_state})
+                      "rest": rest_state, "origin": origin})
         if self.cfg["name"] == "chanA":
             assert progress({"phase": "extracting", "done": 1, "total": len(entries),
                              "current_title": "영상A", "stats": {"new": 1},
@@ -506,7 +518,12 @@ assert job9["events"] == [{"id": "p1", "title": "영상A", "kind": "new",
 assert all(r["rest"] is runs9[0]["rest"] for r in runs9) and runs9[0]["rest"] is not None, \
     "그룹마다 새 rest_state면 휴식 카운터가 0으로 리셋된다"
 assert isinstance(runs9[0]["rest"], _extractor_mod.BatchRest)
+# 출처는 그룹 루프 전체에 **같은 값**이고, `playlist_id`는 URL의 `list=`에서 온다 (FR39.2)
+assert all(r["origin"] == {"kind": "playlist", "playlist_title": "퀀트 강의",
+                           "playlist_id": "PLnDn1H0jzj2irPsp9sy5HJZ-435yMOXy_"}
+           for r in runs9), runs9[0]["origin"]
 print("✓ _run_playlist: 그룹 순차·진행율 합산·병합 pl_map·자동 등록·조건부 인덱싱 (FR24.3~24.5)")
+print("✓ _run_playlist: origin={kind:playlist, playlist_title, playlist_id} 그룹 공통 (FR39.2)")
 
 print("\n모든 dashboard/jobs.py 로직 검증 통과")
 
@@ -576,10 +593,12 @@ runs10 = []
 
 class SearchExtractor(FakeExtractor):
     def run(self, force_vid=None, limit=None, progress=None,
-            entries=None, pl_map=None, date_range=None, rest_state=None):
+            entries=None, pl_map=None, date_range=None, rest_state=None,
+            origin=None):
         runs10.append({"name": self.cfg["name"],
                        "ids": [e["id"] for e in entries], "pl_map": pl_map,
-                       "date_range": date_range, "rest": rest_state})
+                       "date_range": date_range, "rest": rest_state,
+                       "origin": origin})
         if self.cfg["name"] == "chanA":
             assert progress({"phase": "extracting", "done": 1, "total": len(entries),
                              "current_title": "긴 영상", "stats": {"new": 1},
@@ -636,7 +655,14 @@ assert job10["events"] == [{"id": "g1", "title": "긴 영상", "kind": "new",
 assert all(r["rest"] is runs10[0]["rest"] for r in runs10) and runs10[0]["rest"] is not None, \
     "검색 그룹마다 rest_state가 새로 생기면 배치 휴식이 영영 오지 않는다 (FR14.2)"
 assert runs10[0]["rest"]._cancel_check == mgr._cancel.is_set, "취소 중 휴식 조기 종료 배선"
+# 검색어는 `playlists`에 들어가지 않지만(DQ-28) `origin`에는 들어간다 — 별도 축이다.
+# `folder`는 검색어와 **다를 때만** 싣는다(여기서는 "AI 묶음" ≠ "AI 에이전트")
+assert all(r["origin"] == {"kind": "search", "query": "AI 에이전트",
+                           "folder": "AI 묶음"} for r in runs10), runs10[0]["origin"]
+assert all("AI 에이전트" not in sum(r["pl_map"].values(), []) for r in runs10), \
+    "검색어가 playlists로 새지 않는다 (DQ-28 유지)"
 print("✓ _run_search: 그룹 순차·진행율 합산·pl_map={} ·신규만 폴더+auto_run:false·조건부 인덱싱 (FR34.6~34.10)")
+print("✓ _run_search: origin={kind:search, query, folder} · playlists 오염 없음 (FR39.2·DQ-28)")
 
 # start()가 검색 캐시를 search_run 워커로 라우팅하는지 (배선 확인)
 entry10["created_at"] = time.time()

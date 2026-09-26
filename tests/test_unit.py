@@ -2634,9 +2634,10 @@ def test_start_schedule_fixed_arguments(tmp_path, monkeypatch):
     captured = {}
 
     def fake_grouped(job, entry, filters, index, group_title=None,
-                     merge_categories=True, auto_run=True):
+                     merge_categories=True, auto_run=True, origin=None):
         captured.update(filters=filters, index=index, group_title=group_title,
-                        merge_categories=merge_categories, entry=entry, job=job)
+                        merge_categories=merge_categories, entry=entry, job=job,
+                        origin=origin)
 
     mgr._run_grouped = fake_grouped
     plan = {"by_channel": {"c1": {"url": "u", "entries": [{"id": "v1", "title": "t"}]}},
@@ -2652,6 +2653,7 @@ def test_start_schedule_fixed_arguments(tmp_path, monkeypatch):
     assert captured["index"] is True and captured["group_title"] is None
     assert captured["merge_categories"] is False
     assert captured["entry"]["by_channel"] == plan["by_channel"]
+    assert captured["origin"] == {"kind": "scheduler"}, "무인 유입도 출처를 남긴다 (FR39.2)"
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -3619,3 +3621,562 @@ def test_doctor_channel_scope_does_not_stale_other_channel_waiver(tmp_path, monk
     _write_log(out / "G1" / "ch2", [["v3", "20260103", "다", "new", "auto", "ok", "20260103_다"]])
     gone = _doctor_run(only=["doctor.detector-fossils"], waivers=waiver)
     assert ("waiver.stale", "doctor.detector-fossils/ch2/aetOCkgzurM", "warn") in _codes(gone)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U37 — `origin` 병합 규칙 (FR39.1~39.4, DQ-60)
+#
+# `_merge_origin`은 **순수 함수**이고, "추가할지 보존할지"를 정하는 유일한 지점이다.
+# 핵심은 ⓒ다 — 검색으로 들어온 영상이 채널 run에 재취득될 때(FR2.2 수정 감지 ·
+# FR19.1 멤버십 매 run 재시도) `channel` 원소가 덧붙으면 출처가 희석된다.
+# ════════════════════════════════════════════════════════════════════════════
+_ISO_SEC_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}$")
+
+
+def test_merge_origin_records_once_when_empty():
+    """ⓐ 기존 없음(키 부재·`[]` 양쪽) + 서술자 → 원소 1개 · `at`은 ISO 초 (FR39.4ⓐ)."""
+    import meta_collector as mc
+    entry = {"kind": "search", "query": "역배열", "folder": "역배열1"}
+    for prev in (None, []):                     # 키 부재 == 빈 리스트
+        got = mc._merge_origin(prev, entry, at="2026-09-27T10:11:12")
+        assert got == [{"kind": "search", "at": "2026-09-27T10:11:12",
+                        "query": "역배열", "folder": "역배열1"}], got
+    # `at`을 주지 않으면 저장 계층 시계로 채운다 — `extracted_at`과 **같은 형식**
+    auto = mc._merge_origin([], {"kind": "video"})[0]
+    assert _ISO_SEC_RE.match(auto["at"]), auto
+    assert set(auto) == {"kind", "at"}, "부가 키 없는 kind는 kind·at만 남는다"
+
+
+def test_merge_origin_keeps_existing_entry():
+    """ⓑⓒ 원소가 있으면 **같은 kind든 다른 kind든** 그대로 — `at`도 불변 (DQ-60)."""
+    import meta_collector as mc
+    first = [{"kind": "search", "at": "2026-09-20T09:00:00", "query": "역배열"}]
+    # ⓑ 같은 kind 재취득
+    assert mc._merge_origin(first, {"kind": "search", "query": "역배열"},
+                            at="2026-09-27T10:00:00") == first
+    # ⓒ 다른 kind 재취득(채널 run·스케줄러) — 이 케이스가 규칙의 핵심이다
+    for later in ({"kind": "channel", "via": "cli"},
+                  {"kind": "channel", "via": "dashboard"},
+                  {"kind": "scheduler"}, {"kind": "playlist",
+                                          "playlist_title": "역배열 모음"}):
+        got = mc._merge_origin(first, later, at="2026-09-27T10:00:00")
+        assert got == first, f"{later} 재취득이 출처를 희석했다: {got}"
+    # 음성 대조군 — 비어 있을 때는 **같은 입력이 기록된다**(규칙이 kind가 아니라
+    # "기존이 비었는가"로 판정한다는 증거)
+    assert mc._merge_origin([], {"kind": "scheduler"},
+                            at="2026-09-27T10:00:00") == [
+        {"kind": "scheduler", "at": "2026-09-27T10:00:00"}]
+
+
+def test_merge_origin_none_descriptor_preserves_only():
+    """ⓓ 서술자 None(재추출·백필 경로) → 보존만. 빈 값은 빈 값으로 남는다 (FR39.4ⓒ)."""
+    import meta_collector as mc
+    first = [{"kind": "playlist", "at": "2026-09-20T09:00:00",
+              "playlist_title": "역배열 모음"}]
+    assert mc._merge_origin(first, None) == first
+    assert mc._merge_origin(first, {}) == first
+    assert mc._merge_origin([], None) == []          # 없는 것을 만들지 않는다
+    assert mc._merge_origin(None, None) == []
+
+
+def test_merge_origin_rejects_unlisted_kind():
+    """ⓔ 미열거 kind는 `ValueError` — 오타 라벨이 섞이면 필터가 침묵으로 틀린다."""
+    import meta_collector as mc
+    assert mc.ORIGIN_KINDS == ("channel", "playlist", "search", "video",
+                               "scheduler", "transcribe")
+    for bad in ({"kind": "Channel"}, {"kind": "검색"}, {"kind": "reextract"},
+                {"kind": ""}, {"kind": None}, {"query": "kind 없음"}):
+        with pytest.raises(ValueError):
+            mc._merge_origin([], bad)
+    # 양성 대조군 — 열거된 6종은 전부 통과한다
+    for kind in mc.ORIGIN_KINDS:
+        assert mc._merge_origin([], {"kind": kind})[0]["kind"] == kind
+
+
+def test_merge_origin_drops_keys_outside_kind_enum():
+    """ⓕ kind별 허용 부가 키만 저장 — 잡동사니는 코퍼스에 남지 않는다."""
+    import meta_collector as mc
+    got = mc._merge_origin([], {"kind": "search", "query": "역배열",
+                                "playlist_title": "엉뚱", "via": "dashboard",
+                                "scan_id": "abc", "at": "1999-01-01T00:00:00"},
+                           at="2026-09-27T10:00:00")[0]
+    assert got == {"kind": "search", "at": "2026-09-27T10:00:00", "query": "역배열"}, got
+    # 빈 문자열·None 부가 키는 **키를 만들지 않는다**(P3 — "얻어지면 싣는다")
+    pl = mc._merge_origin([], {"kind": "playlist", "playlist_title": "모음",
+                               "playlist_id": ""}, at="2026-09-27T10:00:00")[0]
+    assert "playlist_id" not in pl and pl["playlist_title"] == "모음"
+    # 양성 대조군 — id가 있으면 싣는다
+    pl2 = mc._merge_origin([], {"kind": "playlist", "playlist_title": "모음",
+                                "playlist_id": "PLabc"})[0]
+    assert pl2["playlist_id"] == "PLabc"
+
+
+def test_merge_origin_cap_and_corrupt_values():
+    """ⓖ 상한 10 ⓗ 손상 값(리스트 아님·dict 아닌 원소)에도 예외 없이 보수적 처리."""
+    import meta_collector as mc
+    assert mc.ORIGIN_MAX == 10
+    many = [{"kind": "channel", "at": f"2026-09-{i + 1:02d}T00:00:00"} for i in range(14)]
+    capped = mc._merge_origin(many, {"kind": "search", "query": "x"})
+    assert len(capped) == 10 and capped == many[:10]
+    for junk in ("문자열", 42, {"kind": "channel"}, True):
+        assert mc._merge_origin(junk, None) == [], f"손상 값: {junk!r}"
+        assert mc._merge_origin(junk, {"kind": "video"},
+                                at="2026-09-27T10:00:00") == [
+            {"kind": "video", "at": "2026-09-27T10:00:00"}]
+    mixed = mc._merge_origin(["문자열", None, {"kind": "search", "at": "t"}], None)
+    assert mixed == [{"kind": "search", "at": "t"}], "dict 아닌 원소만 버린다"
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U38 — 재추출 보존 회귀 + 진입점 전수 매핑 (FR39.5~39.7·39.15, DQ-59)
+#
+# **이번 변경의 핵심 회귀**다. `MetaCollector.save()`는 meta를 매번 새로 조립하는데
+# `StateManager.decide()`는 수정 감지(FR2.2)·멤버십 매 run 재시도(FR19.1)로 `updated`를
+# 상시 낸다 — 보존이 없으면 `origin`은 첫 재추출에 사라진다. 그래서 두 재추출 경로를
+# **실제로 태워서** 확인하고, 음성 대조군(보존 장치를 끄면 사라진다)을 함께 고정한다.
+# ════════════════════════════════════════════════════════════════════════════
+_ORIGIN_INFO = {
+    "id": "ORIGINVID01", "title": "출처 테스트 영상", "upload_date": "20260101",
+    "description": "설명 본문", "tags": [], "categories": ["Education"],
+    "duration": 600, "duration_string": "10:00", "view_count": 10,
+    "webpage_url": "https://www.youtube.com/watch?v=ORIGINVID01",
+    "channel": "출처채널", "thumbnail": "t.jpg",
+}
+_ORIGIN_VTT = "WEBVTT\n\n00:00:01.000 --> 00:00:03.000\n안녕하세요\n"
+
+
+def _origin_ext(tmp_path, monkeypatch, name="출처채널", info=None):
+    """실제 `save()`까지 도는 Extractor — 네트워크 대신 고정 info·VTT를 쓴다."""
+    _isolate(tmp_path, monkeypatch)
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.MagicMock())
+    import extractor as ex
+    monkeypatch.setattr(ex.Extractor, "_pick_subtitle",
+                        lambda self, i: ("https://sub", "manual"))
+    monkeypatch.setattr(ex.Extractor, "_fetch_vtt", lambda self, u: _ORIGIN_VTT)
+    monkeypatch.setattr(ex.time, "sleep", lambda s: None)
+    fake = mock.MagicMock()
+    fake.YoutubeDL.return_value.__enter__.return_value.extract_info.return_value = \
+        dict(info or _ORIGIN_INFO)
+    monkeypatch.setattr(ex, "yt_dlp", fake)
+    return ex, ex.Extractor({"name": name,
+                             "url": f"https://www.youtube.com/@{name}/videos"})
+
+
+def _origin_meta_path(name="출처채널", info=None):
+    info = info or _ORIGIN_INFO
+    basename = su.make_basename(info["upload_date"], info["title"])
+    return config.channel_subdirs(name)["meta"] / f"{basename}.json"
+
+
+def _read(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_save_writes_exactly_meta_schema(tmp_path, monkeypatch):
+    """저장 키 = `META_SCHEMA` 전체. `save()`에 분류 없는 필드를 늘리면 여기서 걸린다."""
+    import meta_collector as mc
+    ex, ext = _origin_ext(tmp_path, monkeypatch)
+    assert ext.run(entries=[{"id": "ORIGINVID01", "title": "출처 테스트 영상"}],
+                   pl_map={}, origin={"kind": "search", "query": "역배열"})["new"] == 1
+    meta = _read(_origin_meta_path())
+    assert set(meta) == set(mc.META_SCHEMA), \
+        f"누락 {set(mc.META_SCHEMA) - set(meta)} · 여분 {set(meta) - set(mc.META_SCHEMA)}"
+    assert meta["origin"] == [{"kind": "search", "at": meta["extracted_at"],
+                               "query": "역배열"}], "at은 extracted_at과 같은 값이다"
+
+
+@pytest.mark.parametrize("scenario", ["members_retry", "modified"])
+def test_reextract_preserves_origin(tmp_path, monkeypatch, scenario):
+    """ⓐ 재추출(멤버십 매 run 재시도 · 수정 감지)이 `origin`을 지우지 못한다.
+
+    `decide()`가 실제로 `updated`를 내는 것까지 확인한다 — 경로를 태우지 않으면
+    "보존된다"가 아니라 "재추출이 일어나지 않았다"를 검증하게 된다.
+    """
+    import meta_collector as mc
+    ex, ext = _origin_ext(tmp_path, monkeypatch)
+    entries = [{"id": "ORIGINVID01", "title": "출처 테스트 영상"}]
+    ext.run(entries=entries, pl_map={}, origin={"kind": "search", "query": "역배열"})
+    path = _origin_meta_path()
+    first = _read(path)
+    assert first["origin"][0]["kind"] == "search"
+
+    if scenario == "members_retry":                 # FR19.1 · DQ-10
+        cookie = tmp_path / "cookies.txt"
+        cookie.write_text("# cookies", encoding="utf-8")
+        monkeypatch.setattr(config, "COOKIE_FILE", cookie)
+        monkeypatch.setattr(config, "FIREFOX_PROFILE", tmp_path / "없는프로필")
+
+        def trigger():
+            """멤버십으로 스킵된 상태 → 인증이 있으면 매 run 재시도(updated)."""
+            ext.state.state["ORIGINVID01"]["sub_type"] = "members_only"
+            assert ext.state.decide("ORIGINVID01", None, None) == "updated"
+            return entries
+    else:                                           # FR2.2 수정 감지
+        def trigger():
+            ext.state.state["ORIGINVID01"]["modified_date"] = "20260101"
+            assert ext.state.decide("ORIGINVID01", "20260202", None) == "updated"
+            return [dict(entries[0], modified_date="20260202")]
+
+    stats = ext.run(entries=trigger(), pl_map={},
+                    origin={"kind": "channel", "via": "dashboard"})
+    assert stats["updated"] == 1, f"재추출 경로를 타지 않았다: {stats}"
+    second = _read(path)
+    assert second["origin"] == first["origin"], "재추출이 origin을 덮었다 (FR39.5)"
+    assert second["origin"][0]["at"] == first["origin"][0]["at"], "at도 불변이다"
+    assert second["title"] == first["title"]
+
+    # 음성 대조군 — 보존 장치(PRESERVED_FIELDS)를 끄면 **같은 run이 origin을 갈아버린다**
+    monkeypatch.setattr(mc, "PRESERVED_FIELDS", ())
+    stats_ctl = ext.run(entries=trigger(), pl_map={},
+                        origin={"kind": "channel", "via": "dashboard"})
+    assert stats_ctl["updated"] == 1, "대조군도 같은 재추출 경로를 타야 한다"
+    lost = _read(path)
+    assert lost["origin"] != first["origin"], \
+        "대조군이 통과하면 이 테스트는 보존을 검증하지 못한다"
+
+
+def test_field_ownership_invariant_breaks_import(tmp_path):
+    """ⓑ 분류 없는 필드를 추가하면 **모듈 임포트가 실패한다** (FR39.6·DQ-59).
+
+    좋았던 이유는 소유를 *적어 두는* 것이 아니라 **적지 않으면 돌지 않는** 것이다
+    (FR37 QA F1 선례). 그래서 불변식 자체를 주입해 시험한다.
+    """
+    import meta_collector as mc
+    assert set(mc.DERIVED_FIELDS) | set(mc.PRESERVED_FIELDS) == set(mc.META_SCHEMA)
+    assert not set(mc.DERIVED_FIELDS) & set(mc.PRESERVED_FIELDS)
+    assert mc.PRESERVED_FIELDS == ("origin",)
+    assert mc._check_field_ownership(mc.META_SCHEMA, mc.DERIVED_FIELDS,
+                                     mc.PRESERVED_FIELDS) is True
+    # 분류 누락·중복 분류·유령 분류 3종 모두 AssertionError
+    for schema, derived, preserved in (
+            (mc.META_SCHEMA + ("note",), mc.DERIVED_FIELDS, mc.PRESERVED_FIELDS),
+            (mc.META_SCHEMA, mc.DERIVED_FIELDS + ("origin",), mc.PRESERVED_FIELDS),
+            (mc.META_SCHEMA, mc.DERIVED_FIELDS, mc.PRESERVED_FIELDS + ("ghost",))):
+        with pytest.raises(AssertionError):
+            mc._check_field_ownership(schema, derived, preserved)
+
+    src = (Path(__file__).parent.parent / "meta_collector.py").read_text(encoding="utf-8")
+    assert re.search(r"(?m)^assert _check_field_ownership\(", src), \
+        "임포트 시점에 호출하지 않으면 장치가 아니다 — 정의만 남기지 말 것"
+    anchor = '"extracted_at", "origin",'
+    assert src.count(anchor) == 1
+    mutated = src.replace(anchor, '"extracted_at", "origin", "note",', 1)
+    with pytest.raises(AssertionError):            # = ImportError 경로
+        exec(compile(mutated, "meta_collector_mutated", "exec"), {"__name__": "mc_probe"})
+
+
+def test_entrypoints_map_to_expected_origin_kind(tmp_path, monkeypatch):
+    """ⓒ 진입점 7종이 기대한 `kind`를 저장 계층 경계까지 전달 (FR39.2 매핑표 전수).
+
+    ①~⑥은 `Extractor.run/process_video`가 **실제로 받은 값**을 수집하고,
+    ⑦ 전사는 `MetaCollector.save()`를 실제로 태워 meta 파일까지 확인한다.
+    """
+    import argparse
+    out = _isolate(tmp_path, monkeypatch)
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.MagicMock())
+    import extractor as ex
+    import jobs
+    import main
+
+    seen = []
+    _zero = {k: 0 for k in ("new", "updated", "skip", "no_sub", "members_only",
+                            "error", "date_skip", "live_wait")}
+
+    def fake_run(self, *a, **kw):
+        seen.append(kw.get("origin"))
+        return dict(_zero)
+
+    def fake_pv(self, vid, action="new", **kw):
+        seen.append(kw.get("origin"))
+        return "ok"
+
+    monkeypatch.setattr(ex.Extractor, "run", fake_run)
+    monkeypatch.setattr(ex.Extractor, "process_video", fake_pv)
+
+    reg = ChannelRegistry()
+    for handle in ("cli채널", "chanA"):
+        reg.add(f"https://www.youtube.com/@{handle}")
+
+    # ① CLI `add` · ② CLI `run` → channel/cli
+    main.cmd_add(argparse.Namespace(url="https://www.youtube.com/@cli채널", lang="ko"))
+    main.cmd_run(argparse.Namespace(channel="cli채널", limit=None))
+    assert seen == [{"kind": "channel", "via": "cli"}] * 2, seen
+
+    mgr = jobs.JobManager()
+    entry_ch = {"channel": "chanA", "url": "https://www.youtube.com/@chanA",
+                "videos_view": [{"id": "v1", "title": "영상1", "playlists": [],
+                                 "members_only": False, "extracted": False,
+                                 "content_type": "video"}],
+                "entries": [{"id": "v1", "title": "영상1"}], "pl_map": {}}
+    by_channel = {"chanA": {"url": "https://www.youtube.com/@chanA",
+                            "entries": [{"id": "v1", "title": "영상1"}]}}
+    grouped = dict(entry_ch, by_channel=by_channel)
+
+    def _worker(fn, *args):
+        seen.clear()
+        job = mgr._new_job("channel_run", "chanA", "u")
+        mgr._job = job
+        mgr._cancel.clear()
+        fn(job, *args)
+        assert job["status"] == "done", job.get("error")
+        return seen[-1]
+
+    # ③ 대시보드 채널 → channel/dashboard
+    assert _worker(mgr._run_channel, entry_ch, {"include_members": True}, False) == \
+        {"kind": "channel", "via": "dashboard"}
+    # ④ 재생목록 → playlist + playlist_title(+ playlist_id)
+    pl_entry = dict(grouped, playlist_title="역배열 모음",
+                    url="https://www.youtube.com/playlist?list=PLorigin001")
+    assert _worker(mgr._run_playlist, pl_entry, {"include_members": True}, False) == \
+        {"kind": "playlist", "playlist_title": "역배열 모음",
+         "playlist_id": "PLorigin001"}
+    # `list=`가 없으면 키를 만들지 않는다 (P3 — 빈 문자열 금지)
+    assert "playlist_id" not in _worker(
+        mgr._run_playlist, dict(pl_entry, url="https://www.youtube.com/@chanA"),
+        {"include_members": True}, False)
+    # ⑤ 검색 → search + query (folder는 검색어와 다를 때만)
+    assert _worker(mgr._run_search, dict(grouped, query="역배열", folder="역배열"),
+                   {"include_members": True}, False) == \
+        {"kind": "search", "query": "역배열"}
+    assert _worker(mgr._run_search, dict(grouped, query="역배열", folder="역배열1"),
+                   {"include_members": True}, False) == \
+        {"kind": "search", "query": "역배열", "folder": "역배열1"}
+    # ⑥ 주기 자동 추출 → scheduler
+    assert _worker(mgr._run_schedule, grouped) == {"kind": "scheduler"}
+
+    # ⑦ 단일 URL → video
+    info = dict(_ORIGIN_INFO, id="SINGLEVID01", channel_url="https://www.youtube.com/@chanA")
+    fake_ydl = mock.MagicMock()
+    fake_ydl.return_value.__enter__.return_value.extract_info.return_value = info
+    monkeypatch.setitem(sys.modules, "yt_dlp", mock.MagicMock(YoutubeDL=fake_ydl))
+    seen.clear()
+    job = mgr._new_job("single_video", "", "https://youtu.be/SINGLEVID01")
+    mgr._job = job
+    mgr._cancel.clear()
+    mgr._run_single(job, "https://youtu.be/SINGLEVID01", "SINGLEVID01", False)
+    assert seen == [{"kind": "video"}], seen
+
+    # ⑧ Whisper 전사 → transcribe (meta 파일까지 실측 — 무자막 영상의 meta는 이때 생긴다)
+    import transcriber as tr
+    audio = tmp_path / "a.m4a"
+    audio.write_bytes(b"x")
+    tinfo = dict(_ORIGIN_INFO, id="WHISPERVID1", title="무자막 영상")
+    monkeypatch.setattr(tr.Transcriber, "_download_audio",
+                        lambda self, vid, tmpdir: (audio, tinfo))
+    seg = mock.MagicMock(start=0.0, end=2.0, text="전사 문장")
+    model = mock.MagicMock()
+    model.transcribe.return_value = ([seg], mock.MagicMock(duration=2.0))
+    monkeypatch.setattr(tr.Transcriber, "_load_model", lambda self: model)
+    t = tr.Transcriber({"name": "chanA", "url": "https://www.youtube.com/@chanA",
+                        "lang": "ko"})
+    assert t.transcribe_video("WHISPERVID1") == "ok"
+    wmeta = _read(config.channel_subdirs("chanA")["meta"] /
+                  f"{su.make_basename('20260101', '무자막 영상')}.json")
+    assert wmeta["origin"] == [{"kind": "transcribe", "at": wmeta["extracted_at"]}]
+    assert wmeta["sub_type"] == "whisper"
+    assert out.exists()
+
+
+def test_reextract_backfill_rename_keep_origin(tmp_path, monkeypatch):
+    """ⓓ `reextract`·`backfill_tickers`·`renamer`는 `origin`을 건드리지 않는다 (FR39.7)."""
+    import meta_collector as mc
+    root = Path(__file__).parent.parent
+
+    # `reextract`는 서술자를 주지 않는다 — 원천에서 고정(경로가 늘면 여기서 걸린다)
+    body = root.joinpath("main.py").read_text(encoding="utf-8") \
+               .split("def cmd_reextract")[1].split("\ndef ")[0]
+    assert 'process_video(vid, action="updated")' in body
+    assert "origin" not in body, "재처리는 유입이 아니다 (FR39.4ⓒ)"
+
+    # 실동작 — 서술자 없는 재처리로 `origin`이 보존된다
+    ex, ext = _origin_ext(tmp_path, monkeypatch)
+    ext.run(entries=[{"id": "ORIGINVID01", "title": "출처 테스트 영상"}], pl_map={},
+            origin={"kind": "playlist", "playlist_title": "역배열 모음"})
+    path = _origin_meta_path()
+    want = _read(path)["origin"]
+    assert want[0]["playlist_title"] == "역배열 모음"
+    ext.state.remove("ORIGINVID01")                      # cmd_reextract와 같은 순서
+    assert ext.process_video("ORIGINVID01", action="updated") == "ok"
+    assert _read(path)["origin"] == want, "재처리가 origin을 지웠다"
+
+    # `tickers` 백필 — 기존 dict를 수정해 쓰므로 보존된다
+    mc.backfill_tickers("출처채널", apply=True)
+    assert _read(path)["origin"] == want
+
+    # `playlists`·`content_type` 백필(FR15.5)도 같은 경로다 — FR39.7 열거에는 없지만
+    # 재생목록 병합 run마다 돌므로 함께 고정한다(스펙 보강 필요 항목)
+    assert ext._backfill_meta({"ORIGINVID01": ["새카테고리"]}) == 1
+    after = _read(path)
+    assert after["playlists"] == ["새카테고리"] and after["origin"] == want
+
+    # 이름 변경(영상 제목·카테고리) — 같은 경로
+    import renamer
+    monkeypatch.setattr(renamer, "_indexer",
+                        lambda ch: type("Idx", (), {
+                            "update_video_metadata": staticmethod(lambda vid, f: 0)})())
+    renamer.rename_video_title("출처채널", path.stem, "새 제목")
+    assert _read(path)["title"] == "새 제목" and _read(path)["origin"] == want
+    renamer.rename_category(["출처채널"], "없는카테고리", "새카테고리")
+    assert _read(path)["origin"] == want
+
+
+def test_cli_run_unaffected_except_one_meta_key(tmp_path, monkeypatch):
+    """ⓔ CLI 무영향(FR18.1·FR39.15) — 변하는 것은 meta의 키 1개뿐이다."""
+    import meta_collector as mc
+    ex, ext_a = _origin_ext(tmp_path, monkeypatch, name="무출처채널")
+    entries = [{"id": "ORIGINVID01", "title": "출처 테스트 영상"}]
+    stats_a = ext_a.run(entries=entries, pl_map={})               # origin 미전달
+    ext_b = ex.Extractor({"name": "출처있는채널",
+                          "url": "https://www.youtube.com/@출처있는채널/videos"})
+    stats_b = ext_b.run(entries=entries, pl_map={},
+                        origin={"kind": "channel", "via": "cli"})
+    assert stats_a == stats_b, "반환 stats 키·값이 달라졌다"
+
+    a = _read(_origin_meta_path("무출처채널"))
+    b = _read(_origin_meta_path("출처있는채널"))
+    assert set(a) == set(b) == set(mc.META_SCHEMA)
+    skip = ("origin", "extracted_at")
+    assert {k: v for k, v in a.items() if k not in skip} == \
+           {k: v for k, v in b.items() if k not in skip}
+    assert a["origin"] == [] and b["origin"][0]["kind"] == "channel"
+    # 파일 구조도 불변 — srt/txt/desc가 양쪽 모두 같은 이름으로 생긴다
+    for ch in ("무출처채널", "출처있는채널"):
+        d = config.channel_subdirs(ch)
+        assert (d["srt"] / f"{_origin_meta_path(ch).stem}.srt").exists()
+        assert (d["txt"] / f"{_origin_meta_path(ch).stem}.txt").exists()
+        assert (d["desc"] / f"{_origin_meta_path(ch).stem}.txt").exists()
+
+
+def test_save_survives_corrupt_existing_meta(tmp_path, monkeypatch, caplog):
+    """ⓕ 기존 meta가 손상돼 읽히지 않으면 **경고 후 보존 없이 진행**한다.
+
+    추출이 실패로 뒤집히면 손상 파일 1개가 그 영상을 영구히 못 받게 만든다.
+    """
+    ex, ext = _origin_ext(tmp_path, monkeypatch)
+    path = _origin_meta_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{깨진 JSON", encoding="utf-8")
+    with caplog.at_level("WARNING"):
+        stats = ext.run(entries=[{"id": "ORIGINVID01", "title": "출처 테스트 영상"}],
+                        pl_map={}, origin={"kind": "video"})
+    assert stats["new"] == 1 and not stats["error"]
+    assert _read(path)["origin"][0]["kind"] == "video", "보존값 없이 새로 기록한다"
+    assert any("meta 읽기 실패" in r.message for r in caplog.records), caplog.text
+    # 리스트가 아닌 손상 origin도 예외 없이 지나간다
+    path.write_text(json.dumps({"origin": "문자열"}, ensure_ascii=False), encoding="utf-8")
+    ext.state.remove("ORIGINVID01")
+    assert ext.process_video("ORIGINVID01", origin={"kind": "video"}) == "ok"
+    assert _read(path)["origin"][0]["kind"] == "video"
+
+
+def test_list_videos_passes_origin_through(tmp_path, monkeypatch):
+    """`GET /videos` 계약 — `origin` 통과, 부재는 `[]`(null 아님) (FR39.8)."""
+    _isolate(tmp_path, monkeypatch)
+    from kl_query import KLQuery
+    meta_dir = config.channel_subdirs("출처채널")["meta"]
+    meta_dir.mkdir(parents=True)
+    (meta_dir / "20260101_있음.json").write_text(json.dumps(
+        {"id": "v1", "title": "있음", "upload_date": "20260101",
+         "origin": [{"kind": "search", "at": "2026-09-27T10:00:00", "query": "역배열"}]},
+        ensure_ascii=False), encoding="utf-8")
+    (meta_dir / "20251231_없음.json").write_text(json.dumps(
+        {"id": "v0", "title": "없음", "upload_date": "20251231"},
+        ensure_ascii=False), encoding="utf-8")
+    vids = {v["title"]: v for v in KLQuery("출처채널").list_videos()}
+    assert vids["있음"]["origin"] == [{"kind": "search", "at": "2026-09-27T10:00:00",
+                                     "query": "역배열"}]
+    assert vids["없음"]["origin"] == [], "과거 meta는 [] — 프론트가 분기 없이 순회한다"
+
+
+def test_frontend_consumes_origin_shape(tmp_path):
+    """프론트가 `GET /videos`의 `origin` 모양을 실제로 읽는지 (DQ-62 — 죽은 필드 금지).
+
+    이 프로젝트에서 반복된 실패 유형이 "응답 shape ↔ 프론트 파싱 불일치"다.
+    """
+    html = (Path(__file__).parent.parent / "dashboard" / "index.html").read_text(
+        encoding="utf-8")
+    for token in ('id="libOriginSel"', "function fmtOrigin", "function originKey",
+                  "buildOriginOptions", "originSelPass", "출처 없음", "전체 출처"):
+        assert token in html, f"소비 UI 조각 누락: {token}"
+    # 배지·필터가 `renderLibList`와 폴더 전체 보기 양쪽에 걸려 있다 (FR39.9ⓒ)
+    render = html.split("function renderLibList")[1].split("\nfunction ")[0]
+    assert "originSelPass(v)" in render and "fmtOrigin(v.origin)" in render
+    group = html.split("async function libSelectGroup")[1].split("\n/* ═══")[0]
+    assert "buildOriginOptions(all)" in group, "폴더 전체 보기에서 동작해야 한다"
+    # 서버 응답 키와 프론트가 읽는 키가 같다
+    kl = (Path(__file__).parent.parent / "kl_query.py").read_text(encoding="utf-8")
+    assert '"origin": meta.get("origin") or []' in kl
+    for key in ("o.query", "o.playlist_title", "o.kind", "o.at"):
+        assert key in html, f"프론트가 읽지 않는 키가 있다: {key}"
+
+
+def _origin_js_source() -> str:
+    """index.html의 출처 배지·필터 블록을 **원문 그대로** 떼어 온다 (자기 검증 방지)."""
+    html = (Path(__file__).parent.parent / "dashboard" / "index.html").read_text(
+        encoding="utf-8")
+    m = re.search(r"/\* ═══ 출처 배지·필터.*?^function originSelPass\(.*?^\}",
+                  html, re.S | re.M)
+    assert m, "index.html에서 출처 필터 블록을 찾지 못했다"
+    return m.group(0)
+
+
+def test_origin_filter_runs_in_node():
+    """출처 배지·필터를 **실제 JS로 실행**해 고정 (FR39.9 · P2 옵션 2층).
+
+    소비 UI가 이 FR의 완료 조건이므로(DQ-62) 토큰 존재 확인만으로는 부족하다 —
+    ⓐ 배지 문구 ⓑ kind 전체 옵션 + 하위 옵션 상한 ⓒ 상한에 걸린 값도 kind 옵션이
+    받는다(조용히 사라지는 영상 없음) ⓓ `출처 없음` ⓔ 폴더 병합 목록에서도 같은 필터.
+    """
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node 미설치 — test_frontend_consumes_origin_shape가 배선을 가드한다")
+    script = """
+const _sel = { innerHTML: "", value: "" };
+const document = { getElementById: () => _sel };
+const esc = s => String(s);
+""" + _origin_js_source() + """
+const out = {};
+const V = (id, origin) => ({ id, origin: origin || [] });
+// 검색어 25종(상한 20 초과) + 재생목록 + 채널 + 출처 없음
+const vids = [];
+for (let i = 0; i < 25; i++)
+  vids.push(V("s" + i, [{ kind: "search", query: "검색" + i,
+                          at: `2026-09-${String(i + 1).padStart(2, "0")}T00:00:00` }]));
+vids.push(V("p1", [{ kind: "playlist", playlist_title: "퀀트 강의",
+                     at: "2026-09-26T00:00:00", playlist_id: "PLx" }]));
+vids.push(V("c1", [{ kind: "channel", via: "dashboard", at: "2026-09-26T00:00:00" }]));
+vids.push(V("n1", []));
+out.badges = [fmtOrigin(vids[0].origin), fmtOrigin(vids[25].origin),
+              fmtOrigin(vids[26].origin), fmtOrigin(vids[27].origin)];
+out.title = originTitle(vids[26].origin);
+buildOriginOptions(vids);
+out.html_has_none = _sel.innerHTML.includes("출처 없음");
+out.opts = libOriginOpts.map(o => o.kind + "|" + o.key);
+const pick = (kind, key) => String(libOriginOpts.findIndex(
+  o => o.kind === kind && o.key === (key || "")));
+const ids = sel => { _sel.value = sel; return vids.filter(originSelPass).map(v => v.id); };
+out.all = ids("").length;
+out.none = ids("none");
+out.kind_search = ids(pick("search")).length;          // 25편 전부 (상한과 무관)
+out.one_query = ids(pick("search", "검색24"));          // 최근 검색어 하위 옵션
+out.capped_query_index = pick("search", "검색0");       // 상한 밖 → -1
+out.kind_channel = ids(pick("channel"));
+out.kind_playlist = ids(pick("playlist"));
+console.log(JSON.stringify(out));
+"""
+    r = subprocess.run([node, "-e", script], capture_output=True, text=True)
+    assert r.returncode == 0, r.stderr
+    got = json.loads(r.stdout)
+    assert got["badges"] == ["검색: 검색0", "재생목록: 퀀트 강의", "채널", ""], got["badges"]
+    assert "채널" in got["title"] and "2026-09-26T00:00:00" in got["title"]
+    assert got["html_has_none"] is True
+    # 옵션 2층: kind 전체 3개 + 검색 하위 20(상한) + 재생목록 하위 1 = 24
+    assert got["opts"][0] == "search|" and "playlist|" in got["opts"]
+    assert len([o for o in got["opts"] if o.startswith("search|") and o != "search|"]) == 20
+    assert len(got["opts"]) == 3 + 20 + 1, got["opts"]
+    assert got["all"] == 28
+    assert got["none"] == ["n1"], "출처 없는 영상만 (561편 과거 데이터의 화면)"
+    assert got["kind_search"] == 25, "하위 옵션 상한에 걸린 값도 kind 옵션이 받는다"
+    assert got["one_query"] == ["s24"]
+    assert got["capped_query_index"] == "-1", "상한 밖 검색어는 하위 옵션이 없다"
+    assert got["kind_channel"] == ["c1"] and got["kind_playlist"] == ["p1"]

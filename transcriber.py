@@ -144,7 +144,10 @@ class Transcriber:
 
             (self.ext.dirs["srt"] / f"{basename}.srt").write_text(srt, encoding="utf-8")
             (self.ext.dirs["txt"] / f"{basename}.txt").write_text(txt, encoding="utf-8")
-            meta = self.ext.meta.save(info, basename, "whisper")
+            # 무자막 영상은 process_video가 meta를 쓰지 않으므로 **여기서 처음
+            # 만들어진다** — 출처는 `transcribe` (FR39.2)
+            meta = self.ext.meta.save(info, basename, "whisper",
+                                      origin_entry={"kind": "transcribe"})
             meta["basename"] = basename
             self.ext.state.mark_done(vid, meta)
             self.ext._log_row([vid, upload_date, title, "transcribe", "whisper",

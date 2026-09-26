@@ -115,6 +115,9 @@ class KLQuery:
                 # 결측은 None/"" — 0으로 채우면 0초 영상과 구분 불가 (FR20.6, DQ-29).
                 "duration": meta.get("duration"),
                 "duration_string": meta.get("duration_string") or "",
+                # 출처 (FR39.8) — meta의 값을 그대로 통과. 키가 없는 과거 meta는
+                # **`[]`**(null이 아니다 — 프론트가 분기 없이 순회한다). 백필 없음.
+                "origin": meta.get("origin") or [],
                 "url": meta.get("webpage_url"),
             })
         return sorted(videos, key=lambda v: v["upload_date"], reverse=True)

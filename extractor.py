@@ -251,7 +251,11 @@ class Extractor:
                       content_type: str = "video",
                       playlists_map: dict = None,
                       info: dict = None,
-                      date_range: dict = None) -> str:
+                      date_range: dict = None,
+                      origin: dict = None) -> str:
+        # origin: 이 run의 출처 서술자 dict 또는 None (FR39.5). **해석·병합하지 않고**
+        # 저장 계층(MetaCollector.save)에 그대로 넘긴다 — 규칙이 두 곳에 있으면
+        # 한쪽이 반드시 append 한다(FR39.4).
         url = f"https://www.youtube.com/watch?v={vid}"
         # info가 주어지면 조회를 생략 (FR17.2: 단일영상 워커가 이미 받은 info 재사용)
         if info is None:
@@ -306,7 +310,8 @@ class Extractor:
         # 메타·설명 저장
         meta = self.meta.save(info, basename, sub_type,
                               playlists=(playlists_map or {}).get(vid, []),
-                              content_type=content_type)
+                              content_type=content_type,
+                              origin_entry=origin)
         meta["basename"] = basename
         self.state.mark_done(vid, meta)
 
@@ -379,7 +384,8 @@ class Extractor:
     # ── 채널 전체 실행 ───────────────────────────────────────────────────────
     def run(self, force_vid: str = None, limit: int = None,
             progress=None, entries: list = None, pl_map: dict = None,
-            date_range: dict = None, rest_state: "BatchRest" = None) -> dict:
+            date_range: dict = None, rest_state: "BatchRest" = None,
+            origin: dict = None) -> dict:
         """
         채널 증분 추출. 신규 인자가 모두 None이면 기존 CLI 동작과 완전 동일 (FR18.1).
 
@@ -389,6 +395,9 @@ class Extractor:
         date_range : {"since": "YYYYMMDD"|None, "until": "YYYYMMDD"|None} (DQ-12)
         rest_state : 배치 휴식 카운터(FR14.2)를 호출 간 공유하고 싶을 때 주입.
                      None이면 이 run() 전용 BatchRest를 새로 만든다(기존 동작).
+        origin     : 출처 서술자 dict — 한 run = 한 출처이므로 루프의 모든
+                     process_video 호출에 **같은 값**을 넘긴다. None이면 저장 계층이
+                     기존 `origin`을 보존만 한다 (FR39.4ⓒ·FR39.15)
         """
         log.info(f"━━━ 채널: {self.channel} ━━━")
 
@@ -475,7 +484,8 @@ class Extractor:
                         vid, action,
                         content_type=entry.get("content_type", "video"),
                         playlists_map=pl_map,
-                        date_range=date_range)
+                        date_range=date_range,
+                        origin=origin)
                     consecutive_429 = 0          # 성공 시 카운터 리셋
                     if result == "ok":
                         stats[action] += 1

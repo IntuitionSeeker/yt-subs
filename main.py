@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CLI 진입점 — add / run / review / reextract / index / list / remove / ask / summarize / serve / backfill-tickers / audit / doctor."""
+"""CLI 진입점 — add / run / review / reextract / index / list / remove / ask / summarize / serve / backfill-tickers / terms / correct / audit / doctor."""
 import sys
 import argparse
 import logging
@@ -309,6 +309,168 @@ def cmd_backfill_tickers(args):
                  "실제 반영은 `./yt.sh backfill-tickers --apply`")
 
 
+def correction_targets(reg, target: str = None) -> list:
+    """`terms`·`correct`의 대상 채널 산출 — 채널명 → 폴더명 → 전체. FR40.6·40.18
+
+    `bulk_targets`(FR34.7)와 달리 `auto_run`을 보지 않는다 — 교정은 추출이 아니라
+    **이미 있는 파일을 읽는 작업**이고, 검색으로 유입된 채널의 자막도 같은 코퍼스다.
+    """
+    names = list(reg.names())
+    if not target:
+        return names
+    if target in names:
+        return [target]
+    in_group = [n for n in names if (reg.get(n) or {}).get("group") == target]
+    if in_group:
+        return in_group
+    return []
+
+
+def cmd_terms(args):
+    """
+    교정 후보 계량 — **읽기 전용·네트워크 0**. FR40.18
+
+    사전은 가이드를 베끼지 않고 이 코퍼스 실측으로 만든다(DQ-64: 가이드가 확실(○)로
+    분류한 `디어`가 617건/192편 **전량 오탐**이었다). 이 명령은 그 절차를 도구화한다 —
+    후보별 건수·영상 수·**어절 분포**(오탐의 직접 증거)·문맥 샘플·자동 판정 제안.
+    후보 자동 발굴은 하지 않는다(측정된 병목은 발굴이 아니라 오탐 검증이다).
+    """
+    import json as _json
+    from pathlib import Path
+    import glossary
+    from channel_registry import ChannelRegistry
+    reg = ChannelRegistry()
+    targets = correction_targets(reg, args.target)
+    if not targets:
+        log.info(f"대상을 찾을 수 없습니다: {args.target} (채널명 또는 폴더명)")
+        return
+    if not args.from_file:
+        log.info("후보 파일이 필요합니다 — `--from glossary/seeds/guide-2026-08.txt`\n"
+                 "  (가이드 시드도 **가설로서만** 이 경로로 들어옵니다 — FR40.18)")
+        return
+    path = config.BASE_DIR / args.from_file if not str(args.from_file).startswith("/") \
+        else Path(args.from_file)
+    if not path.exists():
+        log.info(f"후보 파일이 없습니다: {path}")
+        return
+    cands = glossary.parse_candidates(path.read_text(encoding="utf-8"))
+    log.info(f"▢ 후보 {len(cands)}개 · 채널 {len(targets)}개 계량 중 (읽기 전용)…")
+    rows = glossary.survey(targets, cands, min_hits=args.min)
+    if args.json:
+        print(_json.dumps({"targets": targets, "candidates": rows},
+                          ensure_ascii=False, indent=2))
+    else:
+        log.info(f"\n{'후보':<12} {'건수':>6} {'영상':>5} {'채널':>5} "
+                 f"{'완전일치':>9} {'판정':<8} 어절 분포 상위")
+        log.info("─" * 110)
+        for r in rows:
+            dist = " · ".join(f"{t['token']}({t['n']})" for t in r["tokens"][:5])
+            log.info(f"{r['candidate']:<12} {r['hits']:>6} {r['videos']:>5} "
+                     f"{r['channels']:>5} {r['exact']:>4}/{r['hits']:<4} "
+                     f"{r['verdict']:<8} {dist}")
+        log.info(f"\n※ `reject`는 어절 완전일치 비율 "
+                 f"{int(glossary.EXACT_RATIO_MIN * 100)}% 미만 = 대부분이 다른 단어의 "
+                 f"일부라는 뜻입니다. 채택하려면 `left_exclude`·`require`로 좁히세요.")
+        log.info("※ 판정은 **제안**입니다 — 근거는 어절 분포입니다. 후보 뒤 1음절이 "
+                 "우연히 조사와 같으면 완전일치가 부풀려집니다(예: `오케`의 `오케이`).")
+        log.info("※ 이 명령은 아무것도 쓰지 않았습니다(사전 수정은 사람이 합니다).")
+    if args.hold:
+        # hold는 **규칙 단위**다(DQ-71) — 영상별 파일을 만들지 않는다. 상한 50.
+        out = glossary.GLOSSARY_DIR / glossary.HOLD_DIRNAME / f"{args.hold}.md"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(glossary.hold_report(args.hold, rows), encoding="utf-8")
+        log.info(f"\n📝 후보 리포트: {out.relative_to(config.BASE_DIR)} "
+                 f"(상위 50 · 사람이 보고 사전에 확정)")
+
+
+def cmd_correct(args):
+    """
+    자막 용어 교정 — **dry-run이 기본**이다. FR40.13~40.14·40.21
+
+    `--apply` 없이는 한 바이트도 쓰지 않고, 계획에 **교정 대상 편수 · 변경 예정 건수 ·
+    재임베딩될 청크 수**를 함께 낸다(예고 없이 겪으면 사고로 보인다). 원본 `srt/`·`txt/`는
+    어느 경로에서도 쓰지 않는다(FR40.3).
+    """
+    import json as _json
+    import corrector
+    from channel_registry import ChannelRegistry
+    reg = ChannelRegistry()
+    targets = correction_targets(reg, args.target)
+    if not targets:
+        log.info(f"대상을 찾을 수 없습니다: {args.target} (채널명 또는 폴더명)")
+        return
+
+    if args.status:                                  # FR40.22 — doctor 대신 여기 둔다
+        st = corrector.status(targets)
+        if args.json:
+            print(_json.dumps(st, ensure_ascii=False, indent=2))
+            return
+        log.info(f"▢ 교정본 {st['corrected']}편 / 상태 기록 {st['scanned']}건 "
+                 f"· 채널 {len(st['channels'])}개")
+        for item in st["stale"]:
+            log.info(f"  [stale] {item['channel']}/{item['basename']} — {item['reason']} "
+                     f"→ 원본으로 폴백 중 (해소: correct --apply 재실행)")
+        for item in st["orphans"]:
+            log.info(f"  [고아]  {item['channel']}/{item['basename']} — {item['reason']}")
+        if st["dead_rules"]:
+            log.info(f"  [죽은 규칙] 적용 0건: {', '.join(st['dead_rules'])}")
+        if not (st["stale"] or st["orphans"] or st["dead_rules"]):
+            log.info("  이상 없음 (stale·고아·죽은 규칙 0건)")
+        return
+
+    total = {"videos": 0, "corrected": 0, "changes": 0, "reverted": 0,
+             "excluded": 0, "chunks": 0, "held": 0}
+    rule_stats, holds, plans = {}, [], []
+    for name in targets:
+        plan = corrector.correct_channel(name, apply=args.apply)
+        plans.append(plan)
+        for k in total:
+            total[k] += plan["totals"][k]
+        for rid, st in plan["rule_stats"].items():
+            cur = rule_stats.setdefault(rid, {"applied": 0, "excluded": 0})
+            cur["applied"] += st["applied"]
+            cur["excluded"] += st["excluded"]
+        holds += [dict(h, channel=name) for h in plan["holds"]]
+        if plan["totals"]["corrected"] or plan["holds"]:
+            log.info(f"▢ {name}: 교정 {plan['totals']['corrected']}/"
+                     f"{plan['totals']['videos']}편 · 변경 {plan['totals']['changes']}건 "
+                     f"· 원복 {plan['totals']['reverted']} · 배제 "
+                     f"{plan['totals']['excluded']} · 사전 {plan['rules']}항목"
+                     f"({'·'.join(plan['domains'])})")
+    if args.json:
+        print(_json.dumps({"totals": total, "rule_stats": rule_stats,
+                           "holds": holds, "plans": plans},
+                          ensure_ascii=False, indent=2))
+        return
+
+    log.info(f"\n합계 — 교정 대상 **{total['corrected']}편** / 전체 {total['videos']}편 "
+             f"· 변경 **{total['changes']}건** · 원복 {total['reverted']} "
+             f"· 배제 {total['excluded']}")
+    log.info(f"     재임베딩 예상 **{total['chunks']}청크** "
+             f"(FR33 증분 — 본문이 바뀐 영상만 다시 임베딩됩니다)")
+    if rule_stats:
+        log.info("\n[규칙별]  적용 / 배제   ※ 배제 0은 안전 조건이 죽었다는 신호입니다")
+        for rid, st in sorted(rule_stats.items()):
+            log.info(f"  {rid:<28} {st['applied']:>5} / {st['excluded']:<5}"
+                     f"{'   ← 죽은 규칙(적용 0건)' if not st['applied'] else ''}")
+    else:
+        log.info("\n사전이 비어 있습니다 — 교정 결과 0건이 정상입니다(FR40.6).\n"
+                 "  후보 계량: ./yt.sh terms [폴더|채널] "
+                 "--from glossary/seeds/guide-2026-08.txt")
+    if holds:
+        log.info(f"\n[hold {len(holds)}건 — 회로차단·구조 위반으로 교정본을 쓰지 않았습니다]")
+        for h in holds[:20]:
+            log.info(f"  {h['channel']}/{h['basename']}: {h['reason']}")
+    if not args.apply:
+        log.info("\n※ dry-run입니다. 아무것도 쓰지 않았습니다. "
+                 "실제 산출은 `./yt.sh correct [대상] --apply`\n"
+                 "  (원본 srt/·txt/는 --apply에서도 쓰지 않습니다 — 산출물은 fix/ 하위뿐이고 "
+                 "되돌리기는 그 디렉터리 삭제입니다)")
+    else:
+        log.info(f"\n✅ 교정본 산출 완료 — 다음 인덱싱이 교정 본문을 반영합니다 "
+                 f"(`./yt.sh index`, 예상 {total['chunks']}청크)")
+
+
 def _selfcheck(command, args):
     """
     `audit`·`doctor` 공통 실행부. FR38.4~38.6
@@ -434,6 +596,25 @@ def build_parser():
     sp.add_argument("channel", nargs="?")
     sp.add_argument("--apply", action="store_true", help="실제 파일 쓰기")
     sp.set_defaults(func=cmd_backfill_tickers)
+
+    # FR40.18 — 후보 계량. 읽기 전용이고 `--hold`만 리포트 파일을 쓴다
+    sp = sub.add_parser("terms", help="교정 후보 계량 (FR40.18, 읽기 전용)")
+    sp.add_argument("target", nargs="?", help="폴더명 또는 채널명 (생략 시 전체)")
+    sp.add_argument("--from", dest="from_file", help="후보 파일 (한 줄에 후보 1개)")
+    sp.add_argument("--min", type=int, default=1, help="이 건수 미만 후보는 생략")
+    sp.add_argument("--hold", metavar="도메인",
+                    help="후보 리포트를 glossary/hold/<도메인>.md로 저장 (상한 50)")
+    sp.add_argument("--json", action="store_true", help="기계 판독 출력")
+    sp.set_defaults(func=cmd_terms)
+
+    # FR40.14 — 기본 dry-run. `--apply`가 있어야 fix/에 쓴다 (원본은 어느 경우에도 불변)
+    sp = sub.add_parser("correct", help="자막 용어 교정 (FR40, 기본 dry-run)")
+    sp.add_argument("target", nargs="?", help="폴더명 또는 채널명 (생략 시 전체)")
+    sp.add_argument("--apply", action="store_true", help="교정본 산출 (fix/ 하위)")
+    sp.add_argument("--status", action="store_true",
+                    help="상태 점검 — stale·고아 교정본·죽은 규칙 (FR40.22)")
+    sp.add_argument("--json", action="store_true", help="기계 판독 출력")
+    sp.set_defaults(func=cmd_correct)
 
     # FR38 — 읽기 전용 점검 2종. `--fix` 류는 만들지 않는다(FR38.1·DQ-52)
     sp = sub.add_parser("audit", help="문서·코드 정합 감사 (읽기 전용, FR38)")

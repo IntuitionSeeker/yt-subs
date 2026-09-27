@@ -103,6 +103,11 @@
   /* 출처 배지 (FR39.9) — 값이 없는 영상은 배지 자체가 없다 */
   .origin { color: var(--muted); border: 1px solid var(--border);
     border-radius: 4px; padding: 0 5px; }
+  /* 교정 배지 (FR40.16) — 교정본이 없으면 배지 자체가 없다.
+     stale(원본 재추출·사전 변경)이면 본문은 원본이 쓰이므로 경고색으로 구분한다 */
+  .fixmark { color: var(--green); border: 1px solid var(--border);
+    border-radius: 4px; padding: 0 5px; cursor: help; }
+  .fixmark.stale { color: var(--warn); }
 
   .main { display: flex; flex-direction: column; overflow: hidden; }
   .main-head {
@@ -873,6 +878,22 @@ function originSelPass(v) {
                         (!want.key || originKey(o) === want.key));
 }
 
+/* ═══ 교정 배지·토글 (FR40.16) ═══
+   교정이 코퍼스에 무엇을 했는지 사람이 보는 **유일한 화면**이다 — `note`·`tickers`가
+   "읽는 곳이 없어 죽은 필드"였던 전례(DQ-62) 때문에 없으면 기능이 아니다. */
+function fmtCorrection(v) {
+  if (!v || !v.corrected) return "";                 // 교정본 없음 = 배지 없음
+  return (v.correction_stale ? "✎? " : "✎ ") + (v.corrections || 0);
+}
+
+function correctionTitle(v) {
+  if (!v || !v.corrected) return "";
+  return v.correction_stale
+    ? `용어 교정 ${v.corrections || 0}건 — 원본이 재추출됐거나 사전이 바뀌어 ` +
+      `낡은 교정본입니다. 본문·색인은 원본이 쓰입니다 (correct --apply 재실행으로 해소)`
+    : `용어 교정 ${v.corrections || 0}건 적용 — 자막 상세에서 원본과 대조할 수 있습니다`;
+}
+
 /* ═══ 이름 변경 (FR31) ═══ */
 async function _renamePost(path, body, errPrefix) {
   const r = await fetch(`${API}${path}`, {
@@ -1016,6 +1037,8 @@ function renderLibList() {
         ${(v.playlists||[]).map(p=>`<span class="playlist">${esc(p)}</span>`).join("")}
         ${fmtOrigin(v.origin)
           ? `<span class="origin" title="${esc(originTitle(v.origin))}">📍 ${esc(fmtOrigin(v.origin))}</span>` : ""}
+        ${fmtCorrection(v)
+          ? `<span class="fixmark${v.correction_stale ? " stale" : ""}" title="${esc(correctionTitle(v))}">${esc(fmtCorrection(v))}</span>` : ""}
         <a class="ext-link" href="${esc(v.url || '#')}" target="_blank">↗ 원본</a>
         <button class="icon-btn video-rename" title="제목 변경">✏️</button>
         <button class="icon-btn video-del" title="영상 삭제">🗑</button>
@@ -1027,6 +1050,7 @@ function renderLibList() {
 let libDetailText = null;
 let libDetailBasename = null;
 let libDetailChannel = null;
+let libDetailVariant = "fix";      // 자막 상세가 지금 보여 주는 것 (FR40.16)
 
 async function downloadMarkdown() {
   /* ⬇ MD — 서버 조립 markdown을 .md 파일로 저장 (FR28.2) */
@@ -1034,7 +1058,8 @@ async function downloadMarkdown() {
   try {
     const r = await fetch(`${API}/export/markdown` +
       `?channel=${encodeURIComponent(libDetailChannel || libChannel)}` +
-      `&basename=${encodeURIComponent(libDetailBasename)}`);
+      `&basename=${encodeURIComponent(libDetailBasename)}` +
+      `&variant=${libDetailVariant}`);
     if (!r.ok) throw new Error(r.status);
     const { filename, markdown } = await r.json();
     const blob = new Blob([markdown], { type: "text/markdown;charset=utf-8" });
@@ -1048,20 +1073,27 @@ async function downloadMarkdown() {
   } catch (e) { alert("Markdown 내보내기 실패: " + e.message); }
 }
 
-async function showSubtitle(basename, el) {
-  document.querySelectorAll(".lib-row").forEach(r => r.classList.remove("sel"));
-  if (el) el.classList.add("sel");
+async function showSubtitle(basename, el, variant) {
+  // el이 없으면(원본↔교정 토글 재호출) 행 선택을 그대로 둔다 — 같은 영상이다
+  if (el) {
+    document.querySelectorAll(".lib-row").forEach(r => r.classList.remove("sel"));
+    el.classList.add("sel");
+  }
   const panel = document.getElementById("libDetail");
   panel.innerHTML = `<span class="spinner"></span>`;
   libDetailText = null;
   libDetailBasename = basename;
+  libDetailVariant = variant === "src" ? "src" : "fix";     // 기본 교정본 (FR40.16)
   // 폴더 병합 보기에서는 영상별 원채널로 조회 (FR25.5)
-  const subCh = ((libVideos.find(v => v.basename === basename) || {})._ch) || libChannel;
+  const vid = libVideos.find(v => v.basename === basename) || {};
+  const subCh = vid._ch || libChannel;
   try {
     const r = await fetch(`${API}/subtitle?channel=${encodeURIComponent(subCh)}` +
-                          `&basename=${encodeURIComponent(basename)}`);
+                          `&basename=${encodeURIComponent(basename)}` +
+                          `&variant=${libDetailVariant}`);
     if (!r.ok) throw new Error(r.status);
-    const { text, chapters, url } = await r.json();
+    const { text, chapters, url, variant: served, corrections } = await r.json();
+    libDetailVariant = served === "src" ? "src" : "fix";
     libDetailText = text;
     libDetailChannel = subCh;
     // 챕터 목록 (FR27.3) — 타임스탬프 새 탭 링크
@@ -1073,11 +1105,22 @@ async function showSubtitle(basename, el) {
         ${chapters.map(c => `<a href="${esc(url)}&t=${c.start}s" target="_blank">
           <span class="ts">${fmtTs(c.start)}</span> ${esc(c.title)}</a>`).join("")}
       </div>` : "";
+    // 원본↔교정 토글 — 교정본이 있을 때만 뜬다(없으면 비교할 것이 없다)
+    // 전역 `libDetailBasename`을 다시 넘긴다 — 인용부호가 든 파일명을 HTML 속성에
+    // 끼워 넣지 않는 것이 목적이다(esc로 덮을 수 없는 경로다).
+    const togHtml = vid.corrected
+      ? `<button class="copy-btn" onclick="showSubtitle(libDetailBasename, null, ` +
+        `'${libDetailVariant === "src" ? "fix" : "src"}')">` +
+        `${libDetailVariant === "src" ? "✎ 교정본" : "📄 원본"}</button>` : "";
+    const varHtml = vid.corrected
+      ? `<span class="fixmark${libDetailVariant === "src" ? " stale" : ""}">` +
+        `${libDetailVariant === "src" ? "원본" : `교정본 ${corrections || 0}건`}</span>` : "";
     panel.innerHTML = `<div class="lib-detail-actions">
+        ${togHtml}
         <button class="copy-btn" onclick="downloadMarkdown()">⬇ MD</button>
         <button class="copy-btn" id="copySubBtn" onclick="copySubtitle()">📋 복사</button>
       </div>
-      <h3>📄 ${esc(basename)}</h3>${chapHtml}<pre>${esc(text)}</pre>`;
+      <h3>📄 ${esc(basename)} ${varHtml}</h3>${chapHtml}<pre>${esc(text)}</pre>`;
   } catch (e) {
     panel.innerHTML = `<div class="notice">자막을 불러오지 못했습니다 — ${esc(basename)}.
       서버 상태를 확인한 뒤 다시 시도하세요.</div>`;

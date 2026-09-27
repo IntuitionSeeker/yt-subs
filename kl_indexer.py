@@ -3,6 +3,7 @@ import json
 import logging
 
 import config
+import corrector
 import subtitle_utils as su
 
 log = logging.getLogger("indexer")
@@ -97,6 +98,14 @@ class KLIndexer:
 
     # ── 자막 인덱싱 (FR6.2: SRT 120초 윈도우) ────────────────────────────────
     def index_subtitles(self, on_progress=None):
+        """**글롭은 원본 `srt/`를 유지하고 본문만 교정본에서 읽는다**. FR40.13 (DQ-68)
+
+        교정본 디렉터리를 순회 대상으로 바꾸면 미교정 영상이 색인에서 사라지고
+        `doctor.index-coverage`가 그 수만큼 경고로 터진다(실측 504편). 그래서 목록의
+        정본은 원본이고 소스 선택은 **영상 단위 폴백**(`corrector.pick_source`)이다.
+        **청크 메타데이터에는 교정 표식을 넣지 않는다** — 넣으면 전 청크 메타가 달라져
+        FR33 `_unchanged`가 전부 불일치로 보고 **전량 재임베딩**이 발생한다(FR40.14).
+        """
         col = self._collection(config.COL_SUBTITLE)
         srt_dir = self.dirs["srt"]
         if not srt_dir.exists():
@@ -104,6 +113,9 @@ class KLIndexer:
 
         files = sorted(srt_dir.glob("*.srt"))
         total, skipped, n = 0, 0, len(files)
+        # 교정 상태·사전 해시는 채널당 1회만 읽는다 (파일마다 yaml을 다시 읽지 않는다)
+        fix_state = corrector.load_state(self.channel)
+        rules_sha = corrector.rules_sha_for(self.channel) if fix_state else None
         for fi, srt_file in enumerate(files, 1):
             basename = srt_file.stem
             meta = self._load_meta(basename)
@@ -115,7 +127,9 @@ class KLIndexer:
             playlists = ", ".join(meta.get("playlists") or [])
             content_type = meta.get("content_type", "video")
 
-            chunks = su.chunk_by_srt(srt_file.read_text(encoding="utf-8"))
+            src = corrector.pick_source(self.channel, basename, kind="srt",
+                                        state=fix_state, rules_sha=rules_sha)
+            chunks = su.chunk_by_srt(src.read_text(encoding="utf-8"))
             if not chunks:
                 continue
 

@@ -1,0 +1,30 @@
+# glossary/ai-llm.yaml — LLM·에이전트·지식관리 도메인. FR40.6
+#
+# **비어 있는 것이 현재 정상 상태다**(사람 확정 전까지 교정 결과 0건이 정상 — C1).
+# 후보 11종(레그·카파시·재미나이·인제스트·하네스·런백·텍소노미·다클링·몬톨로지·놀리지·
+# 프론트메타)은 **계량만 됐고 사람 확정은 안 됐다**. 계량 결과는
+# `glossary/hold/ai-llm.md`(`./yt.sh terms … --hold`)에 있다.
+#
+# 1차 채택 지침(C2): **영문 고유명사만**. `재미나이`→`Gemini`처럼 영문화가 한국어 질의
+# 재현율을 떨어뜨릴 수 있는 것은 넣지 않고 hold 리포트에 남긴다(FR40.21ⓓ 수치로 판단).
+#
+# 실측이 확인한 조건 예시(주석 — 사람이 확정하면 주석을 푼다):
+# - canonical: RAG
+#   variants:
+#     - text: 레그
+#       word_exact: true            # 어절 전체 일치 — 조사만 허용
+#       left_exclude: ["텔"]        # 실측 249건 중 152건이 "텔레그램"
+#   domain: ai-llm
+#   confidence: high
+#   note: 에이전틱 레그 / 레그는 문서에서 정보를 검색해
+#   source: corpus-2026-09-27
+#   measured: {hits: 97, videos: 14}
+#
+# - canonical: Harness
+#   variants:
+#     - text: 하네스
+#       word_exact: true
+#       window_exclude: ["강아지", "용품", "에서 온 말", "어원", "용어들이"]
+#   domain: ai-llm
+#   confidence: high
+#   note: 실측 배제 문맥 — "하네스는"(큐 808) / "강아지 용품에서 온 말"(큐 809)

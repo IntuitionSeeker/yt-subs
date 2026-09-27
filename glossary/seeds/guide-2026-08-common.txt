@@ -1,0 +1,25 @@
+# subtitle_post_correction_guide.md §7 중 **주제 무관(common)** 후보 — 가설 입력 전용
+# 사용: ./yt.sh terms --from glossary/seeds/guide-2026-08-common.txt --hold common
+딸각 -> 딸깍
+잡돌이 -> 잡도리
+잡돌리 -> 잡도리
+전자측 -> 전자책
+사례을 -> 사례글
+사례그 -> 사례글
+6원칙 -> 육하원칙
+순호 -> Suno
+손호 -> Suno
+커서 -> Cursor
+컴플런스 -> Confluence
+노트북 LM -> NotebookLM
+안티그래버티 -> Antigravity
+포스트그레이 SQL -> PostgreSQL
+FPT5 -> FTS5
+FTP5 -> FTS5
+KSA -> KSI
+X41 -> EXAONE
+아울 -> OWL
+오울 -> OWL
+마울 -> OWL
+오케 -> OKF
+페이블 -> Fable

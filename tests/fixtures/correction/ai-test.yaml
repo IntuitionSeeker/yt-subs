@@ -1,0 +1,41 @@
+# 골든 샘플용 시험 사전 (V-U39). **실데이터 사전이 아니다** — `glossary/`의 내용과
+# 무관하게 엔진 동작을 고정하기 위한 픽스처다(사전이 비어도 회귀가 돌아야 한다).
+#
+# 세 항목 모두 실측에서 온 것이다:
+#  · RAG    — 249건 중 152건이 `텔레그램`(left_exclude로 잘라낸다)
+#  · Harness — 어원 문맥 "하네스는"(큐 808) / "강아지 용품에서 온 말"(큐 809)이 **큐 경계로 분리**
+#  · DEER   — 617건/192편 전량 오탐(`아이디어`·`소셜 미디어`·`드디어`·`옵시디어`)
+- canonical: RAG
+  variants:
+    - text: 레그
+      word_exact: true
+      left_exclude: ["텔"]
+  domain: ai-test
+  confidence: high
+  note: 에이전틱 레그 / 레그는 문서에서 정보를 검색해
+  source: corpus-2026-09-27
+  measured: {hits: 97, videos: 14}
+
+- canonical: Harness
+  variants:
+    - text: 하네스
+      word_exact: true
+      window_exclude: ["강아지", "용품", "에서 온 말", "어원", "용어들이"]
+  domain: ai-test
+  confidence: high
+
+- canonical: DEER
+  variants:
+    - text: 디어
+      word_exact: true
+      require: ["논문", "벤치마크"]
+  domain: ai-test
+  confidence: high
+  note: 무방비 치환이면 617건 전량 오탐 — 조건 두 겹을 함께 요구한다
+
+- canonical: Learnback
+  variants:
+    - text: 런백
+      word_exact: true
+  domain: ai-test
+  confidence: medium        # high가 아니므로 **적용되지 않는다**(FR40.9)

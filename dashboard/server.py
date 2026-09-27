@@ -502,6 +502,11 @@ def delete_video(req: VideoDeleteRequest):
     for key, ext in (("srt", "srt"), ("txt", "txt"), ("meta", "json"), ("desc", "txt")):
         (dirs[key] / f"{req.basename}.{ext}").unlink(missing_ok=True)
 
+    # 교정 산출물도 함께 지운다 (FR40.17ⓐ) — 빠뜨리면 원본 없는 **고아 교정본**이
+    # 남고, `correct --status`의 고아 보고가 정상 삭제로 오염된다.
+    import corrector
+    corrector.forget_video(req.channel, req.basename)
+
     state = StateManager(req.channel)
     state.remove(video_id)
     state.save()
@@ -565,30 +570,57 @@ def _load_meta(channel: str, basename: str) -> dict:
         return {}
 
 
-@app.get("/subtitle")
-def subtitle(channel: str, basename: str):
-    """자막 전문(txt) + 챕터·원본 링크 반환. 경로 탈출 2중 검증. FR20.3·FR27.2"""
-    _reject_path_traversal(channel, basename)
+def _txt_source(channel: str, basename: str, variant: str = "fix"):
+    """자막 전문의 소스 선택 — `/subtitle`·`/export/markdown` **공용**. FR40.13·40.16
+
+    기본은 **교정본**이고 `variant=src`면 원본이다. 선택 규칙은 `corrector.pick_source`
+    한 곳에만 있다 — 두 곳에 규칙이 있으면 한쪽이 stale을 쓴다(DQ-68).
+    반환: `(경로, 실제 variant, 교정 건수)`. 경로 탈출은 원본·교정본 양쪽에서 재확인한다.
+    """
+    import corrector
+    base = config.channel_dir(channel).resolve()
     txt_dir = config.channel_subdirs(channel)["txt"].resolve()
-    path = (txt_dir / f"{basename}.txt").resolve()
-    if not path.is_relative_to(txt_dir):                 # resolve 후 재확인
+    orig = (txt_dir / f"{basename}.txt").resolve()
+    if not orig.is_relative_to(txt_dir):                 # resolve 후 재확인
         raise HTTPException(status_code=400, detail="잘못된 경로 파라미터입니다.")
+    if variant == "src":
+        return orig, "src", 0
+    picked = corrector.pick_source(channel, basename, kind="txt").resolve()
+    if not picked.is_relative_to(base):                  # pragma: no cover - 방어
+        raise HTTPException(status_code=400, detail="잘못된 경로 파라미터입니다.")
+    if picked == orig:
+        return orig, "src", 0
+    changes = int((corrector.load_state(channel).get(basename) or {}).get("changes") or 0)
+    return picked, "fix", changes
+
+
+@app.get("/subtitle")
+def subtitle(channel: str, basename: str, variant: str = "fix"):
+    """자막 전문(txt) + 챕터·원본 링크 반환. 경로 탈출 2중 검증. FR20.3·FR27.2·FR40.16
+
+    `variant`는 `fix`(기본 — 신선한 교정본이 있으면 그것) 또는 `src`(원본)다.
+    이 토글은 장식이 아니라 **사람이 오적용을 보는 유일한 창**이다(FR40.16).
+    """
+    _reject_path_traversal(channel, basename)
+    path, used, changes = _txt_source(channel, basename, variant)
     if not path.exists():
         raise HTTPException(status_code=404, detail="자막 파일이 없습니다.")
     meta = _load_meta(channel, basename)
     return {"basename": basename, "text": path.read_text(encoding="utf-8"),
             "chapters": meta.get("chapters") or [],
+            "variant": used, "corrections": changes,
             "url": meta.get("webpage_url")}
 
 
 @app.get("/export/markdown")
-def export_markdown(channel: str, basename: str):
-    """영상 1개를 Markdown 문서로 조립. FR28.1"""
+def export_markdown(channel: str, basename: str, variant: str = "fix"):
+    """영상 1개를 Markdown 문서로 조립. FR28.1
+
+    자막 본문은 `/subtitle`과 **같은 선택 규칙**을 쓴다(FR40.13) — 기본이 교정본이므로
+    내보낸 Markdown·클립보드 복사(FR21.3)도 교정본이다(C5 — 의도한 동작).
+    """
     _reject_path_traversal(channel, basename)
-    txt_dir = config.channel_subdirs(channel)["txt"].resolve()
-    path = (txt_dir / f"{basename}.txt").resolve()
-    if not path.is_relative_to(txt_dir):
-        raise HTTPException(status_code=400, detail="잘못된 경로 파라미터입니다.")
+    path, used, _changes = _txt_source(channel, basename, variant)
     if not path.exists():
         raise HTTPException(status_code=404, detail="자막 파일이 없습니다.")
     meta = _load_meta(channel, basename)

@@ -1,0 +1,36 @@
+# subtitle_post_correction_guide.md §7 시드 — **가설 입력 전용**(FR40.18)
+#
+# 이 파일은 사전이 아니다. `./yt.sh terms <폴더|채널> --from glossary/seeds/guide-2026-08.txt`
+# 의 입력이며, 도구가 낸 어절 분포·문맥을 사람이 보고서야 사전에 들어간다.
+# 근거: 가이드는 스터디 자막 4편에서 도출됐고 561편 전수 대조에서 확실(○) 항목조차
+# 무너졌다 — `디어` 617건/192편 전량 오탐 · `레그` 249건 중 152건이 `텔레그램`(DQ-64).
+#
+# 형식: 한 줄에 후보 1개. `후보 -> 제안표기`(제안은 참고용, 자동 적용 아님)
+
+레그 -> RAG
+그래프레그 -> GraphRAG
+하네스 -> Harness
+한네스 -> Harness
+런백 -> Learnback
+럼백 -> Learnback
+림백 -> Learnback
+놀리지 -> Knowledge
+노리지 -> Knowledge
+노일리지 -> Knowledge
+다클링 -> Docling
+카파시 -> Karpathy
+재미나이 -> Gemini
+잼미니 -> Gemini
+인제스트 -> Ingest
+인체스 -> Ingest
+텍소노미 -> Taxonomy
+몬톨로지 -> Ontology
+토플로지 -> Topology
+프론트메타 -> Front matter
+브론트메터 -> Front matter
+그래피파이 -> Graphify
+엑사원 -> EXAONE
+세레브레스 -> Cerebras
+신싱 -> Syncthing
+오퍼스 -> Opus
+디어 -> DEER

@@ -10,6 +10,10 @@
 #       ./yt.sh serve --detach   (상시 운용: -d --restart unless-stopped, FR37.18)
 #       ./yt.sh migrate-groups [--apply [--yes]] [--rollback] [--unlock] [--no-backup]
 #       ./yt.sh backfill-tickers [채널] [--apply]   (기본 dry-run, FR12.2)
+#       ./yt.sh terms [폴더|채널] --from 후보파일 [--min N] [--hold 도메인] [--json]
+#                            (교정 후보 계량 — 읽기 전용·네트워크 0, FR40.18)
+#       ./yt.sh correct [폴더|채널] [--apply] [--status] [--json]
+#                            (자막 용어 교정 — 기본 dry-run, 원본 불변, FR40)
 #       ./yt.sh audit [--json] [--strict] [--check ID] [--baseline "N passed / M skipped"]
 #                            (문서·코드 정합 감사 — 읽기 전용·output/ 불필요, FR38)
 #       ./yt.sh doctor [채널] [--json] [--strict] [--check ID]
@@ -37,6 +41,7 @@ if [ ! -f "$DIR/channels.yaml" ]; then
   echo "channels: {}" > "$DIR/channels.yaml"
 fi
 mkdir -p "$DIR/output"
+mkdir -p "$DIR/glossary"      # 없으면 docker가 빈 폴더를 만든다 (channels.yaml 교훈)
 
 # ── Firefox 프로필 마운트 (있을 때만) FR13.6 ──
 # Firefox에 로그인만 해두면 매 실행 최신 쿠키를 직접 읽는다 (내보내기 불필요).
@@ -119,6 +124,7 @@ docker run "${RUN_OPTS[@]}" \
   "${FF_OPT[@]}" \
   -v "$DIR/output:/app/output" \
   -v "$DIR/channels.yaml:/app/channels.yaml" \
+  -v "$DIR/glossary:/app/glossary" \
   -v "$HF_CACHE:/root/.cache/huggingface" \
   -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
   "$IMAGE" "${ARGS[@]}" "${EXTRA_ARGS[@]}"

@@ -1,8 +1,8 @@
 # DESIGN — YouTube 자막 수집 · 지식층 파이프라인
 
-> **버전:** v5.12  
+> **버전:** v5.13  
 > **작성일:** 2026-08-09  
-> **연계 문서:** REQUIREMENTS.md v5.12 (FR1~FR39)  
+> **연계 문서:** REQUIREMENTS.md v5.13 (FR1~FR40)  
 > **주요 변경:** 질의 인터페이스(FR9)·질의 하네스(FR10)·웹 대시보드(FR11~12) 설계 편입,
 > 쿠키/429 방어(FR13~14), 재생목록 카테고리(FR15), 라이브 추출(FR16),
 > 대시보드 추출 인터페이스·진행율·쿠키상태·라이브러리(FR17~20) 설계 추가,
@@ -36,6 +36,8 @@
 > **v5.11:** 정합 감사 · 데이터 건전성 점검(FR38, §2.14·§3.12·§5.11·§7·§8·§9.1a·§9.3·§11.2) — 신규 잎 모듈 `selfcheck.py` 하나에 `audit`(문서·코드 정합 8검사)와 `doctor`(실데이터 건전성 10검사)를 담고 **CLI만 둘로 분리**한다(DQ-51 — 모듈을 쪼개면 발견 표현·심각도·예외·종료코드 계약이 흩어져 그것이 다음 drift가 된다. 명령을 분리하는 이유는 성격이 아니라 **실행 환경**이다: audit은 `output/` 없이 완결되고 doctor는 `output/`이 전부다). 검사는 `{ID: 함수}` 레지스트리 + `Finding(check, target, message, severity, evidence)` 계약으로 표준화하고 **고치지 않는다** — 문서가 낡았는지 코드가 틀렸는지는 기계가 정할 수 없고(spec-sync 원칙), 잘못된 방향의 자동 수정은 정본을 오염시킨다(DQ-52). 종료코드 `0`/`1`(경고)/`2`(오류)/`3`(**점검 실패** — '이상 없음'과 '확인 못 함'을 같은 코드로 내지 않는다)이고 기본 차단선은 2다. **정밀도 우선**(판정 불가는 침묵)과 **2층 예외 모델**(1차 = 문서 안의 기존 표기 `(구현 없음 — …)`·`**테스트 미구현**`·`(구현 예정)`·§9.1a 위치 열, 2차 = `audit_waivers.yaml` 정확 일치·와일드카드 금지·**stale waiver 자체가 경고**)이 오탐으로 도구가 죽는 것을 막는다(DQ-53 — 시제품 실측 허위 보고: FR 중복 15건·DQ 중복 6건·토큰 잡음 140건을 스코프·토큰 분류로 0으로 내렸다). 손으로 복제된 값(pytest 기준선 5곳·V-U/DQ/V-D '다음 번호' 포인터)은 **정본에서 계산해 대조**한다(DQ-54 — 한 세션에 4번 어긋난 실측). `doctor`는 **전수**로 돌고(실측 0.02s + chroma 0.32s — 샘플링은 놓침만 만든다) ChromaDB는 **`chroma.sqlite3` 읽기 전용 sqlite 직조회**다 — `KLIndexer._get_client()`가 `mkdir(parents=True)`를 하고 `PersistentClient`가 스키마를 쓰므로 평소 경로로 점검하면 **읽기 전용이 코드 수준에서 깨진다**(DQ-55). 스냅샷이 필요한 '분포 급변 감지'는 기각하고(로그에 timestamp 열이 없고 `members_only` 레코드의 `extracted_at`이 비어 있다 — 실측) **같은 데이터 안의 모순 감지**로 대체했다 — 로그의 `error:` 사유를 `video_access.is_members_message()`로 재판정해 **2026-09-09 멤버십 감지 고장의 화석 1건을 실제로 적발**했고, `tickers` 오탐은 '값이 있는데 distinct 1' 신호로 **필드 하드코딩 없이** 일반화했다(DQ-56). 자동 실행은 없다 — NFR3 예외는 FR37에 한정되고, 결과를 남기려면 리포트 저장소·알림이 필요해지는데 그것이 이번에 배제한 것들이다(FR38.16). 자막 교정(다음 단계)용 검사는 **레지스트리 자리만 열고 이름·스키마를 정하지 않는다**(DQ-57 — `note`·`tickers`가 '미리 만들었는데 죽어 있던' 전례다). 신규 결정 DQ-51~DQ-57, 검증 V-U35~V-U36·V-D22
 
 > **v5.12:** 영상 단위 출처 기록(FR39, §2.2·§2.4·§2.7·§2.10·§3.13·§5.3·§5.9·§9.1a·§9.3) — `meta/*.json`에 `origin`(리스트) 신설. 설계의 무게중심은 스키마가 아니라 **두 가지 실패 예방**이다. **ⓐ 재추출이 지우는 것:** `MetaCollector.save()`는 `meta = {k: info.get(k) for k in META_FIELDS}`로 **매번 새로 조립하며 기존 파일을 읽지 않는데**, `StateManager.decide()`는 수정 감지(FR2.2)와 **멤버십 영상 매 run 재시도**(FR19.1·DQ-10)로 `updated`를 낸다 — 그대로 두면 `origin`은 첫 재추출에 사라진다. 그래서 `save()`가 기존 meta를 읽어 이어받고, **"누가 소유하는 필드인가"를 코드 상수 두 개(`DERIVED_FIELDS`/`PRESERVED_FIELDS`) + 임포트 시 `assert`로** 못박는다(DQ-59 — FR37 QA F1의 `USER_FIELDS`/`SCHEDULER_FIELDS` 선례. 분류 없는 필드를 추가하면 임포트가 깨지는 불변식이 핵심이다). 같은 유형의 사고를 이미 세 번 겪었다(FR7.7 · FR37 QA F1 · DQ-42). **ⓑ 필드가 안 쓰이는 것:** `note`(FR36 전까지 읽는 곳 0) · `tickers` 0/561 · `modified_date` 0/561이 전례이므로 **소비 UI를 같은 변경에 낸다**(라이브러리 출처 배지 + 출처 필터, 폴더 전체 보기 FR25.5에서도 동작 — `GET /videos` 필드 1개 추가 + 프론트, DB 없음, DQ-62). 구조 결정: `origin`은 **meta.json**에 둔다(state.json은 `mark_done`이 매 run 통째로 재조립하는 판정용 최소 레코드이고 `remove()`로 지워진다 — DQ-58) · **처음부터 리스트**이고 기록은 **최초 1회**다("다른 출처면 추가"는 검색 유입 영상이 채널 `run`에 재취득될 때마다 원소가 붙어 출처를 희석한다 — DQ-60) · **백필 없음**(빈 값 = "알 수 없음", DQ-61) · ChromaDB 청크 메타·벡터 검색 결과는 범위 밖(리스트 불가 FR15.3 + 전량 재인덱싱 비용, FR39.12) · **`doctor` 검사는 추가하지 않는다**(빈 값이 정상이므로 "빈 origin = 경고"는 561건 오탐 — FR38.19ⓓ·DQ-63). DB·온톨로지는 설계하지 않되 `origin`이 나중에 `origin(video_id, kind, at, key)`로 손실 없이 펼쳐지도록 원소를 평면 dict로 둔다(FR39.13). 신규 결정 DQ-58~DQ-63, 검증 V-U37~V-U38·V-D23
+
+> **v5.13:** 자막 용어 교정 1단계(FR40, §2.15·§2.16·§3.14·§4·§5.12·§9.1a·§9.3·§11.2) — 신규 잎 모듈 **둘**을 더한다: `glossary.py`(사전·프로파일 로드와 **스키마 강제**, 후보 계량)와 `corrector.py`(정규화·치환·검증·산출·stale 판정). 범위는 **A+C**이고 **D(LLM 문맥 교정)는 설계하지 않는다**(FR40.1 — 붙일 자리만 `changes.jsonl`의 `stage`와 "후보 → 문맥 판정 → 적용/배제" 분리로 남긴다). 설계의 무게중심은 기능이 아니라 **데이터 손상 예방**이다 — `tickers`는 빈 필드라 무시하면 그만이었지만 **교정은 자막 본문을 바꾸고 그 위에서 검색·분석이 돈다**. 그래서 네 겹으로 막는다: ⓐ **원본 불변**(산출물은 채널 디렉터리 안 `fix/` 하나로 모으고 되돌리기는 그 디렉터리 삭제 — 백업·덮어쓰기 기각, DQ-67. `config.channel_subdirs()`에 키를 **추가하지 않는다** — `Extractor.__init__`이 그 딕셔너리를 통째로 `mkdir`하므로 116채널에 빈 `fix/`가 생긴다) ⓑ **스키마가 무방비 치환을 금지한다** — `variants` 항목은 `word_exact`·`left_exclude`/`right_exclude`·`require` 중 하나를 반드시 갖고 없으면 **로드가 `ValueError`로 실패**한다(DQ-65, FR39.6 `assert` 선례). 근거는 실측이다: 가이드 §7이 확정(○)으로 준 **`디어`가 617건/192편 전량 오탐**(`아이디어` 377·`소셜 미디어`·`드디어`·`옵시디어`)이고 **`레그`도 249건 중 152건이 `텔레그램`**이다 — `tickers`가 "6자리 숫자면 종목코드"로 실패한 것과 같은 유형이다(DQ-64) ⓒ **판정 단위를 큐에서 문장 창으로 올린다** — 자동자막은 문장을 큐 경계에서 자르고, 실측 어원 문맥 "하네스는"/"강아지 용품에서 온 말"이 **큐 808·809로 분리**돼 있다. 창은 판정용이고 **치환은 큐에만** 적용해 타임스탬프를 보존한다(DQ-66) ⓓ **검증·원복·회로차단** — 큐 수·타임스탬프 동일·길이 변화율·금지 변경(숫자·URL) 위반 큐는 원복하고, 파일 변경 비율이 상한을 넘으면 **교정본을 아예 쓰지 않는다**(FR13.5·FR37.9 회로차단 계열). 골든 샘플 회귀는 선택이 아니라 pytest 게이트다(V-U39·V-U40 — 실측 오탐 6종 고정). 지식층 접점: 인덱서가 SRT를 읽으므로(`kl_indexer.py:101`) **교정이 닿으려면 교정 SRT가 인덱싱**돼야 하지만, 글롭 대상은 **원본 `srt/`를 유지**하고 **본문만** 영상 단위로 교정본에서 읽는다 — 교정본을 글롭하면 미교정 504편이 색인에서 사라지고 `doctor.index-coverage`가 터진다(DQ-68). 같은 이유로 **청크 메타에 교정 표식을 넣지 않는다**(전 청크 메타 변경 = FR33 `_unchanged` 불일치 = 전량 재임베딩). 실측 재임베딩 비용은 전량이 아니라 **57편/1,151청크(자막 청크 6,546의 17.6%)** 이고 `correct`는 dry-run 기본으로 그 수치를 **미리 보고**한다(FR40.14). 재추출이 원본을 덮어 교정본이 낡는 경로는 실재하므로(FR2.2·**FR19.1 멤버십 매 run 재시도**·FR37 무인 주기) `fix/state.json`에 **원본 sha256 + 규칙 해시**를 남기고 불일치면 **원본으로 폴백**한다 — 조용히 낡은 본문을 쓰지 않는 것이 stale 대책의 전부이며, 그래서 `doctor` 검사는 **지금 추가하지 않는다**(발견 0건 = FR38.19ⓓ 미충족, DQ-72). 도메인 축은 폴더지만 **무그룹 23채널이 영향 영상의 38/57편**을 가지므로 매핑은 `glossary/profiles.yaml` 한 파일의 **폴더 → 채널 → 기본 3층**이다(`channels.yaml` 무변경 — 그 파일은 채널 디스크 경로의 정본이고 lost update 이력이 있다, DQ-70). hold는 **규칙 단위**로 재정의해 파이프라인의 블로커에서 빼고(DQ-71), 자동 실행은 없다(교정은 가산이 아니라 **대체**이므로 NFR3ⓐ 예외에 들지 않는다, FR40.23). 신규 결정 DQ-64~DQ-72, 검증 V-U39~V-U40·V-D24
 
 > **v5.5 정합 정정 (2026-09-20, 문서 전용):** §9.1을 전면 재정렬해 V-U 번호 충돌·누락을 해소했다 — **정본은 `tests/test_unit.py`**(실행되는 것이 진실). 구 목록의 `V-U12 reflow_sentences`·`V-U13 live guard`는 테스트 파일이 쓰는 `V-U12 채널 폴더(FR25.1)`·`V-U13 챕터 정규화(FR27.1)`에 자리를 내주고 번호를 폐기(검증 자체는 §9.1b에 존치), 누락돼 있던 V-U14(Whisper SRT 조립)·V-U15(RSS 파싱)·V-U16(이름 변경)·V-U11b(재생목록 URL 분류)를 편입했다. 코드·FR 변경 없음
 
@@ -377,6 +379,30 @@ CLI 명령은 둘로 분리되지만(FR38.2·DQ-51) 모듈을 쪼개지 않는 �
 
 ---
 
+### 2.15 glossary.py (신규, v5.13) — FR40.5~40.6·40.18~40.19
+
+| 항목 | 기능 |
+|---|---|
+| `load(domains)` | `glossary/<도메인>.yaml` 병합 로드 → `Rule` 목록. **로드가 검증 지점이다**(FR40.5) |
+| `_validate(entry)` | ⚠ **안전 요건 강제** — `variants`의 각 표기가 `word_exact` · `left_exclude`/`right_exclude` · `require` 중 **하나도 없으면 `ValueError`**. 맨 부분문자열 치환을 문서가 아니라 **로드 실패**로 금지한다(FR39.6 `assert` 선례, DQ-65). 그 밖의 검증: `canonical` 비어 있음 · 열거 밖 `confidence` · `variants` 중복 등록 |
+| `resolve(channel)` | 적용 사전 결정 — `glossary/profiles.yaml`의 `channels[채널]` → `groups[폴더]` → `default` **3층**(먼저 맞는 것 하나). 폴더는 `ChannelRegistry`에서 읽는다(`channels.yaml` 무변경, DQ-70). 어느 층에도 없으면 `default`(= `common`만)이고 **빈 사전이 정상 상태**다(FR40.6) |
+| `rules_hash(rules)` | 적용 사전의 정규화 해시 — `fix/state.json`에 기록해 **규칙이 바뀐 교정본을 stale로 만든다**(FR40.15) |
+| `survey(channels, candidates, min_hits)` | 후보 계량(FR40.18) — 후보별 `{hits, videos, channels, 어절 분포 top N, 문맥 샘플 3, verdict}`. `verdict`는 **어절 완전일치 비율**이 임계 미만이면 `reject` 제안(실측: `디어` → `아이디어` 377 → reject / `레그` → `텔레그램` 152 → 조건부). 후보 자동 발굴은 **하지 않는다**(FR40.18 — 측정된 병목은 발굴이 아니라 오탐 검증이다) |
+
+### 2.16 corrector.py (신규, v5.13) — FR40.1·40.7~40.15·40.21
+
+| 항목 | 기능 |
+|---|---|
+| `fix_dirs(channel)` | `config.channel_dir(channel) / "fix"` 아래 `srt`·`txt`·`changes` 경로 조립. **`config.channel_subdirs()`를 확장하지 않는 이유**는 `Extractor.__init__`이 그 딕셔너리 전체를 `mkdir` 하기 때문이다(`extractor.py:118`) — 확장하면 교정과 무관한 116채널에 빈 `fix/`가 생긴다. 생성은 **쓸 때만**(FR40.4) |
+| `normalize(cues)` | A 단계(FR40.7) — HTML 엔티티 복원 · `>>` 화자 마커 정리 · **열거된 사운드 태그만** 제거(`[음악]`·`[박수]`·`[웃음]`). 임의 `[...]` 제거 금지(실측 171편에 대괄호, 발화 내용 포함). 큐 삭제·병합·빈 큐 제거 없음 |
+| `windows(cues, span)` | 문장 창 생성(FR40.8) — 앞뒤 `span`(기본 2)큐를 이어 붙인 판정용 문자열 + 원 큐 인덱스 매핑. 실측 근거: "하네스는"(큐 808) / "강아지 용품에서 온 말"(큐 809)이 **분리**돼 큐 단위로는 배제 문맥이 보이지 않는다 |
+| `apply_rules(cues, rules)` | C 단계(FR40.9) — 후보 탐색 → 창 기준 `require`/`*_exclude` 판정 → 통과 시 치환 + **조사 보존**(`레그를` → `RAG를`). 결정적(난수·시각·LLM 없음)이라 골든 샘플 회귀가 성립한다. 반환에 규칙별 `applied`/`excluded` 카운터를 싣는다(FR40.21 — `excluded == 0`은 안전 조건이 죽었다는 신호) |
+| `verify(orig_cues, new_cues)` | E 단계(FR40.10) — ⓐ 큐 수·타임스탬프 문자열 동일 ⓑ 큐별 길이 변화율 상한 ⓒ 숫자·URL·타임코드 미변경 ⓓ `fixed` 목록 미변경. 위반 **큐 원복** + `status:"reverted"` 기록 |
+| `correct_channel(channel, apply=False)` | 채널 1개 처리 — 원본 `srt/` 순회(**읽기만**) → A → C → E → **파일 회로차단**(변경 큐 비율이 상한 초과면 교정본 미기록 + hold 보고) → `apply=True`일 때만 `fix/` 산출(교정 SRT · `srt_to_txt` 파생 TXT · `changes.jsonl` · `state.json`). `apply=False`(**기본**)는 계획·수치만 반환하고 **한 바이트도 쓰지 않는다**(FR40.14 — `migrate-groups`·`backfill-tickers` 선례) |
+| `pick_source(channel, basename)` | **소비 측 단일 통로**(FR40.13·40.15) — 신선한 교정본이 있으면 `fix/srt`, 없거나 **stale이면 원본 `srt/`**. stale 판정은 원본 sha256 ↔ `fix/state.json` 기록값 + 현행 `rules_hash` 대조다. `KLIndexer.index_subtitles`·`GET /subtitle`·`/export/markdown`이 **같은 함수**를 쓴다 — 두 곳에 규칙이 있으면 한쪽이 stale을 쓴다 |
+| `status(channels)` | `correct --status`(FR40.22) — stale 교정본 · **고아 교정본**(원본이 사라진 `fix/` 파일 = FR21.1 삭제 누락의 증거) · 죽은 규칙(적용 0건) 보고. **`doctor` 검사를 지금 만들지 않는 대신** 같은 판정을 여기 둔다 |
+| `reembed_estimate(plan)` | 재임베딩 예고(FR40.14) — 교정 대상 영상의 자막 청크 수 합(`subtitle_utils.chunk_by_srt` 재사용). 실측 기준선 **57편 / 1,151청크 (6,546의 17.6%)** |
+
 ## 3. 데이터 플로우
 
 ### 3.1 채널 등록 + 추출 (`add URL`)
@@ -615,6 +641,51 @@ AUDIT_CHECKS 8종 순차 실행                      DOCTOR_CHECKS 10종 순차 
 
 ---
 
+### 3.14 자막 용어 교정 (FR40, v5.13)
+
+```
+사전 만들기 (사람 1회 · 규칙 단위 — 영상 단위가 아니다)
+  후보 파일(가이드 §7 시드 = 가설)  ──►  ./yt.sh terms <폴더|채널> --from 후보파일
+                                          └─ 건수 / 영상 수 / **어절 분포** / 문맥 3 / verdict
+                                             실측: 디어 617 → 아이디어 377 = reject
+                                                   레그 249 → 텔레그램 152 = 조건부(left_exclude)
+                                          ▼ 사람이 채택·배제 조건 확정
+                                        glossary/<도메인>.yaml   (없으면 로드 실패 = 무방비 치환 금지)
+                                        glossary/profiles.yaml  (폴더 → 채널 → 기본)
+
+교정 (CLI 명시 실행만 · 자동 없음 — FR40.23)
+  srt/<basename>.srt (원본 · 읽기만)
+      ├─ A 정규화(엔티티·>>·열거된 사운드 태그)      stage "A"
+      ├─ 문장 창 구성(앞뒤 2큐)  ← 어원·메타 배제 문맥은 큐를 넘는다
+      ├─ C 결정적 치환(사전 high + 조사 보존)          stage "C"
+      ├─ E 검증  큐 수·시각 동일 / 길이 변화율 / 숫자·URL 불변
+      │     └─ 위반 큐 → **원복**(status "reverted")
+      └─ 파일 회로차단  변경 비율 > 상한 → **교정본 미기록 + hold 보고**
+                                   │
+      dry-run(기본): 계획·수치만 ──┤ --apply
+                                   ▼
+        fix/srt/<basename>.srt          (교정 SRT)
+        fix/txt/<basename>.txt          (= subtitle_utils.srt_to_txt(교정 SRT) — FR23 규칙 재사용)
+        fix/changes/<basename>.jsonl    (변경 1건 = 1줄)
+        fix/state.json                  (src_sha256 · rules_sha256 · 건수)
+
+소비 (단일 통로 corrector.pick_source — 영상 단위 폴백)
+  kl_indexer.index_subtitles : 글롭은 **원본 srt/** 유지, 본문만 신선한 교정본에서 읽는다
+  GET /subtitle?variant=     : 기본 fix · variant=src로 원본(사람이 오적용을 보는 창)
+  /export/markdown           : 같은 선택 규칙
+  QualityChecker(FR4)        : **원본 유지**(판정 기준선 불변)
+  ChromaDB 청크 메타         : **변경 없음**(넣으면 전량 재임베딩 — FR33 `_unchanged`)
+```
+
+- **원본 불변이 되돌리기 전략이다.** `fix/`를 지우면 다음 인덱싱이 원본 본문으로 복귀한다 — 복원 절차·백업이 없다(DQ-67).
+- **stale은 감지 후 폴백이다.** 재추출(FR2.2·**FR19.1 멤버십 매 run 재시도**·`reextract`)이 원본을 덮으면 해시가 어긋나고
+  그 교정본은 **쓰이지 않는다**. FR37 스케줄러를 켜면 이 경로가 무인으로 발생하므로 "조용히 낡은 본문"이 최악의 결과다(DQ-69).
+- **재임베딩은 전량이 아니다.** 본문이 바뀐 영상만 다시 임베딩된다(FR33) — 실측 **57편/1,151청크(17.6%)** 이고
+  `correct`가 `--apply` 전에 그 수치를 보고한다. 청크 메타에 표식을 넣으면 **그 순간 전량(7,403)** 이 된다(DQ-68).
+- **hold는 규칙 단위다.** 사람이 보는 것은 도메인별 후보 리포트 1개(상한 50)이며, **파이프라인은 hold 없이 완결된다**(DQ-71).
+
+---
+
 ## 4. 출력 폴더 구조
 
 ```
@@ -624,7 +695,11 @@ output/                              # 최상위 = "그룹 폴더" + "그룹 미
 ├── .migration_journal.json          # 이동 저널 (실패 시 역순 롤백, FR35.12)
 ├── AI LLM Wiki/                     # ← group (FR35.1) — 그 자체는 채널이 아니다
 │   ├── 두두감자/
-│   │   ├── srt/  txt/  desc/  meta/ # 자막·전문·설명·메타
+│   │   ├── srt/  txt/  desc/  meta/ # 자막·전문·설명·메타 (**원본 — 교정이 덮지 않는다**, FR40.3)
+│   │   ├── fix/                     # 교정 산출물 (FR40.4, v5.13 — 있을 때만 생성)
+│   │   │   ├── srt/  txt/           # 교정 SRT · 그에서 파생한 TXT
+│   │   │   ├── changes/             # <basename>.jsonl 변경 로그
+│   │   │   └── state.json           # src_sha256·rules_sha256·건수 (stale 판정)
 │   │   ├── chroma/                  # 채널별 독립 KL (폴더 이동 시 함께 따라간다)
 │   │   ├── state.json               # 증분 상태
 │   │   ├── playlists.json           # video_id→재생목록 매핑 (FR15.1)
@@ -638,6 +713,10 @@ output/                              # 최상위 = "그룹 폴더" + "그룹 미
 ```
 
 > 중첩은 **1단계뿐**이다(FR35.1). 하위 구조는 승격 전후가 완전히 동일하므로 `channel_subdirs()` 이하 모든 코드가 무변경이다.
+
+> **`fix/`는 채널 디렉터리 *안*이다**(v5.13) — `output/` 최상위 이름공간(FR35.6)·폴더 마이그레이션(FR35.11)·채널 이동(`os.rename` 단일 호출)에
+> **영향이 없다**. 그리고 `config.channel_subdirs()`에는 키를 추가하지 않는다 — `Extractor.__init__`이 그 딕셔너리를 통째로 `mkdir` 하므로
+> 추가하면 교정과 무관한 **116채널 전부에 빈 `fix/`** 가 생긴다(FR40.4).
 
 ---
 
@@ -921,6 +1000,70 @@ waivers:
 
 ---
 
+### 5.12 용어사전 · 교정 산출물 (FR40, v5.13)
+
+```yaml
+# glossary/ai-llm.yaml — 도메인 사전. **로드 시점이 검증 지점이다**(FR40.5)
+- canonical: RAG
+  variants:
+    - text: 레그
+      left_exclude: ["텔"]        # 실측: 249건 중 152건이 "텔레그램" — 이 줄이 없으면 로드 실패
+      josa: true                   # 뒤 조사 보존 (레그를 → RAG를)
+  domain: ai-llm
+  confidence: high                 # high만 적용. medium/low는 후보 리포트로만 나간다
+  note: 에이전틱 레그 / 레그는 문서에서 정보를 검색해
+  source: corpus-2026-09-27        # 어느 실측에서 확정됐는지
+  measured: {hits: 97, videos: 14} # 채택 당시 계량값 — 죽은 규칙 판정의 기준선
+
+- canonical: Harness
+  variants:
+    - text: 하네스
+      word_exact: true
+      window_exclude: ["강아지", "용품", "에서 온 말", "어원", "용어들이"]   # 어원·메타 설명 배제
+  domain: ai-llm
+  confidence: high
+  note: 실측 배제 문맥 — "하네스는"(큐 808) / "강아지 용품에서 온 말"(큐 809)
+
+# ✗ 로드 실패 예시 — 배제·요구 조건이 하나도 없다 (FR40.5 · DQ-65)
+- canonical: DEER
+  variants: [{text: 디어}]        # ValueError: 617건/192편 전량 오탐(아이디어·소셜 미디어·드디어·옵시디어)
+```
+
+```yaml
+# glossary/profiles.yaml — 도메인 매핑 **한 파일**. channels.yaml은 건드리지 않는다(DQ-70)
+default: [common]                  # 어느 층에도 없는 채널 — 빈 사전이 정상 상태다
+groups:
+  AI LLM Wiki: [common, ai-llm]
+  역배열1: [common]                # 후보 0건 — 주식 사전은 이번에 만들지 않는다(FR40.6·40.24ⓒ)
+channels:                          # 폴더보다 **우선**. 실측 무그룹 23채널이 영향 영상의 38/57편
+  호두감자: [common, ai-llm]
+  gpters: [common, ai-llm]
+```
+
+```json
+// fix/changes/<basename>.jsonl — 변경 1건 = 1줄 (FR40.11)
+{"cue": 12, "stage": "A", "from": "&gt;&gt; 안녕", "to": ">> 안녕", "rule": "normalize/entity", "status": "applied"}
+{"cue": 7,  "stage": "C", "from": "에이전틱 레그를", "to": "에이전틱 RAG를", "rule": "ai-llm/RAG", "confidence": "high", "status": "applied"}
+{"cue": 808,"stage": "C", "from": "하네스는", "to": "하네스는", "rule": "ai-llm/Harness", "status": "excluded", "reason": "window_exclude:강아지"}
+{"cue": 41, "stage": "C", "from": "…", "to": "…", "rule": "ai-llm/X", "status": "reverted", "reason": "length_delta>0.3"}
+```
+
+```json
+// fix/state.json — 교정 상태(영상별). stale 판정의 정본 (FR40.15)
+{
+  "20260813_2026-08-13_LLM_Wiki": {
+    "src_sha256": "…", "rules_sha256": "…", "engine_version": 1,
+    "applied_at": "2026-09-28T10:00:00", "changes": 23, "reverted": 1, "excluded": 4
+  }
+}
+```
+
+> **`src_sha256`이 stale 대책의 전부다** — 소비 시점(`corrector.pick_source`)에 원본 SRT 해시와 현행 `rules_sha256`을 대조해
+> 하나라도 다르면 **그 교정본을 쓰지 않고 원본을 쓴다**. 재추출(FR2.2·**FR19.1 멤버십 매 run 재시도**·`reextract`)은 정상 운영이고
+> FR37 스케줄러를 켜면 **무인으로** 일어난다 — "조용히 낡은 본문이 인덱싱되는 것"이 이 기능의 최악 결과이므로 폴백이 기본값이다(DQ-69).
+> **`meta/*.json`·`state.json`·`channels.yaml` 스키마는 변경하지 않는다**(FR40.24ⓔ) — 교정 사실은 `fix/state.json`에만 있고
+> `GET /videos`가 그것을 읽어 `corrected`·`corrections`·`correction_stale`로 내려보낸다(FR40.16 — meta 백필 없음).
+
 ## 6. 지식층 시스템: ChromaDB
 
 (v3.0과 동일 — 선택 근거·bge-m3·120초 청킹)
@@ -1001,10 +1144,10 @@ yt-subs/
 > 검증은 번호가 없더라도 §9.1b에 전부 기록한다. **v5.6에서 V-U22~V-U27을 FR35·FR7.7~7.9용으로 선점**했다 —
 > 구현 시 `tests/test_unit.py`에 같은 번호의 섹션 헤더 주석을 **같은 커밋에서** 넣어야 정본이 성립한다.
 > **v5.8에서 V-U30~V-U31을 FR36용으로 선점**했다(문서 선행 — 구현 커밋이 같은 번호의 섹션 헤더를 넣는다). **v5.10에서 V-U33~V-U34를 FR37용으로 선점**했다(문서 선행 — 구현 커밋이 같은 번호의 섹션 헤더를 넣는다).
-> **v5.11에서 V-U35~V-U36을 FR38용으로 선점**했다(같은 규약). **v5.12에서 V-U37~V-U38을 FR39(영상 단위 출처 기록)용으로 선점**했고 **같은 버전에서 구현·테스트를 붙였다**(2026-09-27) — 위치 열의 `(구현 예정)` 표기는 제거됐다(그 표기는 `audit.vu-numbers`의 문서 선행 면제 조건이므로, 테스트가 생기면 반드시 지운다 — FR38.9). 다음 신규 번호는 **V-U39**이다.
+> **v5.11에서 V-U35~V-U36을 FR38용으로 선점**했다(같은 규약). **v5.12에서 V-U37~V-U38을 FR39(영상 단위 출처 기록)용으로 선점**했고 **같은 버전에서 구현·테스트를 붙였다**(2026-09-27) — 위치 열의 `(구현 예정)` 표기는 제거됐다(그 표기는 `audit.vu-numbers`의 문서 선행 면제 조건이므로, 테스트가 생기면 반드시 지운다 — FR38.9). **v5.13에서 V-U39~V-U40을 FR40(자막 용어 교정)용으로 선점**했고 **같은 버전에서 구현·테스트를 붙였다**(2026-09-27) — 위치 열의 `(구현 예정)` 표기는 제거됐다. 다음 신규 번호는 **V-U41**이다.
 > **v5.11 이후 이 포인터는 손으로만 관리되지 않는다** — `audit.next-pointers`(FR38.11)가 이 문장의 값과 실제 최대값+1을 대조한다(DQ-54).
 
-#### 9.1a 번호 부여 항목 (V-U1~V-U38)
+#### 9.1a 번호 부여 항목 (V-U1~V-U40)
 
 | ID | 대상 | FR·DQ | 위치 |
 |---|---|---|---|
@@ -1048,11 +1191,12 @@ yt-subs/
 | V-U36 | **`doctor` 검사 계약** — 합성 `output/` 픽스처(채널 3~4개·그룹 1개·state·txt·meta·extract_log·가짜 chroma.sqlite3)로: ⓐ 레코드 있고 txt 없음 / txt 있고 레코드 없음 **양방향 오류** ⓑ 같은 basename을 두 video_id가 공유하면 오류 ⓒ 미등록 채널형 디렉터리 경고(`folder_ops.is_channel_like_dir` 판정 재사용)·등록됐지만 미추출은 정보 ⓓ 그룹 지정 채널이 평면 위치에 남아 있으면 오류 ⓔ 자막 보유 영상이 chroma에 없으면 경고·인덱스에만 있으면 경고 ⓕ **`chroma.sqlite3`가 없거나 `embedding_metadata`가 없으면 "건너뜀(정보)"이고 디렉터리·파일을 만들지 않는다**(FR38.3·DQ-55 회귀 — 클라이언트 경로의 `mkdir` 부작용 금지) ⓖ `extract_log.csv` 완전 동일 행은 **정보**(append-only 시도 기록의 정상 귀결 — 경고로 두면 해소 수단이 없어 영원히 남는다, DQ-53)·BOM 헤더를 정상 파싱(선두 BOM 침묵)·**열 수 불일치·헤더 계약 위반은 오류**·중간 BOM은 경고(강등이 구조 손상까지 묻지 않는지 양성·음성 쌍으로 고정) ⓗ `error:` 사유 재판정으로 **한국어 멤버십 문구(실측 문구 고정)·영어 문구 양쪽**이 오류로 잡히고 `error:429`는 정보, 멤버십과 무관한 오류 사유는 **침묵** ⓘ `meta-fields` — "값이 있는데 distinct 1"이 경고, 열거형 필드(`content_type`·`sub_type`)는 면제, `upload_date == "00000000"`은 정보(FR2.6)·다른 비8자리 값은 오류, `tickers` 전량 빈 값은 **waiver로 침묵** ⓙ 스케줄러 — 가짜 시계로 `enabled=true`·오래된 `last_run_at` → 적체 경고, `skip_cycles>0` → 경고, `interval_days=5` → 오류, 기본 상태(`enabled:false`)에서는 0건 ⓚ 쿠키 무효 경고 N일 방치 경고(가짜 시계) ⓛ `output/` 부재 시 **종료코드 3** ⓜ 채널 인자로 범위 한정 ⓝ **실행 전후 픽스처 전체 바이트·mtime 불변** ⓞ **화석 waiver는 등재된 `채널/video_id` 1행만 면제한다** — 같은 채널의 새 화석·같은 video_id의 다른 채널 화석·영어 문구 화석은 **여전히 오류**(와일드카드 waiver는 무효로 보고되고 아무것도 면제하지 않는다) ⓟ 채널 한정 실행은 다른 채널의 waiver를 `waiver.stale`로 올리지 않고(부분 범위는 예외의 수명을 판정할 근거가 없다), 전수 실행에서 화석이 사라지면 **stale 경고가 올라온다**(예외의 자기 신고 = FR38.10ⓒ 유지) | FR38.7·38.10·38.13~38.15·DQ-55~56 | `tests/test_unit.py` §V-U36 (구현됨 — `test_doctor_clean_fixture_is_silent`·`test_doctor_is_read_only`·`test_doctor_state_files_both_directions`·`test_doctor_basename_collision`·`test_doctor_orphan_dirs_and_unextracted`·`test_doctor_registry_paths_flat_leftover_is_error`·`test_doctor_index_coverage_missing_and_orphan`·`test_doctor_index_coverage_schema_mismatch_is_skip`·`test_doctor_extract_log_hygiene`·`test_doctor_extract_log_mid_file_bom_is_warn`·`test_doctor_detector_fossils_reappraises_reasons`·`test_doctor_meta_fields_generalized_signals`·`test_doctor_meta_fields_format_contract`·`test_doctor_scheduler_states`·`test_doctor_cookie_status_uses_get_status`·`test_doctor_channel_scope_and_missing_output`·`test_doctor_registry_and_state_parse_failure_is_exit_3`·`test_doctor_channel_scope_skips_corpus_signal`·`test_doctor_extract_log_duplicate_downgrade_keeps_real_anomalies`·`test_doctor_fossil_waiver_exempts_only_the_declared_row`·`test_real_waiver_file_pins_the_known_fossil_narrowly`·`test_doctor_channel_scope_does_not_stale_other_channel_waiver`) |
 | V-U37 | **`origin` 병합 규칙**(FR39.1~39.4) — `_merge_origin` 순수 함수: ⓐ 기존 없음(키 부재·`[]` 양쪽) + 서술자 주어짐 → 원소 **1개** 기록(`at`이 `extracted_at`과 같은 포맷) ⓑ 기존 1개 + **같은 kind** 재취득 → 그대로(추가 없음·`at` 불변) ⓒ 기존 1개(`search`) + **다른 kind**(`channel` 재취득) → **그대로** — 이 케이스가 규칙의 핵심이다(FR19.1 멤버십 재시도·FR2.2 수정 감지가 검색 유입 영상에 `channel` 원소를 덧붙여 출처를 희석하는 것을 막는다) ⓓ 서술자 `None` → 보존만 ⓔ **미열거 `kind` → `ValueError`**(오타 라벨 차단) ⓕ 부가 키가 kind 열거 밖이면 저장하지 않는다 ⓖ 캡 10 ⓗ 방어: `origin`이 리스트가 아닌 손상 값·dict 아닌 원소를 만나도 예외 없이 보수적으로 처리 | FR39.1~39.4·DQ-60 | `tests/test_unit.py` §V-U37 |
 | V-U38 | **재추출 보존 회귀 + 진입점 전수 매핑**(FR39.5~39.7·39.15) — ⓐ `origin`이 있는 meta를 `save()`로 **다시 써도 `origin`이 동일**(시나리오 2종: FR19.1 멤버십 재시도 · FR2.2 수정 감지) ⓑ `DERIVED_FIELDS ∪ PRESERVED_FIELDS == 저장 스키마` `assert`가 실재하고, **분류 없는 필드를 추가하면 임포트가 실패**한다(불변식 자체를 시험한다 — 이것이 F1 선례의 핵심이었다) ⓒ 진입점 **7종**이 기대한 `kind`를 저장 계층까지 전달(`channel`/cli · `channel`/dashboard · `playlist` · `search` · `video` · `scheduler` · `transcribe`) ⓓ `reextract`·`backfill_tickers`·`renamer`는 `origin`을 **건드리지 않는다**(전자는 서술자 None, 후자 둘은 기존 dict 수정 경로) ⓔ **CLI 무영향**(FR18.1) — `run()` 반환 stats 키·로그 문구·요청 수 불변, 변하는 것은 meta의 키 1개뿐 ⓕ meta 파일이 손상돼 읽히지 않으면 경고 로그 후 보존값 없이 진행(추출이 실패로 뒤집히지 않는다) ⓖ **소비 UI 배선**(FR39.8~39.9·DQ-62) — `list_videos`가 `origin`을 통과시키고 부재를 `[]`로 내리는지 · `GET /videos` 응답 키 ↔ `index.html` 파싱 키 대조 · **node로 실제 실행**한 출처 필터(배지 문구 · kind 전체 + 하위 상한 20의 2층 옵션 · 상한 밖 값도 kind 옵션이 받아 **조용히 사라지는 영상이 없음** · `출처 없음`). 이 FR의 최대 위험은 스키마가 아니라 **필드가 안 쓰이는 것**이므로 같은 항목에 고정한다(node 없는 이미지에서는 배선 확인만 돌고 실행 테스트는 skip) | FR39.5~39.9·39.15·DQ-59·DQ-62 | `tests/test_unit.py` §V-U38 + `mock_jobs_test.py`(워커별 서술자) |
+| V-U39 | **⚠ 오적용 방어 골든 샘플**(FR40.5·40.8~40.10·40.20) — 실측에서 온 픽스처로 고정한다: ⓐ `디어` 규칙이 사전에 있어도 **`아이디어`·`소셜 미디어`·`드디어`·`옵시디어`가 변하지 않는다**(실측 617건/192편 전량 오탐) ⓑ `레그` 규칙(`left_exclude:["텔"]`)에서 **`텔레그램`은 불변**이고 `에이전틱 레그를` → `에이전틱 RAG를`(조사 보존) ⓒ **큐 경계를 넘는 배제 문맥** — "하네스는"(큐 n) / "강아지 용품에서 온 말"(큐 n+1)이 **문장 창으로 배제**되고, 같은 규칙이 배제 문맥 없는 큐에서는 적용된다(창 없이 큐만 보면 이 케이스는 반드시 실패한다) ⓓ 조사 결합 `레그를`·`레그에`·`레그는` ⓔ **큐 수·타임스탬프 문자열 동일** + 숫자·URL·타임코드 불변 + 길이 변화율 상한 위반 큐 **원복**(`status:"reverted"`) ⓕ **사전 스키마 위반**(배제·요구 조건이 하나도 없는 `variants`)이 **로드 단계에서 `ValueError`** — 불변식 자체를 시험한다(FR39.6 선례) ⓖ 파일 회로차단 — 변경 비율이 상한을 넘는 합성 입력에서 **교정본을 쓰지 않는다** ⓗ **결정성** — 같은 입력·같은 사전을 2회 돌려 바이트 동일 | FR40.5·40.8~40.10·40.20·DQ-64~DQ-66 | `tests/test_unit.py` §V-U39 + `tests/fixtures/correction/` (구현됨 — `test_correction_golden_sample_bytes`·`test_correction_false_positives_stay_untouched`·`test_correction_left_exclude_and_josa`·`test_correction_window_exclude_crosses_cue_boundary`·`test_correction_confidence_high_only`·`test_correction_normalize_whitelist`·`test_correction_reverts_forbidden_changes`·`test_correction_protects_fixed_terms`·`test_correction_file_circuit_breaker`·`test_correction_is_deterministic`·`test_glossary_rejects_unguarded_variant`·`test_glossary_rules_hash_tracks_conditions`·`test_glossary_survey_measures_false_positives`) |
+| V-U40 | **원본 불변 · 소스 선택 · stale**(FR40.3·40.4·40.6·40.11~40.15) — 임시 채널 픽스처에서: ⓐ **원본 `srt/`·`txt/` 파일의 sha256·mtime이 교정 전후 동일**(선언이 아니라 관찰 — 이 항목이 깨지면 기능을 내지 않는다) ⓑ `apply=False`(기본)가 **한 바이트도 쓰지 않는다**(`fix/` 미생성) ⓒ `fix/txt` == `subtitle_utils.srt_to_txt(fix/srt)`(같은 함수 재사용, FR23 규칙 동일) ⓓ `changes.jsonl` 스키마 — `applied`/`excluded`/`reverted` 3상태와 `stage` `"A"`/`"C"` ⓔ **`pick_source` 3케이스** — 교정본 없음 → 원본 · 신선한 교정본 → 교정본 · **원본 sha 변경(재추출 모사) → 원본 폴백** · **`rules_sha256` 변경 → 원본 폴백** ⓕ `glossary.resolve` 3층 — `channels`가 `groups`를 **덮고**, 둘 다 없으면 `default`, `역배열1`처럼 `common`만인 것이 정상 ⓖ **`config.channel_subdirs()`에 `fix` 계열 키가 없다**(`Extractor.__init__`의 `mkdir` 순회로 116채널에 빈 디렉터리가 생기지 않음 — 회귀 고정) ⓗ `status()`가 stale·고아(원본 없는 교정본)·죽은 규칙(적용 0건)을 보고 | FR40.3~40.4·40.6·40.11~40.15·DQ-67~DQ-70 | `tests/test_unit.py` §V-U40 (구현됨 — `test_correction_never_touches_originals`·`test_correction_dry_run_writes_nothing`·`test_correction_outputs_and_change_log`·`test_pick_source_falls_back_on_stale`·`test_indexer_reads_corrected_body_but_globs_originals`·`test_glossary_resolve_three_layers`·`test_channel_subdirs_has_no_fix_key`·`test_correction_status_reports_stale_orphan_dead`·`test_delete_video_removes_fix_outputs`·`test_subtitle_endpoint_variant_toggle`·`test_frontend_consumes_correction_shape`) |
 
-기준선: 2026-09-27 기준 `./yt.sh test` = **243 passed / 2 skipped** (FR39 영상 단위 출처 기록 V-U37·V-U38 + FR38 정합 감사·건전성 점검 V-U35·V-U36 + FR37 주기 자동 추출 V-U33·V-U34 +
+기준선: 2026-09-27 기준 `./yt.sh test` = **267 passed / 2 skipped** (FR39 영상 단위 출처 기록 V-U37·V-U38 + FR38 정합 감사·건전성 점검 V-U35·V-U36 + FR37 주기 자동 추출 V-U33·V-U34 +
 FR37 QA 결함 수정분 포함. skip 2건은 컨테이너 이미지에 node가 없는 node 실행 테스트 —
 `fmtDuration`(FR20.6)과 출처 배지·필터(FR39.9), 둘 다 호스트 node 22에서 통과 확인).
-
 
 #### 9.1b 번호 미부여 검증 (테스트는 있으나 V-U 번호 없음 — FR 헤더로 식별)
 
@@ -1107,6 +1251,7 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | V-D22 | **정합 감사·건전성 점검 실데이터 1회 (FR38)** — 실제 저장소·실제 `output/`에서 `./yt.sh audit`와 `./yt.sh doctor`를 각 1회 실행하고, 스펙 작성 시점의 읽기 전용 시제품 실측과 대조한다: ① `audit` **1초 이내**·`doctor` **10초 이내** 종료 ② `git status` **clean 유지**·`output/` 전체 파일 바이트·mtime **불변**(읽기 전용 실증, FR38.3) ③ `doctor`가 **미인덱싱 12편**(`역배열1/firststockclass`·`변곡점주식`·`버럭쌤TV`·`1yearporsh`·`DevilishChart`·`GlobalDefens-e`의 `chroma/` 부재 9편 + `역배열1/차트분석남`·`역배열1/돌파감독`·`한균수` 각 1편) · **extract_log 동일 행 24개** · **멤버십 화석 1건**(`변곡점주식`/`aetOCkgzurM`) · **쿠키 방치 1건**(`detected_at: 2026-08-08`) 을 보고 ④ `doctor`가 `state-files`·`basename-collision`·`orphan-dirs`·`registry-paths`에서 **0건**(현행 기준선) ⑤ `audit`가 §6의 **미발견 식별자 4건**(`loadSchedule`·`saveSchedule`·`runScheduleNow` = 진짜 drift · `Reprocessor` = waiver 대상)을 보고하고, waiver 등록 후 **1건이 `waived`로 이동** ⑥ FR·DQ·V-U 번호 검사가 **허위 보고 0건**(허위 15·6·140건 회귀 — 시제품이 스코프 없이 냈던 수치) ⑦ 종료코드가 FR38.6 규약과 일치하고 `--strict`가 경고를 실패로 승격 ⑧ `--json` 출력이 `python3 -m json.tool`로 파싱 | 위 8항목 전부 관찰 일치 | ✅ 검증 (2026-09-26 구현 후 실측) — ① `audit` **0.0s**(컨테이너 포함 0.22s, `output/` 마운트 없이 성립) · `doctor` **0.3s**(상한 10s) ② `output/` 전체 3,099 파일·772 디렉터리의 크기·mtime **digest 불변**, `chroma/` 부재 채널에 디렉터리 생성 없음, `git status`에 `output/`·`channels.yaml` 변경 없음 ③ **미인덱싱 12편**(`chroma/` 부재 6채널 9편 + 부분 누락 3채널 3편) · **extract_log 동일 행 24개**(4채널) · **멤버십 화석 1건**(`변곡점주식`/`aetOCkgzurM`) 전부 스펙 실측과 일치 ④ `state-files`·`basename-collision`·`orphan-dirs`·`registry-paths` **전부 0건** ⑤ §6 미발견 식별자 **4건**(진짜 drift 3 = `loadSchedule`·`saveSchedule`·`runScheduleNow` → §6을 `schLoad`·`schSave`·`schRunNow`로 정정해 해소 · `Reprocessor` 1건은 waiver로 이동) ⑥ FR·DQ·V-U 번호 검사 **허위 보고 0건**(FR 256행 중복 0·결번 0 · DQ 57 중복 0·결번 0 · V-U 유령·누락 0 — 시제품의 허위 15·6·140건 전부 재현 안 됨) ⑦ 종료코드 audit **1**(경고 9) · doctor **2**(오류 1) · `--strict`가 1→2로 승격 · 문서 부재·미등록 채널·손상 JSON은 **3** ⑧ `--json`이 `python3 -m json.tool` 통과. **수정 사항 — ⓐ 쿠키 "48일 방치"는 오탐이었다**: `cookie_health.get_status()`가 FR19.3대로 Firefox `cookies.sqlite` mtime(2026-08-27) > `detected_at`(2026-08-08)로 이미 자동 해제한다 → 검사를 그 함수 경유로 고정하고 실측을 **0건**으로 정정(상태 파일을 직접 읽으면 오탐, `./yt.sh doctor`처럼 프로필이 마운트된 환경에서 판정해야 한다) ⓑ `upload_date == "00000000"`은 meta가 아니라 **state 레코드 9건**(스펙의 11건은 그 사이 변동) ⓒ 선두 BOM(98/98 파일)은 `extractor.py`가 `utf-8-sig`로 의도적으로 쓰는 것이라 **경고에서 제외**(중간 BOM만 경고) **ⓓ 기준선 0 조정(2026-09-26 후속, 사용자 승인)** — ③의 두 항목은 **고칠 수 없는 과거 기록**이라 그대로 두면 `doctor`가 영원히 빨간 상태로 고정된다(DQ-53이 경고한 그것). `extract_log` 중복은 **정보로 강등**(append-only 시도 기록의 정상 귀결 — 같은 날 24행/4채널 → 30행/10채널로 늘었다. 구조 손상은 오류·경고 유지), 멤버십 화석 1건은 **심각도를 유지한 채 waiver 등재**(2026-09-24 FR13.7·DQ-38으로 해소된 사건의 잔해 — 새 화석은 계속 오류여야 하므로 강등하지 않았다). 재측정: **오류 0 · 경고 0 · 정보 13 · 예외적용 3 · 종료코드 0** (`index-coverage`는 측정 중 실행되던 검색 추출 job의 미인덱싱분 8채널이라 별건 — 인덱싱 후 0으로 돌아온다). `audit`도 **오류 0 · 경고 0 · 종료코드 0** 유지(새 waiver가 `waiver.stale`·`waiver.invalid`를 만들지 않음) |
 | V-D23 | **출처 기록·소비 e2e (FR39)** — 합성 테스트 채널 + 실채널 1개로: ① 검색 추출 1회 → 신규 영상 meta에 `origin == [{kind:"search", query:…, at:…}]` 1개(`at`이 `extracted_at`과 **같은 형식·같은 분**) ② **같은 채널을 `./yt.sh run`으로 재추출** → 이미 추출된 영상은 `skip`이라 meta가 안 바뀌고, **멤버십 재시도(FR19.1)로 `updated`가 발생한 영상의 `origin`도 불변** ③ `reextract`로 강제 재처리한 영상의 `origin` 불변 ④ 단일 URL 추출 → `kind:"video"` · 재생목록 추출 → `kind:"playlist"`+`playlist_title` · `./yt.sh transcribe` → `kind:"transcribe"`(무자막 영상의 meta가 이때 처음 생김) · `POST /schedule/run-now` 경로 → `kind:"scheduler"` ⑤ **과거 561편의 `origin`이 여전히 부재**(백필 0건 — meta mtime 불변으로 실증, FR39.10) ⑥ `GET /videos`가 `origin`을 싣고 **부재는 `[]`** ⑦ 라이브러리 목록에 출처 배지가 뜨고 출처 필터로 걸러지며, **폴더 "전체 보기"에서도 동작**한다 — 실제 질문인 "`역배열1`에서 검색으로 들어온 것만 보기"가 성립하고 `추석특집` 영상은 그 필터에서 빠진다 ⑧ 출처 없는 과거 영상은 배지가 없고 `출처 없음` 옵션으로만 걸러진다 ⑨ `./yt.sh doctor` 발견 건수가 **변하지 않는다**(FR39.16 — 새 검사 없음, 561건 오탐 없음) ⑩ `./yt.sh audit` 오류 0·경고 0 유지 | 위 10항목 전부 관찰 일치 | ⏳ 미검증 (FR39 구현 시) |
 
+| V-D24 | **자막 용어 교정 실데이터 1회 (FR40)** — 실제 `output/`에서: ① `./yt.sh terms "AI LLM Wiki" --from 시드파일`이 **`디어` = reject**(어절 분포에 `아이디어` 377) · **`레그` = 152건 `텔레그램`**을 보고하고 `git status` clean·`output/` 바이트 불변 ② `./yt.sh correct` **dry-run이 아무것도 쓰지 않는다**(`fix/` 미생성) 그리고 계획이 **교정 대상 57편 / 변경 359건 / 재임베딩 1,151청크**와 같은 규모로 나온다(실측 기준선 — 사전 확정 결과에 따라 달라지면 그 차이를 근거와 함께 기록한다) ③ `--apply` 후 **원본 `srt/`·`txt/` 561편의 sha256이 전부 불변** ④ `./yt.sh index`가 **교정된 영상만 재임베딩**한다(FR33 증분 — 미교정 504편은 스킵 로그) ⑤ `./yt.sh doctor`의 `index-coverage` 발견 건수가 **변하지 않는다**(교정본을 글롭하지 않는다는 DQ-68의 실증 — 504건 경고가 나오면 설계가 틀렸다) ⑥ 검색 대조 — `RAG`·`Harness`·`Ingest` 질의가 교정 전 0건에서 교정 후 히트, `텔레그램` 영상이 `RAG` 결과에 **섞이지 않는다** ⑦ 라이브러리에 교정 배지·변경 건수가 뜨고 `variant=src` 토글로 원본과 대조된다 ⑧ 해당 채널 1편을 `reextract`로 원본을 덮은 뒤 **그 영상이 stale로 폴백**되고 `correct --status`가 그것을 보고한다 ⑨ `fix/`를 지우면 다음 인덱싱이 **원본 본문으로 복귀**한다(되돌리기 = 디렉터리 삭제) ⑩ `./yt.sh audit` 오류 0·경고 0 유지 · `doctor` 발견 건수 불변(FR40.22 — 새 검사 없음) | 위 10항목 전부 관찰 일치 | ⏳ 미검증 (FR40 구현 시) |
 > **2026-08-08 FR21 실검증**: `POST /videos/delete`·`POST /channels/delete`를 합성 테스트 채널(등록·인덱싱까지 완료한
 > 가짜 영상 1건)로 검증 — 실채널 데이터는 전혀 건드리지 않았다. 스캔 진행 중 삭제 시도 시 409 확인(FR21.4).
 > FR21.3(클립보드 복사 버튼)은 코드 리뷰·DOM/이벤트 배선까지 확인했으나, Clipboard API 권한 프롬프트가
@@ -1196,6 +1341,15 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | DQ-62 | **소비 UI를 같은 변경에 포함**하고, ChromaDB·벡터 검색 결과는 **범위 밖**으로 둔다 | **UI 동반:** 가장 큰 위험은 스키마가 아니라 **필드가 안 쓰이는 것**이다. 실측 전례가 셋이다 — `note`(FR36 전까지 77채널 전부 `""`, 읽는 곳 0) · `tickers`(0/561) · `modified_date`(0/561). 죽은 필드는 그냥 쓸모없는 게 아니라 **거짓 안심**을 만든다("출처는 기록되고 있으니 괜찮다"). 다행히 소비가 값싸다: 폴더 전체 보기가 이미 채널을 가로질러 영상을 병합하므로(FR25.5) **같은 배열에 조건 하나를 더하는 것**으로 끝나고 DB·신규 API가 필요 없다. **ChromaDB 제외:** ⓐ 청크 메타는 str/int/float/bool만 허용해 리스트를 못 담고(FR15.3), `playlists`처럼 쉼표 join하면 "출처 하나"라는 의미가 깨진다 ⓑ 넣으려면 전량 재인덱싱이 필요한데 FR33이 그 비용을 피하려고 만든 기능이다 ⓒ 출처로 거르는 행위는 **목록 탐색**이지 의미 검색이 아니다 — 화면이 다르다(FR39.12) |
 | DQ-63 | **`doctor` 검사를 지금 추가하지 않는다** — FR38.19 규약에 따른 판단 + 재평가 조건 | FR38.19는 새 검사에 ⓐ 고정 ID ⓑ 표 1행 ⓒ 합성 픽스처 테스트 ⓓ **실데이터 발견 건수 실측**을 요구한다. ⓓ를 적용해 보면 두 후보가 모두 탈락한다. **"빈 `origin` = 경고" → 561건 오탐:** FR39.10에 따라 빈 값이 **정상**이므로 이 검사는 데이터가 아니라 **검사가 틀렸다**. 그리고 방금 0으로 만든 기준선(오류 0·경고 0)을 깨 **상시 빨간 게이트 = 꺼진 게이트**(DQ-52)를 만든다. **"스키마 위반" → 현재 0건이고 앞으로도 0이 정상:** 쓰는 경로가 `save()` **한 곳**뿐이라 위반은 코드 변경으로만 발생하며, 그 감지기는 단위 테스트(V-U37)가 더 빠르고 정확하다. FR38.18·DQ-57이 경고한 "데이터 모양이 굳기 전에 박아 죽는 검사"를 만들지 않는다. **재평가 조건(둘 중 하나가 충족되면 `doctor.origin-schema`를 FR38.19 ⓐ~ⓓ와 함께 추가한다):** ⓐ `origin`을 쓰는 경로가 2개 이상으로 늘어날 때(예: skip 경로의 2차 유입 기록 — DQ-60) ⓑ 파생 DB(FR39.13)를 만들어 meta ↔ DB 대조가 필요해질 때 (FR39.16) |
 
+| DQ-64 | **가이드(`subtitle_post_correction_guide.md`)의 시드 사전을 그대로 쓰지 않는다** — 채택은 **이 코퍼스 실측**으로만 하고, 맨 부분문자열 치환은 기각 | 가이드는 스터디 자막 4편에서 도출됐고, 561편 전수 대조에서 **확정(○)으로 분류된 항목조차 무너졌다**: `디어`→DEER는 **617건/192편 전량 오탐**(`아이디어` 377 · `소셜 미디어` · `드디어` · `옵시디어`=Obsidian 오인식)이고 `레그`→RAG는 249건 중 **152건(61%)이 `텔레그램`**이다. 이것은 새로운 종류의 실패가 아니다 — `tickers`가 "6자리 숫자면 종목코드"로 **441개 중 값 있는 26개 전부 오탐**이었던 것과 **같은 유형**이다(FR12.2·DQ-43): **모양만 보고 의미를 단정한 것.** 그때 얻은 결론("빈 값이 틀린 값보다 정확하다")이 여기서는 **"교정 안 함이 잘못된 교정보다 정확하다"** 로 번역된다 — `tickers`는 빈 필드라 무시하면 그만이었지만 **교정은 본문을 바꾸고 그 위에서 검색·분석이 돈다**. 그래서 시드는 **가설**로만 받고(`terms --from`) 채택 전 문맥 확인을 **절차로 강제**한다(FR40.18) |
+| DQ-65 | **한국어에는 어절 내부 경계가 없다** → `match: word`(`\b`) 기각. 항목마다 **명시적 좌우 배제/요구 문맥**을 두고, 없으면 **사전 로드가 실패**한다 | `\b디어\b`는 `아이디어`를 걸러 주지만 정상 대상인 조사 결합형 `레그를`·`레그에`도 함께 잃는다 — 한글은 어절 안에서 어근과 조사·복합어가 붙어 있어 정규식 단어 경계가 **의미 경계와 무관**하다. 그래서 안전장치를 **개별 항목의 책임**으로 내린다: `word_exact`(조사만 허용) · `left_exclude`/`right_exclude`(`레그`의 `["텔"]`) · `require`/`window_exclude`. 핵심은 그것을 **적어 두라고 권하는 것이 아니라 없으면 로드가 `ValueError`로 실패하는 것**이다 — FR39.6의 `assert _check_field_ownership`가 좋았던 이유가 "문서는 안 읽어도 되지만 `ImportError`는 무시할 수 없다"였고, 같은 장치를 그대로 쓴다. 대가는 사전 항목 하나 쓸 때 조건 한 줄을 더 쓰는 것이며 **그것이 정확히 의도한 마찰**이다 (FR40.5) |
+| DQ-66 | **문맥 판정은 문장 창(window) 단위, 치환은 큐 단위** — 큐 단위 판정 기각 | 자동자막은 문장을 큐 경계에서 자른다. 실측 배제 문맥이 정확히 그 모양이다 — **"하네스는"(큐 808) / "강아지 용품에서 온 말 아니었나요?"(큐 809)**. 큐만 보면 이 문장은 "하네스"만 있는 평범한 큐이고 규칙이 **반드시 오적용된다**(스터디 영상에는 용어 자체를 설명하는 대목이 흔하다 — "용어들이 알고리즘에서 온게 많아서 레그나 몬톨로지나 하네스나"도 실측됐다). 그래서 앞뒤 2큐를 이어 붙인 창에서 `require`/`window_exclude`를 판정한다. **반대로 치환을 창에 하면 안 된다** — 창은 여러 큐의 텍스트를 이어 붙인 것이라 되돌려 쓸 때 큐 경계·타임스탬프가 흔들린다. 판정은 창, 쓰기는 큐 (FR40.8) |
+| DQ-67 | **원본 불변 + 산출물은 `fix/` 하나 — 되돌리기는 디렉터리 삭제다.** 원본 덮어쓰기(백업 동반)·원본 옆 접미사 파일 모두 기각 | 가이드 원칙 1에 동의하되 **이유를 강화**한다: 교정은 **틀릴 수 있고 틀리면 조용하다**. 되돌릴 수 있어야 하고, 되돌리기가 절차(복원 스크립트·백업 대조)면 **아무도 안 한다**. `fix/`를 채널 디렉터리 안에 모으면 되돌리기가 `rm -rf fix/` 한 줄이고 다음 인덱싱이 자동으로 원본으로 복귀한다(소스 선택이 폴백이므로 — DQ-68). 배치 부작용도 없다: `fix/`는 채널 **안**이라 `output/` 최상위 이름공간(FR35.6)·마이그레이션(FR35.11)·`os.rename` 이동에 영향이 없고, 삭제(FR21.2 채널 삭제)는 디렉터리째 지우므로 자동으로 따라간다. 유일한 손질이 **FR21.1 영상 삭제**의 파일 열거 추가다(FR40.17ⓐ — 빠뜨리면 원본 없는 고아 교정본이 남는다). **`config.channel_subdirs()`에 키를 넣지 않는 것**도 같은 계열의 판단이다: `Extractor.__init__`이 그 딕셔너리를 통째로 `mkdir` 하므로(`extractor.py:118`) 넣으면 교정과 무관한 **116채널 전부에 빈 `fix/`** 가 생긴다 (FR40.3~40.4) |
+| DQ-68 | **인덱싱·열람의 기본은 교정본**이되 **글롭 대상은 원본 `srt/`를 유지**한다(영상 단위 폴백). 청크 메타에 교정 표식을 넣지 않는다 | **기본을 교정본으로 하는 이유:** 인덱서가 SRT를 읽으므로(`kl_indexer.py:101`) 교정본이 인덱싱되지 않으면 **교정이 지식층에 닿지 않고 기능의 목적이 성립하지 않는다**. **글롭을 바꾸지 않는 이유:** 교정본 디렉터리를 순회 대상으로 삼으면 미교정 **504편**이 색인에서 사라지고 `doctor.index-coverage`가 **504건 경고**로 터진다(FR38.13의 기준선 0을 깨는 것 = 꺼진 게이트, DQ-52·DQ-53). 그래서 순회는 원본 목록으로 하고 **본문만** `corrector.pick_source`가 영상 단위로 고른다 — 이 함수가 **단일 통로**여야 하는 이유는 인덱서·`/subtitle`·`/export/markdown` 세 곳이 같은 규칙을 써야 stale 판정이 갈리지 않기 때문이다. **청크 메타 표식 기각:** 표식을 전 청크에 넣으면 메타가 전부 달라져 FR33 `_unchanged`가 전부 불일치로 보고 **전량 재임베딩(7,403)** 이 발생한다 — FR33이 바로 그 비용을 피하려고 만든 기능이다(FR39.12와 같은 논리). 실제 비용은 본문이 바뀐 영상뿐이고 **실측 57편/1,151청크 = 자막 청크 6,546의 17.6%** 이며, `correct`가 dry-run에서 그 수치를 **미리 보고**한다(예고 없이 겪으면 사고로 보인다 — FR40.14) |
+| DQ-69 | **stale은 "감지 후 원본 폴백"으로 무해화한다** — 자동 재교정·경고만 남기고 계속 쓰기 모두 기각 | 재추출이 원본 SRT를 덮으면 교정본은 낡는다. 그 경로는 예외가 아니라 **정상 운영**이다 — FR2.2 수정 감지 · **FR19.1 멤버십 영상 매 run 재시도** · `reextract`, 그리고 **FR37 스케줄러를 켜면 무인으로** 일어난다. 이 기능의 최악 결과는 "교정이 안 되는 것"이 아니라 **"조용히 낡은 본문이 인덱싱되고 그 위에서 분석이 도는 것"** 이므로, 판정은 소비 시점에 하고(원본 sha256 + `rules_sha256` 대조) 불일치면 **그 교정본을 쓰지 않는다**. **자동 재교정 기각:** 교정은 본문을 **대체**하는 작업이라 NFR3ⓐ(멱등·가산)의 예외에 들지 않는다(FR40.23). **"경고만 남기고 계속 쓰기" 기각:** 경고는 무인 운영에서 아무도 읽지 않는다(`.cookie_status.json` 48일 방치 실측이 그 증거다). 해소는 사람이 `correct --apply`를 다시 돌리는 것이고, 그때까지 시스템은 **원본으로 정확히 동작**한다 (FR40.15) |
+| DQ-70 | **도메인 축은 폴더(`group`)이지만 3층 해석(채널 → 폴더 → 기본)이고, 매핑은 `glossary/profiles.yaml`에 둔다** — `channels.yaml` 확장 기각 | **3층인 이유는 실측이다:** 영향 영상 **57편 중 38편이 무그룹 채널 23개**에 있고(`호두감자` 205건·`gpters` 155건 등), `AI LLM Wiki`는 16편뿐이다. 폴더만 축으로 삼으면 **2/3가 사전을 못 받는다**. 반대로 채널만 쓰면 116채널을 손으로 유지해야 하므로, 폴더를 기본값으로 두고 **채널이 덮는** 구조가 맞다. **`channels.yaml`을 건드리지 않는 이유:** 그 파일은 FR35 이후 **채널 디스크 경로의 정본**이고, `add()`가 필드를 통째로 덮어써 `group`을 날린 사고(FR7.7·DQ-37 — FR35 하에서는 **디렉터리가 바뀌는 사고**)와 메모 lost update(DQ-42)를 이미 겪었다. 교정 사전 매핑은 **경로와 아무 관계가 없으므로** 그 파일에 들어갈 이유가 없다. `역배열1`(41채널·주식)은 후보 0건이라 `common`만 받고 **빈 사전이 정상 상태**다 — 종목명 사전·외부 데이터는 도입하지 않는다(FR40.6·40.24ⓒ) |
+| DQ-71 | **hold를 "영상 단위 리뷰"에서 "규칙 단위 리뷰"로 재정의한다** — 가이드 §8(영상당 5~10분) 기각 | 가이드대로면 561편 × 5~10분 = **수십 시간**이고, 그 병목은 기능을 죽인다(사용자 우선순위는 "안정적으로 동작하는 시스템"이다). 그런데 C 단계는 **결정적**이므로 사람이 판단할 대상은 영상이 아니라 **규칙**이다: `레그` 1규칙을 확정하면 **14편**이, `재미나이` 1규칙이면 **28편**이 한 번에 처리된다. 그래서 ⓐ hold 산출물은 영상별 파일이 아니라 **도메인별 후보 리포트 1개**(상한 50 — 무한 목록은 읽히지 않는다) ⓑ 무엇보다 **파이프라인이 hold 없이 완결된다**: 교정은 사전의 `high` 항목만 적용하므로 hold가 밀려도 추출·인덱싱·검색은 영향을 받지 않는다. 즉 hold 적체는 **기능 장애가 아니라 개선 기회의 지연**이며, 이것이 사람 병목을 만들지 않는 방법이다 (FR40.19) |
+| DQ-72 | **`doctor` 검사를 지금 추가하지 않고, 같은 판정을 `correct --status`에 둔다** — FR38.19 규약 적용 + 재평가 조건 | FR38.19는 새 검사에 ⓓ **현행 실데이터 발견 건수 실측**을 요구한다. 지금 교정본은 **0편**이므로 후보 4종(죽은 규칙·오적용·stale 교정본·hold 적체)이 **전부 0건**이고, DQ-57이 경고한 "데이터 모양이 굳기 전에 박아 죽는 검사"가 된다(`note`·`tickers` 전례). 더 결정적인 이유: **stale의 위험은 감지기가 아니라 폴백(DQ-69)이 제거한다** — 낡은 교정본은 쓰이지 않으므로 데이터 손상으로 이어지지 않고, 따라서 감지기는 2순위다. 그래도 조기 발견은 필요하므로 같은 판정을 **교정 CLI 안**에 둔다(`correct --status` = stale · 고아 교정본 · 죽은 규칙). 이렇게 하면 기준선(오류 0·경고 0)이 유지되고 레지스트리는 여전히 열려 있다(FR38.18). **재평가 조건(충족되면 `doctor.correction-stale`·`doctor.correction-orphan`을 FR38.19 ⓐ~ⓓ와 함께 추가한다):** ⓐ 교정본이 실제로 생성돼 **발견 건수를 셀 수 있게 된 뒤** ⓑ 또는 FR37 스케줄러를 켠 상태에서 stale이 관측될 때 (FR40.22) |
 
 ---
 
@@ -1222,7 +1376,7 @@ V-I5 재추출 갱신 · V-I6 2컬렉션 생성 · V-I7 채널 격리 · V-I8 �
 | 게이트 | 실행 주체 | 대응 검증 |
 |---|---|---|
 | 정적 | pipeline-verify ① | py_compile 전체 |
-| 단위 | pipeline-verify ② | V-U1~V-U36 (§9.1a — pytest + mock 스크립트, 네트워크 없음). V-U3은 테스트 미구현, V-U8·V-U9는 mock 스크립트, V-U35~36은 FR38 정합 감사·건전성 점검(구현됨) |
+| 단위 | pipeline-verify ② | V-U1~V-U40 (§9.1a — pytest + mock 스크립트, 네트워크 없음). V-U3은 테스트 미구현, V-U8·V-U9는 mock 스크립트, V-U35~36은 FR38 정합 감사·건전성 점검(구현됨), V-U37~38은 FR39 출처 기록(구현됨), **V-U39~40은 FR40 자막 교정(구현됨 — 골든 샘플 회귀가 이 게이트의 핵심이다)** |
 | 빌드 | pipeline-verify ③ | docker build |
 | 카나리아 | pipeline-verify ④⑤ | V-D2 + 회귀(스킵 수 유지·429 없음) |
 | 인덱스/스모크 | pipeline-verify ⑥⑦ | V-D9 일부 (curl /videos·/search) |

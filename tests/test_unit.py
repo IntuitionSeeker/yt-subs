@@ -4,6 +4,7 @@ import re
 import sys
 import json
 import shutil
+import hashlib
 import subprocess
 from pathlib import Path
 
@@ -4180,3 +4181,705 @@ console.log(JSON.stringify(out));
     assert got["one_query"] == ["s24"]
     assert got["capped_query_index"] == "-1", "상한 밖 검색어는 하위 옵션이 없다"
     assert got["kind_channel"] == ["c1"] and got["kind_playlist"] == ["p1"]
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U39 — ⚠ 오적용 방어 골든 샘플 (FR40.5·40.8~40.10·40.20, DQ-64~DQ-66)
+#
+# **이 절이 FR40의 안전장치 그 자체다.** 교정은 자막 본문을 바꾸고 그 위에서 검색·분석이
+# 돈다 — `tickers`는 빈 필드라 무시하면 그만이었지만 틀린 교정은 조용히 코퍼스를 망친다.
+# 케이스는 전부 561편 실측(2026-09-27)에서 왔다: `디어` 617건/192편 **전량 오탐**
+# (`아이디어` 377·`소셜 미디어`·`드디어`·`옵시디어`) · `레그` 249건 중 **152건이
+# `텔레그램`** · 어원 문맥 "하네스는"(큐 808) / "강아지 용품에서 온 말"(큐 809)이
+# **큐 경계로 분리**. 지표는 정밀도 우선이다 — **오적용 1건이 미교정 100건보다 나쁘다**.
+# ════════════════════════════════════════════════════════════════════════════
+_FIX_DIR = Path(__file__).parent / "fixtures" / "correction"
+
+
+def _test_rules(monkeypatch, domain="ai-test", where=None):
+    """픽스처 사전 로드 — `glossary/`의 실제 내용과 **무관하게** 엔진을 고정한다."""
+    import glossary
+    monkeypatch.setattr(glossary, "GLOSSARY_DIR", where or _FIX_DIR)
+    glossary._profile_cache_key = None
+    return glossary.load([domain])
+
+
+def _cue_text(srt: str, number: int) -> str:
+    import corrector
+    return next(c.text for c in corrector.parse_cues(srt) if c.number == number)
+
+
+def test_correction_golden_sample_bytes(monkeypatch):
+    """골든 샘플 입출력이 **바이트 단위로** 고정된다 (FR40.20).
+
+    사람이 확정한 입력 SRT + 기대 출력 쌍이 `tests/fixtures/correction/`에 있고,
+    이 단정이 깨지면 교정 엔진의 동작이 바뀐 것이다(의도한 변경이면 픽스처를 같은
+    커밋에서 갱신하고 근거를 남긴다).
+    """
+    import corrector
+    rules = _test_rules(monkeypatch)
+    src = (_FIX_DIR / "sample.srt").read_text(encoding="utf-8")
+    want = (_FIX_DIR / "sample.expected.srt").read_text(encoding="utf-8")
+    res = corrector.correct_text(src, rules, fixed=corrector.fixed_terms(rules))
+    assert res["srt"] == want, "골든 샘플 불일치 — 교정 결과가 바뀌었다"
+    # ⓔ 큐 수·번호·타임스탬프 **문자열**이 동일하다
+    o, n = corrector.parse_cues(src), corrector.parse_cues(res["srt"])
+    assert len(o) == len(n) == 11
+    assert [c.time for c in o] == [c.time for c in n], "타임스탬프가 흔들렸다"
+    assert [c.num_raw for c in o] == [c.num_raw for c in n]
+    assert res["reverted"] == 0 and res["held"] is False
+
+
+def test_correction_false_positives_stay_untouched(monkeypatch):
+    """ⓐ `디어` 규칙이 사전에 있어도 `아이디어`·`소셜 미디어`·`드디어`·`옵시디어`가
+    변하지 않는다 (실측 617건/192편 전량 오탐 — DQ-64)."""
+    import corrector
+    rules = _test_rules(monkeypatch)
+    src = (_FIX_DIR / "sample.srt").read_text(encoding="utf-8")
+    res = corrector.correct_text(src, rules, fixed=corrector.fixed_terms(rules))
+    got = _cue_text(res["srt"], 2)
+    for word in ("아이디어", "소셜 미디어", "드디어", "옵시디어"):
+        assert word in got, f"{word}가 변했다 — 무방비 치환 회귀"
+    assert "DEER" not in got
+    # 배제는 기록된다(침묵하지 않는다) — 이유 문자열은 `changes.jsonl`의 계약이다
+    reasons = {c["reason"] for c in res["changes"]
+               if c["cue"] == 2 and c["status"] == "excluded"}
+    assert reasons == {"word_exact:left"}, reasons
+    # 음성 대조군 — 같은 규칙이 조건을 만족하는 큐에서는 **적용된다**(규칙이 죽지 않았다)
+    assert _cue_text(res["srt"], 10).startswith("DEER 벤치마크")
+
+
+def test_correction_left_exclude_and_josa(monkeypatch):
+    """ⓑⓓ `텔레그램`은 불변이고 `에이전틱 레그를` → `에이전틱 RAG를`. 조사가 보존된다."""
+    import corrector
+    rules = _test_rules(monkeypatch)
+    src = (_FIX_DIR / "sample.srt").read_text(encoding="utf-8")
+    res = corrector.correct_text(src, rules, fixed=corrector.fixed_terms(rules))
+    cue3 = _cue_text(res["srt"], 3)
+    assert "텔레그램으로" in cue3, "실측 152건 오탐이 되살아났다"
+    assert "에이전틱 RAG를" in cue3
+    # 조사 결합 3종이 전부 보존된다 (`\\b`로는 이 셋을 함께 잃는다 — DQ-65)
+    assert _cue_text(res["srt"], 4) == "RAG에 넣은 문서와 RAG는 검색이고 RAG 시스템을 만들었어요"
+    excl = [c for c in res["changes"] if c["status"] == "excluded" and c["cue"] == 3]
+    assert excl and excl[0]["reason"] == "left_exclude:텔"
+
+
+def test_correction_window_exclude_crosses_cue_boundary(monkeypatch):
+    """ⓒ **큐 경계를 넘는 배제 문맥** — 창 없이 큐만 보면 이 케이스는 반드시 실패한다.
+
+    실측: "하네스는"(큐 n) / "강아지 용품에서 온 말"(큐 n+1). 같은 규칙이 배제 문맥이
+    없는 큐(9번)에서는 적용되므로, 통과의 이유가 "규칙이 죽어서"가 아니다.
+    """
+    import corrector
+    rules = _test_rules(monkeypatch)
+    src = (_FIX_DIR / "sample.srt").read_text(encoding="utf-8")
+    res = corrector.correct_text(src, rules, fixed=corrector.fixed_terms(rules))
+    assert _cue_text(res["srt"], 5) == "하네스는", "어원 문맥에서 오적용됐다"
+    assert "Harness를" in _cue_text(res["srt"], 9), "배제 문맥이 없는 큐에서도 안 걸렸다"
+    # 창이 실제로 큐를 넘는다 — 큐 5의 창에 큐 6의 단어가 들어 있다
+    cues = corrector.parse_cues(src)
+    wins = corrector.windows(cues)
+    assert "강아지" in wins[4] and "강아지" not in cues[4].text
+    assert "강아지" not in wins[8], "9번 큐 창에는 배제 문맥이 없어야 한다"
+    # 큐 단위 판정이면 오적용된다(음성 대조군 = 창이 필수라는 증거)
+    ok, _ = corrector.judge("하네스는", "하네스는", rules[1].variants[0], 0, 3)
+    assert ok is True, "창이 없으면 통과한다 — 그래서 판정 단위가 창이다(DQ-66)"
+
+
+def test_correction_confidence_high_only(monkeypatch):
+    """`confidence: medium` 항목은 적용되지 않는다 (후보 리포트 소관 — FR40.9·40.19)."""
+    import corrector
+    rules = _test_rules(monkeypatch)
+    assert [r.confidence for r in rules if r.canonical == "Learnback"] == ["medium"]
+    src = (_FIX_DIR / "sample.srt").read_text(encoding="utf-8")
+    res = corrector.correct_text(src, rules, fixed=corrector.fixed_terms(rules))
+    assert "런백은" in _cue_text(res["srt"], 10) and "Learnback" not in res["srt"]
+
+
+def test_correction_normalize_whitelist(monkeypatch):
+    """A 정규화는 **열거된 것만** 손댄다 — 임의 `[...]` 제거 금지 (FR40.7).
+
+    실측 근거: 대괄호가 있는 파일이 171편이고 그중에 발화 내용·자막 제작자 주석이
+    섞여 있다. `[음악]`은 지우고 `[자료 출처]`는 남는 것이 이 검사의 핵심이다.
+    """
+    import corrector
+    src = ("1\n00:00:01,000 --> 00:00:05,000\n"
+           "&gt;&gt; [음악] 여기는 [자료 출처] 라는 표기가 그대로 남아야 하고 "
+           "나머지 노이즈만 걷어내야 하는 충분히 긴 문장입니다\n")
+    res = corrector.correct_text(src, [], fixed=())
+    got = _cue_text(res["srt"], 1)
+    assert got == ("여기는 [자료 출처] 라는 표기가 그대로 남아야 하고 "
+                   "나머지 노이즈만 걷어내야 하는 충분히 긴 문장입니다"), got
+    rules_used = [c["rule"] for c in res["changes"]]
+    assert rules_used == ["normalize/entity", "normalize/speaker", "normalize/soundtag"]
+    assert all(c["stage"] == "A" for c in res["changes"])
+    # 짧은 큐에서 노이즈 3종을 한꺼번에 걷어내면 길이 변화율 상한에 걸려 **원복**된다.
+    # A도 FR40.10의 검증을 똑같이 받기 때문이며(FR40.7), 결과는 "미교정"이라 안전하다.
+    # 실데이터 561편에서 이 경로가 50큐 발생했다(전부 `length_delta`).
+    short = "1\n00:00:01,000 --> 00:00:03,000\n[음악]\n&gt;&gt; 어서 오세요.\n"
+    res_short = corrector.correct_text(short, [], fixed=())
+    assert res_short["changed"] == 0 and res_short["reverted"] == 1
+    assert {c["reason"] for c in res_short["changes"] if c["status"] == "reverted"} \
+        == {f"length_delta>{corrector.MAX_LEN_DELTA}"}
+    # 큐가 사라지거나 병합되지 않는다 · 결과가 빈 문자열이 되는 큐는 **원본을 유지**한다
+    only_tag = "1\n00:00:01,000 --> 00:00:02,000\n[음악]\n"
+    res2 = corrector.correct_text(only_tag, [], fixed=())
+    assert _cue_text(res2["srt"], 1) == "[음악]" and res2["changed"] == 0
+
+
+def test_correction_reverts_forbidden_changes(monkeypatch):
+    """ⓔ 숫자·URL·타임코드가 바뀌거나 길이 변화율 상한을 넘은 **큐는 원복**된다.
+
+    원복은 조용하지 않다 — 로그가 `status:"reverted"` + 사유를 남긴다(FR40.10).
+    """
+    import corrector, glossary
+    url_rule = glossary.Rule(canonical="RAG", domain="t",
+                             variants=(glossary.Variant(text="레그", word_exact=True),))
+    src = ("1\n00:00:01,000 --> 00:00:05,000\n"
+           "참고 자료는 https://example.com/레그 문서에 정리돼 있습니다\n")
+    res = corrector.correct_text(src, [url_rule], fixed=())
+    assert "https://example.com/레그" in res["srt"], "URL이 바뀌었다"
+    assert res["reverted"] == 1
+    rec = [c for c in res["changes"] if c["status"] == "reverted"]
+    assert rec and rec[0]["reason"] == "url_changed", rec
+
+    # 길이 변화율 — canonical이 과도하게 길면 그 큐는 원복된다
+    long_rule = glossary.Rule(canonical="A" * 60, domain="t",
+                              variants=(glossary.Variant(text="레그", word_exact=True),))
+    src2 = "1\n00:00:01,000 --> 00:00:05,000\n여기에 레그 하나만 있는 짧은 큐입니다\n"
+    res2 = corrector.correct_text(src2, [long_rule], fixed=())
+    assert _cue_text(res2["srt"], 1) == "여기에 레그 하나만 있는 짧은 큐입니다"
+    assert [c["reason"] for c in res2["changes"] if c["status"] == "reverted"] \
+        == [f"length_delta>{corrector.MAX_LEN_DELTA}"]
+    # 숫자 변경 금지 — 규칙이 숫자를 삼키면 원복
+    num_rule = glossary.Rule(canonical="다섯", domain="t",
+                             variants=(glossary.Variant(text="5", right_exclude=["%"]),))
+    src3 = "1\n00:00:01,000 --> 00:00:05,000\n오늘은 5번째 발표이고 자료는 여기 있습니다\n"
+    res3 = corrector.correct_text(src3, [num_rule], fixed=())
+    assert "5번째" in res3["srt"] and res3["reverted"] == 1
+    assert [c["reason"] for c in res3["changes"] if c["status"] == "reverted"] \
+        == ["digit_changed"]
+
+
+def test_correction_protects_fixed_terms(monkeypatch):
+    """ⓓ `fixed`(확정 고유명사 = 사전의 `canonical`) 미변경 — 이미 올바른 표기를
+    다른 규칙이 먹어 치우면 원복한다 (FR40.10ⓓ)."""
+    import corrector, glossary
+    eater = glossary.Rule(canonical="레그", domain="t",
+                          variants=(glossary.Variant(text="RAG", word_exact=True),))
+    src = "1\n00:00:01,000 --> 00:00:05,000\n이미 올바르게 적힌 RAG 표기가 있는 긴 문장\n"
+    res = corrector.correct_text(src, [eater], fixed=("RAG",))
+    assert "RAG" in res["srt"] and res["reverted"] == 1
+    assert [c["reason"] for c in res["changes"] if c["status"] == "reverted"] \
+        == ["fixed_changed:RAG"]
+
+
+def test_correction_file_circuit_breaker(monkeypatch, tmp_path):
+    """ⓖ 파일 회로차단 — 변경 비율 상한 초과 시 **교정본을 쓰지 않는다**.
+
+    잘못된 광역 규칙 하나가 코퍼스를 한 번에 망치는 것을 막는 장치이며
+    FR13.5(연속 429 중단)·FR37.9(429 회로차단)와 같은 계열이다.
+    """
+    import corrector, glossary
+    rule = glossary.Rule(canonical="RAG", domain="t",
+                         variants=(glossary.Variant(text="레그", word_exact=True),))
+    cues = []
+    for i in range(1, 41):                         # 40큐 전부에 후보가 있다
+        cues.append(f"{i}\n00:00:{i:02d},000 --> 00:00:{i + 1:02d},000\n"
+                    f"{i}번째 큐이고 레그 이야기를 계속 합니다\n")
+    res = corrector.correct_text("\n".join(cues), [rule], fixed=())
+    assert res["held"] is True and "회로차단" in res["reason"]
+    assert res["changed"] == 40 and corrector._change_limit(40) == 10
+    # 상한 이하로 줄이면 hold가 풀린다(임계가 실제로 판정에 쓰인다는 음성 대조군)
+    few = cues[:5] + [c.replace("레그", "얘기") for c in cues[5:]]
+    assert corrector.correct_text("\n".join(few), [rule], fixed=())["held"] is False
+
+    # 회로차단 파일은 `--apply`에서도 산출물이 생기지 않는다
+    out = _isolate(tmp_path, monkeypatch)
+    ch = out / "회로차단채널"
+    (ch / "srt").mkdir(parents=True)
+    (ch / "srt" / "hold1.srt").write_text("\n".join(cues), encoding="utf-8")
+    plan = corrector.correct_channel("회로차단채널", apply=True, rules=[rule])
+    assert plan["totals"]["held"] == 1 and plan["totals"]["corrected"] == 0
+    assert not (ch / "fix").exists(), "hold인데 교정본을 썼다"
+
+
+def test_correction_is_deterministic(monkeypatch):
+    """ⓗ 결정성 — 같은 입력·같은 사전을 2회 돌려 **바이트 동일**(LLM·난수·시각 없음)."""
+    import corrector
+    rules = _test_rules(monkeypatch)
+    src = (_FIX_DIR / "sample.srt").read_text(encoding="utf-8")
+    a = corrector.correct_text(src, rules, fixed=corrector.fixed_terms(rules))
+    b = corrector.correct_text(src, rules, fixed=corrector.fixed_terms(rules))
+    assert a["srt"] == b["srt"] and a["changes"] == b["changes"]
+    # 멱등 — 교정본을 다시 교정해도 더 바뀌지 않는다
+    again = corrector.correct_text(a["srt"], rules, fixed=corrector.fixed_terms(rules))
+    assert again["changed"] == 0, "교정이 멱등하지 않다"
+
+
+def test_glossary_rejects_unguarded_variant(monkeypatch, tmp_path):
+    """ⓕ **사전 스키마 위반은 로드 단계에서 `ValueError`** (FR40.5·DQ-65).
+
+    이것이 이 기능의 1차 방어선이다 — 문서로 권고하면 지켜지지 않는다(FR39.6 `assert`
+    선례: "문서는 안 읽어도 되지만 로드 실패는 무시할 수 없다"). 조건 없는 `변형`은
+    실측에서 `디어` 617건 전량 오탐을 냈다.
+    """
+    import glossary
+    monkeypatch.setattr(glossary, "GLOSSARY_DIR", _FIX_DIR)
+    with pytest.raises(ValueError) as exc:
+        glossary.load(["unguarded"])
+    assert "조건이 하나도 없습니다" in str(exc.value)
+
+    g = tmp_path / "glossary"
+    g.mkdir()
+    monkeypatch.setattr(glossary, "GLOSSARY_DIR", g)
+
+    def bad(text: str):
+        (g / "x.yaml").write_text(text, encoding="utf-8")
+        with pytest.raises(ValueError):
+            glossary.load(["x"])
+
+    bad("- canonical: RAG\n  variants: [{text: 레그}]\n")            # 조건 없음
+    bad("- canonical: RAG\n  variants: [레그]\n")                    # 축약 표기도 조건 없음
+    bad("- canonical: RAG\n  variants: [{text: 레그, window_exclude: [텔]}]\n")
+    bad("- canonical: ''\n  variants: [{text: 레그, word_exact: true}]\n")
+    bad("- canonical: RAG\n  variants: [{text: 레그, word_exact: true}]\n"
+        "  confidence: 확실\n")                                      # 열거 밖
+    bad("- canonical: RAG\n  variants: [{text: 레그, word_exact: true}]\n"
+        "  domain: 다른도메인\n")                                     # 파일 도메인 불일치
+    bad("- canonical: RAG\n  variants: [{text: 레그, word_exac: true}]\n")   # 오타 키
+    bad("- canonical: RAG\n  variants: [{text: 레그, word_exact: true}]\n"
+        "- canonical: GraphRAG\n  variants: [{text: 레그, word_exact: true}]\n")  # 중복
+    bad("- canonical: RAG\n  variants: []\n")
+    bad("- canonical: RAG\n  variants: [{text: 레그, left_exclude: 3}]\n")
+    # 양성 대조군 — 조건이 하나라도 있으면 로드된다(검사가 전부를 막지 않는다)
+    for guard in ("word_exact: true", "left_exclude: [텔]",
+                  "right_exclude: [램]", "require: [검색]"):
+        (g / "x.yaml").write_text(f"- canonical: RAG\n  variants: [{{text: 레그, {guard}}}]\n",
+                                  encoding="utf-8")
+        assert len(glossary.load(["x"])) == 1, guard
+    # 주석만 있는 파일·없는 파일은 **빈 사전**이다(로드 실패가 아니다 — FR40.6)
+    (g / "empty.yaml").write_text("# 아직 비어 있다\n", encoding="utf-8")
+    assert glossary.load(["empty"]) == [] and glossary.load(["없는도메인"]) == []
+
+
+def test_glossary_rules_hash_tracks_conditions(monkeypatch, tmp_path):
+    """`rules_hash`는 **조건까지** 반영한다 — 조건만 고쳐도 교정본이 stale이 된다."""
+    import glossary
+    g = tmp_path / "glossary"
+    g.mkdir()
+    monkeypatch.setattr(glossary, "GLOSSARY_DIR", g)
+    base = "- canonical: RAG\n  variants: [{text: 레그, word_exact: true%s}]\n"
+    (g / "x.yaml").write_text(base % "", encoding="utf-8")
+    h1 = glossary.rules_hash(glossary.load(["x"]))
+    (g / "x.yaml").write_text(base % ", left_exclude: [텔]", encoding="utf-8")
+    h2 = glossary.rules_hash(glossary.load(["x"]))
+    assert h1 != h2
+    # `note`·`source`·`measured`는 결과에 영향이 없으므로 해시를 바꾸지 않는다
+    (g / "x.yaml").write_text((base % ", left_exclude: [텔]") +
+                              "  note: 설명만 추가\n  source: corpus\n", encoding="utf-8")
+    assert glossary.rules_hash(glossary.load(["x"])) == h2
+
+
+def test_glossary_survey_measures_false_positives(monkeypatch, tmp_path):
+    """`terms`의 계량이 **오탐의 직접 증거**를 낸다 (FR40.18).
+
+    실측 재현: `디어` → 어절 분포 `아이디어`가 압도 → `verdict: reject` ·
+    `레그` → 좌측 문맥 `텔`이 최상위(= `left_exclude` 후보).
+    """
+    import glossary
+    out = _isolate(tmp_path, monkeypatch)
+    ch = out / "계량채널"
+    (ch / "srt").mkdir(parents=True)
+    (ch / "srt" / "v1.srt").write_text(
+        "1\n00:00:01,000 --> 00:00:03,000\n좋은 아이디어와 아이디어를 드디어\n\n"
+        "2\n00:00:03,000 --> 00:00:05,000\n텔레그램으로 보내고 레그를 씁니다\n",
+        encoding="utf-8")
+    rows = glossary.survey(["계량채널"], glossary.parse_candidates("디어 -> DEER\n레그\n"))
+    by = {r["candidate"]: r for r in rows}
+    assert by["디어"]["hits"] == 3 and by["디어"]["exact"] == 0
+    assert by["디어"]["verdict"] == "reject" and by["디어"]["suggest"] == "DEER"
+    assert by["디어"]["tokens"][0]["token"] in ("아이디어를", "아이디어와", "드디어")
+    assert by["레그"]["hits"] == 2 and by["레그"]["exact"] == 1
+    assert by["레그"]["left_context"][0]["text"] == "텔"
+    assert by["레그"]["samples"] and by["레그"]["samples"][0]["cue"] == 2
+    # 후보 파일 파싱 — 주석·빈 줄·구분자
+    cands = glossary.parse_candidates("# 주석\n\n레그 -> RAG\n하네스\n레그\n")
+    assert [c["text"] for c in cands] == ["레그", "하네스"]
+    # 리포트는 상한을 지킨다(무한 목록은 읽히지 않는다 — DQ-71)
+    report = glossary.hold_report("ai-test", rows, limit=1)
+    assert report.count("\n## ") == 1 and "reject" in report
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# V-U40 — 원본 불변 · 소스 선택 · stale (FR40.3~40.4·40.6·40.11~40.15, DQ-67~DQ-70)
+#
+# ⓐ가 이 절의 존재 이유다 — **원본 불변은 선언이 아니라 관찰로 확인한다**(sha256·mtime).
+# 이 항목이 깨지면 기능을 내지 않는다. 나머지는 "교정본이 낡았을 때 조용히 원본으로
+# 돌아가는가"를 고정한다: 재추출(FR2.2·FR19.1 멤버십 매 run·`reextract`)은 정상 운영이고
+# FR37 스케줄러를 켜면 **무인으로** 일어난다.
+# ════════════════════════════════════════════════════════════════════════════
+def _tmp_glossary(tmp_path, monkeypatch, domains=("ai-test",), profiles=None):
+    """픽스처 사전을 tmp로 복사해 **고칠 수 있는** 사전 디렉터리를 만든다."""
+    import glossary
+    g = tmp_path / "glossary"
+    g.mkdir(exist_ok=True)
+    for dom in domains:
+        shutil.copy(_FIX_DIR / f"{dom}.yaml", g / f"{dom}.yaml")
+    if profiles is not None:
+        (g / "profiles.yaml").write_text(profiles, encoding="utf-8")
+    monkeypatch.setattr(glossary, "GLOSSARY_DIR", g)
+    glossary._profile_cache_key = None
+    return g
+
+
+def _fix_channel(tmp_path, monkeypatch, name="교정채널", basenames=("V1",)):
+    """원본 `srt/`·`txt/`·`meta/`를 가진 임시 채널."""
+    import corrector
+    out = _isolate(tmp_path, monkeypatch)
+    corrector._invalidate_state_cache()
+    corrector._rules_cache.clear()
+    ch = out / name
+    for sub in ("srt", "txt", "meta"):
+        (ch / sub).mkdir(parents=True, exist_ok=True)
+    src = (_FIX_DIR / "sample.srt").read_text(encoding="utf-8")
+    for basename in basenames:
+        (ch / "srt" / f"{basename}.srt").write_text(src, encoding="utf-8")
+        (ch / "txt" / f"{basename}.txt").write_text(su.srt_to_txt(src), encoding="utf-8")
+        (ch / "meta" / f"{basename}.json").write_text(
+            json.dumps({"id": f"vid_{basename}", "title": basename,
+                        "upload_date": "20260101"}, ensure_ascii=False),
+            encoding="utf-8")
+    return out, ch
+
+
+def _digest(paths) -> dict:
+    return {str(p): (hashlib.sha256(p.read_bytes()).hexdigest(), p.stat().st_mtime_ns)
+            for p in paths}
+
+
+def test_correction_never_touches_originals(tmp_path, monkeypatch):
+    """ⓐ **원본 `srt/`·`txt/`의 sha256·mtime이 교정 전후 동일** — 선언이 아니라 관찰.
+
+    이 단정이 깨지면 기능을 내지 않는다(FR40.3). 되돌리기가 `fix/` 삭제로 완결되는
+    것도 이 불변식 위에 서 있다(DQ-67).
+    """
+    import corrector
+    out, ch = _fix_channel(tmp_path, monkeypatch, basenames=("V1", "V2"))
+    rules = _test_rules(monkeypatch)
+    originals = sorted((ch / "srt").glob("*.srt")) + sorted((ch / "txt").glob("*.txt"))
+    before = _digest(originals)
+    plan = corrector.correct_channel("교정채널", apply=True, rules=rules)
+    assert plan["totals"]["corrected"] == 2 and plan["totals"]["changes"] == 9 * 2
+    assert _digest(originals) == before, "원본이 바뀌었다 — 이 기능을 내지 마라"
+    # 산출물은 `fix/` 하위뿐이다 (채널 디렉터리 안 · 다른 어디에도 쓰지 않는다)
+    written = {p.relative_to(ch).parts[0] for p in ch.rglob("*") if p.is_file()}
+    assert written == {"srt", "txt", "meta", "fix"}, written
+    # 되돌리기 = 디렉터리 삭제 (복원 절차·백업이 없다)
+    shutil.rmtree(ch / "fix")
+    assert corrector.pick_source("교정채널", "V1") == ch / "srt" / "V1.srt"
+
+
+def test_correction_dry_run_writes_nothing(tmp_path, monkeypatch):
+    """ⓑ `apply=False`(**기본**)는 한 바이트도 쓰지 않는다 (`migrate-groups` 선례)."""
+    import corrector
+    out, ch = _fix_channel(tmp_path, monkeypatch)
+    rules = _test_rules(monkeypatch)
+    before = _digest([p for p in ch.rglob("*") if p.is_file()])
+    plan = corrector.correct_channel("교정채널", rules=rules)          # apply 기본값
+    assert plan["applied"] is False and plan["totals"]["corrected"] == 1
+    assert not (ch / "fix").exists(), "dry-run이 파일을 만들었다"
+    assert _digest([p for p in ch.rglob("*") if p.is_file()]) == before
+    # 계획에 재임베딩 예고가 실려 있다 (예고 없이 겪으면 사고로 보인다 — FR40.14)
+    assert corrector.reembed_estimate(plan) == plan["totals"]["chunks"] > 0
+
+
+def test_correction_outputs_and_change_log(tmp_path, monkeypatch):
+    """ⓒⓓ `fix/txt` == `srt_to_txt(fix/srt)` · `changes.jsonl` 3상태 + `stage` A/C."""
+    import corrector
+    out, ch = _fix_channel(tmp_path, monkeypatch)
+    rules = _test_rules(monkeypatch)
+    corrector.correct_channel("교정채널", apply=True, rules=rules)
+    fx = corrector.fix_dirs("교정채널")
+    fixed_srt = (fx["srt"] / "V1.srt").read_text(encoding="utf-8")
+    assert fixed_srt == (_FIX_DIR / "sample.expected.srt").read_text(encoding="utf-8")
+    # TXT는 교정 SRT에서 **같은 함수로** 파생된다 (FR23 규칙 중복 금지 — FR40.12)
+    assert (fx["txt"] / "V1.txt").read_text(encoding="utf-8") == su.srt_to_txt(fixed_srt)
+    recs = [json.loads(l) for l in
+            (fx["changes"] / "V1.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert {r["stage"] for r in recs} == {"A", "C"}
+    assert {r["status"] for r in recs} == {"applied", "excluded"}
+    for r in recs:
+        assert set(r) >= {"cue", "stage", "from", "to", "rule", "status"}
+        if r["status"] == "excluded":
+            assert r["reason"] and r["from"] == r["to"]
+    # `stage`는 D(LLM 문맥 교정)가 나중에 끼워질 **자리**다 — 지금 값은 A/C뿐이다
+    assert not any(r["stage"] == "D" for r in recs)
+    # state.json 스키마 (stale 판정의 정본)
+    state = json.loads(fx["state"].read_text(encoding="utf-8"))
+    assert set(state) == {"V1"}
+    assert set(state["V1"]) == {"src_sha256", "rules_sha256", "engine_version",
+                                "applied_at", "changes", "reverted", "excluded"}
+    assert state["V1"]["changes"] == 9 and state["V1"]["engine_version"] == 1
+    # `meta/*.json`·`state.json`(추출 상태)은 손대지 않는다 (FR40.24ⓔ)
+    meta = json.loads((ch / "meta" / "V1.json").read_text(encoding="utf-8"))
+    assert set(meta) == {"id", "title", "upload_date"}
+
+
+def test_pick_source_falls_back_on_stale(tmp_path, monkeypatch):
+    """ⓔ `pick_source` — 없음 → 원본 · 신선 → 교정본 · **원본 재추출/사전 변경 → 원본**.
+
+    "조용히 낡은 본문이 인덱싱되는 것"이 이 기능의 최악 결과이므로 폴백이 기본값이다
+    (DQ-69). 소비 측(인덱서·`/subtitle`·`/export/markdown`)은 이 함수 하나만 쓴다.
+    """
+    import corrector
+    out, ch = _fix_channel(tmp_path, monkeypatch)
+    g = _tmp_glossary(tmp_path, monkeypatch, profiles="default: [ai-test]\n")
+    import glossary
+    rules = glossary.load(["ai-test"])
+
+    orig = ch / "srt" / "V1.srt"
+    # ① 교정본 없음 → 원본
+    assert corrector.pick_source("교정채널", "V1") == orig
+    assert corrector.video_status("교정채널") == {}
+
+    # ② 신선한 교정본 → 교정본
+    corrector.correct_channel("교정채널", apply=True, rules=rules)
+    fx = corrector.fix_dirs("교정채널")
+    assert corrector.pick_source("교정채널", "V1") == fx["srt"] / "V1.srt"
+    assert corrector.pick_source("교정채널", "V1", kind="txt") == fx["txt"] / "V1.txt"
+    st = corrector.video_status("교정채널")["V1"]
+    assert st == {"corrected": True, "corrections": 9, "stale": False}
+
+    # ③ 원본 재추출(내용 변경) → 원본 폴백
+    src = orig.read_text(encoding="utf-8")
+    orig.write_text(src.replace("훨씬 좋습니다", "정말 좋습니다"), encoding="utf-8")
+    corrector._invalidate_state_cache()
+    assert corrector.pick_source("교정채널", "V1") == orig
+    assert corrector.video_status("교정채널")["V1"]["stale"] is True
+    orig.write_text(src, encoding="utf-8")                  # 되돌리면 다시 신선해진다
+    corrector._invalidate_state_cache()
+    assert corrector.pick_source("교정채널", "V1") == fx["srt"] / "V1.srt"
+
+    # ④ 사전 변경(`rules_sha256` 불일치) → 원본 폴백
+    (g / "ai-test.yaml").write_text(
+        (g / "ai-test.yaml").read_text(encoding="utf-8") +
+        "\n- canonical: Ingest\n  variants: [{text: 인제스트, word_exact: true}]\n"
+        "  domain: ai-test\n  confidence: high\n", encoding="utf-8")
+    corrector._rules_cache.clear()
+    assert corrector.pick_source("교정채널", "V1") == orig
+    assert corrector.video_status("교정채널")["V1"]["stale"] is True
+
+    # ⑤ 엔진 버전이 올라가도 낡은 교정본은 쓰이지 않는다
+    monkeypatch.setattr(corrector, "ENGINE_VERSION", corrector.ENGINE_VERSION + 1)
+    corrector._rules_cache.clear()
+    assert corrector.pick_source("교정채널", "V1") == orig
+
+
+def test_indexer_reads_corrected_body_but_globs_originals(tmp_path, monkeypatch):
+    """인덱서의 **글롭은 원본**이고 본문만 교정본에서 온다 (FR40.13·DQ-68).
+
+    교정본 디렉터리를 순회하면 미교정 영상이 색인에서 사라지고
+    `doctor.index-coverage`가 그 수만큼 경고로 터진다(실측 504편 = 꺼진 게이트).
+    **청크 메타에 교정 표식이 없다**는 것도 함께 고정한다 — 넣으면 FR33 `_unchanged`가
+    전부 불일치로 보고 전량 재임베딩이 발생한다.
+    """
+    import corrector
+    from kl_indexer import KLIndexer
+    out, ch = _fix_channel(tmp_path, monkeypatch, basenames=("V1", "V2"))
+    rules = _test_rules(monkeypatch)
+    # V1만 교정본을 갖게 한다 (V2는 미교정 — 그래도 색인에 남아야 한다)
+    plan = corrector.correct_channel("교정채널", apply=True, rules=rules)
+    fx = corrector.fix_dirs("교정채널")
+    for key, ext in (("srt", "srt"), ("txt", "txt"), ("changes", "jsonl")):
+        (fx[key] / f"V2.{ext}").unlink()
+    state = json.loads(fx["state"].read_text(encoding="utf-8"))
+    del state["V2"]
+    fx["state"].write_text(json.dumps(state), encoding="utf-8")
+    corrector._invalidate_state_cache()
+
+    seen = {}
+    idx = KLIndexer("교정채널")
+    monkeypatch.setattr(idx, "_collection", lambda name: mock.MagicMock())
+    monkeypatch.setattr(idx, "embed", lambda docs: [[0.0] for _ in docs])
+    monkeypatch.setattr(KLIndexer, "_unchanged", staticmethod(lambda *a: False))
+    col = mock.MagicMock()
+    monkeypatch.setattr(idx, "_collection", lambda name: col)
+    idx.index_subtitles()
+    for call in col.upsert.call_args_list:
+        seen[call.kwargs["metadatas"][0]["video_id"]] = " ".join(call.kwargs["documents"])
+    assert set(seen) == {"vid_V1", "vid_V2"}, "미교정 영상이 색인에서 사라졌다"
+    assert "RAG를" in seen["vid_V1"] and "레그를" not in seen["vid_V1"]
+    assert "레그를" in seen["vid_V2"], "미교정 영상은 원본 본문이다"
+    metas = col.upsert.call_args_list[0].kwargs["metadatas"][0]
+    assert not any("correct" in k or "fix" in k for k in metas), \
+        "청크 메타에 교정 표식이 들어갔다 — 전량 재임베딩이 발생한다(DQ-68)"
+
+
+def test_glossary_resolve_three_layers(tmp_path, monkeypatch):
+    """ⓕ `resolve` 3층 — `channels`가 `groups`를 **덮고**, 둘 다 없으면 `default`.
+
+    실측 근거: 영향 영상 57편 중 **38편이 무그룹 채널 23개**에 있어 폴더만으로는
+    2/3가 사전을 못 받는다. `역배열1`처럼 `common`만인 것이 정상 상태다(빈 사전).
+    """
+    import glossary
+    out = _isolate(tmp_path, monkeypatch)
+    reg = ChannelRegistry()
+    reg.add("https://youtube.com/@폴더채널")
+    reg.set_group("폴더채널", "AI LLM Wiki")
+    reg.add("https://youtube.com/@무그룹채널")
+    reg.add("https://youtube.com/@주식채널")
+    reg.set_group("주식채널", "역배열1")
+    reg.add("https://youtube.com/@덮어쓰기채널")
+    reg.set_group("덮어쓰기채널", "역배열1")
+    _tmp_glossary(tmp_path, monkeypatch, profiles=(
+        "default: [common]\n"
+        "groups:\n  AI LLM Wiki: [common, ai-llm]\n  역배열1: [common]\n"
+        "channels:\n  무그룹채널: [common, ai-llm]\n  덮어쓰기채널: [common, ai-llm]\n"))
+    assert glossary.resolve("폴더채널") == ["common", "ai-llm"]      # 폴더 층
+    assert glossary.resolve("무그룹채널") == ["common", "ai-llm"]    # 채널 층(무그룹)
+    assert glossary.resolve("주식채널") == ["common"]                # 후보 0건 = 빈 사전
+    assert glossary.resolve("덮어쓰기채널") == ["common", "ai-llm"]  # 채널이 폴더를 덮는다
+    assert glossary.resolve("등록안된채널") == ["common"]            # default
+    # `channels.yaml`은 읽기만 한다 — 교정 매핑이 경로 정본을 오염시키지 않는다(DQ-70)
+    raw = (tmp_path / "channels.yaml").read_text(encoding="utf-8")
+    assert "glossary" not in raw and "ai-llm" not in raw
+    # profiles.yaml이 없어도 동작한다 (기본값 `common`)
+    (tmp_path / "glossary" / "profiles.yaml").unlink()
+    glossary._profile_cache_key = None
+    assert glossary.resolve("폴더채널") == ["common"]
+
+
+def test_channel_subdirs_has_no_fix_key():
+    """ⓖ `config.channel_subdirs()`에 `fix` 계열 키가 **없다** (FR40.4·DQ-67 회귀).
+
+    `Extractor.__init__`이 그 딕셔너리를 통째로 `mkdir` 순회하므로(`extractor.py`)
+    키를 추가하면 교정과 무관한 116채널 전부에 빈 `fix/`가 생긴다.
+    """
+    keys = set(config.channel_subdirs("아무채널"))
+    assert keys == {"srt", "txt", "desc", "meta", "chroma"}, keys
+    ext_src = (Path(__file__).parent.parent / "extractor.py").read_text(encoding="utf-8")
+    assert "channel_subdirs" in ext_src and "mkdir" in ext_src
+    # 경로 조립은 corrector가 따로 한다 (채널 디렉터리 **안**이므로 FR35 이동에 무영향)
+    import corrector
+    fx = corrector.fix_dirs("아무채널")
+    base = config.channel_dir("아무채널")
+    assert fx["base"] == base / "fix"
+    assert all(str(p).startswith(str(base)) for p in fx.values())
+
+
+def test_correction_status_reports_stale_orphan_dead(tmp_path, monkeypatch):
+    """ⓗ `status()` — stale · **고아 교정본**(원본 없음) · 죽은 규칙(적용 0건).
+
+    `doctor` 검사를 지금 만들지 않는 대신(FR40.22·DQ-72 — 교정본 0편이라 발견 0건)
+    같은 판정을 교정 CLI 안에 둔다.
+    """
+    import corrector
+    out, ch = _fix_channel(tmp_path, monkeypatch, basenames=("V1", "V2"))
+    g = _tmp_glossary(tmp_path, monkeypatch, profiles="default: [ai-test]\n")
+    import glossary
+    corrector.correct_channel("교정채널", apply=True, rules=glossary.load(["ai-test"]))
+
+    st = corrector.status(["교정채널"])
+    assert st["corrected"] == 2 and st["stale"] == [] and st["orphans"] == []
+    # 죽은 규칙 — `Learnback`은 medium이라 적용 0건이다(적용된 3규칙은 나오지 않는다)
+    assert st["dead_rules"] == ["ai-test/Learnback"], st["dead_rules"]
+
+    # 고아 — 원본 삭제 경로가 `fix/`를 지우지 않으면 이렇게 남는다(FR40.17ⓐ의 근거)
+    (ch / "srt" / "V2.srt").unlink()
+    corrector._invalidate_state_cache()
+    st2 = corrector.status(["교정채널"])
+    assert [o["basename"] for o in st2["orphans"]] == ["V2"]
+    assert st2["corrected"] == 1
+
+    # stale — 원본 재추출
+    p = ch / "srt" / "V1.srt"
+    p.write_text(p.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+    corrector._invalidate_state_cache()
+    st3 = corrector.status(["교정채널"])
+    assert [s["basename"] for s in st3["stale"]] == ["V1"]
+    assert st3["stale"][0]["reason"] == "원본 재추출"
+
+    # `forget_video`(영상 삭제 경로)는 산출물 3종 + 상태 항목을 함께 지운다
+    assert corrector.forget_video("교정채널", "V2") == 3
+    corrector._invalidate_state_cache()
+    assert [o["basename"] for o in corrector.status(["교정채널"])["orphans"]] == []
+
+
+def test_delete_video_removes_fix_outputs(tmp_path, monkeypatch):
+    """FR40.17ⓐ — 영상 삭제(FR21.1)의 파일 열거에 `fix/` 산출물 3종이 들어 있다.
+
+    빠뜨리면 삭제된 영상의 교정본이 **원본 없는 고아**로 남는다. 열거는 서버 코드에
+    있으므로(`dashboard/server.py`) 그 경로를 실제로 태워서 확인한다.
+    """
+    import corrector
+    out, ch = _fix_channel(tmp_path, monkeypatch)
+    rules = _test_rules(monkeypatch)
+    corrector.correct_channel("교정채널", apply=True, rules=rules)
+    fx = corrector.fix_dirs("교정채널")
+    assert (fx["srt"] / "V1.srt").exists()
+
+    import server
+    monkeypatch.setattr(server.MANAGER, "is_busy", lambda: False)
+    monkeypatch.setattr(server, "KLIndexer", mock.MagicMock(), raising=False)
+    with mock.patch.object(server, "StateManager") as sm:
+        sm.return_value = mock.MagicMock()
+        with mock.patch("kl_indexer.KLIndexer") as ki:
+            ki.return_value = mock.MagicMock()
+            res = server.delete_video(server.VideoDeleteRequest(
+                channel="교정채널", basename="V1"))
+    assert res["deleted"] is True
+    for key, ext in (("srt", "srt"), ("txt", "txt"), ("changes", "jsonl")):
+        assert not (fx[key] / f"V1.{ext}").exists(), f"고아 {key} 산출물이 남았다"
+    assert json.loads(fx["state"].read_text(encoding="utf-8")) == {}
+
+
+def test_subtitle_endpoint_variant_toggle(tmp_path, monkeypatch):
+    """`GET /subtitle?variant=` — 기본 `fix`, `src`로 원본 (FR40.16).
+
+    이 토글은 장식이 아니라 **사람이 오적용을 보는 유일한 창**이다(DQ-62 전례).
+    `/export/markdown`이 같은 선택 규칙을 쓰는 것도 함께 고정한다(규칙이 두 곳에
+    있으면 한쪽이 stale을 쓴다).
+    """
+    import corrector
+    out, ch = _fix_channel(tmp_path, monkeypatch)
+    rules = _test_rules(monkeypatch)
+    import server
+
+    got = server.subtitle(channel="교정채널", basename="V1")     # 교정본 없음 → 원본
+    assert got["variant"] == "src" and "레그를" in got["text"]
+
+    corrector.correct_channel("교정채널", apply=True, rules=rules)
+    fix = server.subtitle(channel="교정채널", basename="V1")
+    assert fix["variant"] == "fix" and fix["corrections"] == 9
+    assert "RAG를" in fix["text"] and "레그를" not in fix["text"]
+    src = server.subtitle(channel="교정채널", basename="V1", variant="src")
+    assert src["variant"] == "src" and "레그를" in src["text"]
+    # Markdown 내보내기도 같은 규칙을 따른다 (C5 — 기본이 교정본이다)
+    md = server.export_markdown(channel="교정채널", basename="V1")
+    assert "RAG를" in md["markdown"]
+    md_src = server.export_markdown(channel="교정채널", basename="V1", variant="src")
+    assert "레그를" in md_src["markdown"]
+    # `/videos`가 배지 필드를 싣는다 (meta 스키마 변경 없이 fix/state.json에서 읽는다)
+    vids = server.videos(channel="교정채널")["videos"]
+    assert vids[0]["corrected"] is True and vids[0]["corrections"] == 9
+    assert vids[0]["correction_stale"] is False
+
+
+def test_frontend_consumes_correction_shape():
+    """프론트가 서버 응답 키를 실제로 읽는가 (FR40.16 — 배지·토글).
+
+    `note`·`tickers`·`modified_date`가 "읽는 곳이 없어 죽은 필드"였던 전례(DQ-62)
+    때문에 소비 UI가 없으면 기능이 아니다.
+    """
+    html = (Path(__file__).parent.parent / "dashboard" / "index.html").read_text(
+        encoding="utf-8")
+    for token in ("fmtCorrection(v)", "correctionTitle(v)", "v.corrected",
+                  "v.corrections", "v.correction_stale", "libDetailVariant",
+                  "variant=${libDetailVariant}", "class=\"fixmark"):
+        assert token in html, f"소비 UI 조각 누락: {token}"
+    render = html.split("function renderLibList")[1].split("\nfunction ")[0]
+    assert "fmtCorrection(v)" in render, "라이브러리 행에 교정 배지가 없다"
+    kl = (Path(__file__).parent.parent / "kl_query.py").read_text(encoding="utf-8")
+    for key in ('"corrected"', '"corrections"', '"correction_stale"'):
+        assert key in kl, f"서버 응답 키 누락: {key}"

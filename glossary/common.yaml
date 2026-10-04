@@ -1,6 +1,6 @@
 # glossary/common.yaml — 주제 무관 STT 습관 오류. FR40.6
 #
-# **비어 있는 것이 현재 정상 상태다.** 사전은 가이드를 베끼지 않고 이 코퍼스 실측으로
+# 사람 확정 완료 (2026-09-29). 사전은 가이드를 베끼지 않고 이 코퍼스 실측으로
 # 만든다(FR40.18·DQ-64): 561편 전수 대조에서 가이드가 확실(○)로 준 항목조차 무너졌다
 # (`디어`→DEER = 617건/192편 **전량 오탐**). 채택 절차는
 #   ./yt.sh terms [폴더|채널] --from glossary/seeds/guide-2026-08.txt
@@ -10,12 +10,80 @@
 # **하나가 반드시** 있어야 한다 — 없으면 사전 로드가 `ValueError`로 실패한다(FR40.5·DQ-65).
 # 한국어는 어절 내부에 경계가 없어 그 조건이 유일한 안전장치다.
 #
-# 예시(주석 — 실측 확인 전에는 켜지 않는다):
-# - canonical: 딸깍
-#   variants:
-#     - text: 딸각
-#       word_exact: true
-#   domain: common
-#   confidence: high
-#   note: 실측 필요 — `terms`로 어절 분포를 확인한 뒤 채택
-#   source: corpus-YYYY-MM-DD
+
+# ── 확정 규칙 (2026-09-29) ───────────────────────────────────────────────────
+# 배제한 후보와 사유:
+#   오케→OKF    100건 중 대부분이 "오케이"(okay)다. 후보 뒤 1음절이 조사 `이`와 같아
+#               비율이 73%로 부풀려졌다 — 도구가 경고한 바로 그 사례. **그대로 둔다.**
+#   아울→OWL    50%. "아울렛" 등과 섞인다. **그대로 둔다.** 오울·마울도 같이 보류.
+#   FTP5→FTS5   어절 일치 0%.
+#   딸각→딸깍    50% — "딸각거리다" 등에 섞인다. 2건뿐이라 가치도 낮다.
+#   순호·손호→Suno  인명 오인 위험(손호준 등). 각 2건.
+#   커서→Cursor · 페이블→Fable  ai-llm.yaml 의 배제 사유와 동일.
+
+- canonical: 사례글
+  variants:
+    - text: 사례을
+      word_exact: true
+    - text: 사례그
+      word_exact: true
+  domain: common
+  confidence: high
+  source: corpus-2026-09-27
+  measured: {hits: 20, videos: 6}
+
+- canonical: 잡도리
+  variants:
+    - text: 잡돌리
+      word_exact: true
+    - text: 잡돌이
+      word_exact: true
+  domain: common
+  confidence: high
+  source: corpus-2026-09-27
+  measured: {hits: 7, videos: 4}
+
+- canonical: 전자책
+  variants:
+    - text: 전자측
+      word_exact: true
+  domain: common
+  confidence: high
+  source: corpus-2026-09-27
+  measured: {hits: 1, videos: 1}
+
+- canonical: 육하원칙
+  variants:
+    - text: 6원칙
+      word_exact: true
+  domain: common
+  confidence: high
+  source: corpus-2026-09-27
+  measured: {hits: 1, videos: 1}
+
+- canonical: Confluence
+  variants:
+    - text: 컴플런스
+      word_exact: true
+  domain: common
+  confidence: high
+  source: corpus-2026-09-27
+  measured: {hits: 3, videos: 2}
+
+- canonical: Antigravity
+  variants:
+    - text: 안티그래버티
+      word_exact: true
+  domain: common
+  confidence: high
+  source: corpus-2026-09-27
+  measured: {hits: 1, videos: 1}
+
+- canonical: EXAONE
+  variants:
+    - text: X41
+      word_exact: true
+  domain: common
+  confidence: high
+  source: corpus-2026-09-27
+  measured: {hits: 2, videos: 1}

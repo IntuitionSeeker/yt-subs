@@ -36,6 +36,56 @@ def segments_to_srt(segments) -> str:
     return "\n".join(blocks)
 
 
+# ─── 진행률 (FR30.6) ─────────────────────────────────────────────────────────
+def progress_percent(t, duration) -> int:
+    """처리 시각(초) / 전체 길이(초) → 0~100 정수. 비정상 입력은 0."""
+    try:
+        tt, d = float(t), float(duration)
+    except (TypeError, ValueError):
+        return 0
+    if d <= 0 or tt <= 0:
+        return 0
+    return max(0, min(100, round((tt / d) * 100)))
+
+
+def _clock(sec) -> str:
+    """초 → 분:초 (시가 있으면 시:분:초). 진행 로그 표기용."""
+    try:
+        sec = max(0, int(float(sec or 0)))
+    except (TypeError, ValueError):
+        sec = 0
+    h, rem = divmod(sec, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def _seg_end(seg):
+    """세그먼트의 end (faster-whisper 객체 / dict 양쪽 지원)."""
+    if hasattr(seg, "end"):
+        return seg.end
+    return seg.get("end") if isinstance(seg, dict) else None
+
+
+def with_progress(segments, duration, on_progress=None, log_step: int = 10):
+    """세그먼트를 흘려보내며 진행률을 보고한다.
+
+    faster-whisper의 segments는 **지연 생성자**라 소비하는 동안 실제 전사가 진행된다 —
+    여기서 통과시키는 것 외에 따로 순회하면 안 된다(두 번 돌거나 비어버린다).
+    진행률은 세그먼트 end 기준이라 단조 증가하지만, VAD가 건너뛴 무음 구간 때문에
+    경과 시간과 정비례하지는 않는다(자막 시각 기준 진척도).
+    duration을 모르면(0) 로그는 생략하고 콜백만 0으로 흘린다.
+    """
+    next_log = log_step
+    for seg in segments:
+        yield seg
+        pct = progress_percent(_seg_end(seg), duration)
+        if on_progress:
+            on_progress(pct)
+        if duration and pct >= next_log:
+            log.info(f"    … 전사 {pct}% ({_clock(_seg_end(seg))} / {_clock(duration)})")
+            next_log = (pct // log_step) * log_step + log_step
+
+
 class Transcriber:
     """채널의 sub_type=none(무자막) 영상을 전사해 기존 파이프라인 산출물로 저장."""
 
@@ -73,7 +123,7 @@ class Transcriber:
             raise RuntimeError("오디오 파일 다운로드 실패")
         return files[0], info
 
-    def transcribe_video(self, vid: str) -> str:
+    def transcribe_video(self, vid: str, on_progress=None) -> str:
         tmpdir = tempfile.mkdtemp(prefix="ytsub_audio_")
         try:
             audio_path, info = self._download_audio(vid, tmpdir)
@@ -83,16 +133,21 @@ class Transcriber:
             log.info(f"  🎤 전사 시작: {title[:40]} (영상당 수 분 소요)")
 
             model = self._load_model()
-            segments, _ = model.transcribe(str(audio_path), language=self.lang,
-                                           vad_filter=True)
-            srt = segments_to_srt(segments)
+            segments, winfo = model.transcribe(str(audio_path), language=self.lang,
+                                               vad_filter=True)
+            # info.duration 을 알아야 진행률을 낼 수 있다 (FR30.6)
+            duration = getattr(winfo, "duration", 0) or 0
+            srt = segments_to_srt(with_progress(segments, duration, on_progress))
             if not srt.strip():
                 raise RuntimeError("전사 결과가 비어 있음")
             txt = su.srt_to_txt(srt)
 
             (self.ext.dirs["srt"] / f"{basename}.srt").write_text(srt, encoding="utf-8")
             (self.ext.dirs["txt"] / f"{basename}.txt").write_text(txt, encoding="utf-8")
-            meta = self.ext.meta.save(info, basename, "whisper")
+            # 무자막 영상은 process_video가 meta를 쓰지 않으므로 **여기서 처음
+            # 만들어진다** — 출처는 `transcribe` (FR39.2)
+            meta = self.ext.meta.save(info, basename, "whisper",
+                                      origin_entry={"kind": "transcribe"})
             meta["basename"] = basename
             self.ext.state.mark_done(vid, meta)
             self.ext._log_row([vid, upload_date, title, "transcribe", "whisper",
@@ -102,7 +157,7 @@ class Transcriber:
         finally:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
-    def run(self, limit: int = None) -> dict:
+    def run(self, limit: int = None, on_progress=None) -> dict:
         vids = self.targets()
         if limit:
             vids = vids[:limit]
@@ -113,7 +168,7 @@ class Transcriber:
         log.info(f"━━━ Whisper 전사: {self.channel} — 대상 {len(vids)}개 ━━━")
         for i, vid in enumerate(vids, 1):
             try:
-                self.transcribe_video(vid)
+                self.transcribe_video(vid, on_progress=on_progress)
                 stats["ok"] += 1
             except Exception as exc:
                 stats["error"] += 1

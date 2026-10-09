@@ -12,11 +12,67 @@ import yt_dlp
 
 import config
 import cookie_health
+import video_access
 import subtitle_utils as su
 from state_manager import StateManager
 from meta_collector import MetaCollector
 
 log = logging.getLogger("extractor")
+
+
+class BatchRest:
+    """
+    배치 휴식 상태 (FR14.2). `run()` 호출 경계를 넘어 공유할 수 있는 카운터다.
+
+    `run()`의 지역 변수로만 두면 대시보드 그룹 추출(`_run_grouped`)처럼 채널마다
+    `run()`을 새로 부르는 경로에서 카운터가 매번 0으로 리셋되어 휴식이 영영 오지
+    않는다(검색 추출은 영상당 채널이 달라 특히 심각). 공유 객체로 분리해 막는다.
+
+    cancel_check : () -> bool. True면 남은 휴식을 끊는다(취소 응답성 유지, FR18.2).
+                   None이면 기존 CLI 경로와 완전히 동일하게 `time.sleep(rest)` 1회.
+    """
+
+    TICK_SEC = 1        # 취소 감시 주기(초) — cancel_check가 있을 때만 사용
+
+    def __init__(self, cancel_check=None):
+        self._cancel_check = cancel_check
+        self.since = 0                                    # 마지막 휴식 이후 시도 수
+        self.size = random.randint(*config.BATCH_SIZE_RANGE)   # 이번 배치 크기(랜덤)
+        self.rests = 0                                    # 누적 휴식 횟수(검증용)
+
+    def _cancelled(self) -> bool:
+        try:
+            return bool(self._cancel_check and self._cancel_check())
+        except Exception:                # pragma: no cover - 콜백 오류는 무시
+            return False
+
+    def count(self, n: int = 1):
+        """extract_info 시도 1회 계상 (성공·실패 무관)."""
+        self.since += n
+
+    def due(self) -> bool:
+        return self.since >= self.size
+
+    def take(self) -> int:
+        """휴식 수행. 휴식 시간·다음 배치 크기는 **매번 재추첨**한다 (FR14.2)."""
+        rest = random.randint(*config.BATCH_REST_RANGE)
+        log.info(f"  💤 {self.since}개 처리 → {rest}초 휴식 (차단 예방)")
+        slept = 0
+        if self._cancel_check is None:
+            time.sleep(rest)             # CLI 경로 — 기존 동작 그대로
+            slept = rest
+        else:
+            while slept < rest:
+                if self._cancelled():
+                    log.info(f"  ⏹ 취소 감지 → 휴식 중단 ({slept}/{rest}초)")
+                    break
+                chunk = min(self.TICK_SEC, rest - slept)
+                time.sleep(chunk)
+                slept += chunk
+        self.since = 0
+        self.size = random.randint(*config.BATCH_SIZE_RANGE)
+        self.rests += 1
+        return slept
 
 
 class Extractor:
@@ -34,6 +90,13 @@ class Extractor:
     def _ydl_opts(self, **extra) -> dict:
         """공통 yt-dlp 옵션 + 쿠키(있으면) + 추가 옵션을 병합."""
         opts = {**config.YTDLP_COMMON, **extra}
+        # 제목 언어 고정 (FR32.1, DQ-20) — 다국어 제목 채널에서 flat 스캔(browse)과
+        # 영상별 full info(player)가 서로 다른 언어 트랙을 반환하는 것을 막는다.
+        # self 없이 호출되는 경로(jobs._probe_opts)가 있어 기본 언어로 폴백한다.
+        lang = getattr(self, "lang", None) or config.DEFAULT_LANG
+        ea = {k: dict(v) for k, v in (opts.get("extractor_args") or {}).items()}
+        ea.setdefault("youtube", {})["lang"] = [lang]
+        opts["extractor_args"] = ea
         ff = config.firefox_profile_dir()
         if ff:
             # Firefox 프로필에서 매 실행 최신 쿠키를 직접 읽는다 (FR13.6).
@@ -188,7 +251,11 @@ class Extractor:
                       content_type: str = "video",
                       playlists_map: dict = None,
                       info: dict = None,
-                      date_range: dict = None) -> str:
+                      date_range: dict = None,
+                      origin: dict = None) -> str:
+        # origin: 이 run의 출처 서술자 dict 또는 None (FR39.5). **해석·병합하지 않고**
+        # 저장 계층(MetaCollector.save)에 그대로 넘긴다 — 규칙이 두 곳에 있으면
+        # 한쪽이 반드시 append 한다(FR39.4).
         url = f"https://www.youtube.com/watch?v={vid}"
         # info가 주어지면 조회를 생략 (FR17.2: 단일영상 워커가 이미 받은 info 재사용)
         if info is None:
@@ -243,7 +310,8 @@ class Extractor:
         # 메타·설명 저장
         meta = self.meta.save(info, basename, sub_type,
                               playlists=(playlists_map or {}).get(vid, []),
-                              content_type=content_type)
+                              content_type=content_type,
+                              origin_entry=origin)
         meta["basename"] = basename
         self.state.mark_done(vid, meta)
 
@@ -316,7 +384,8 @@ class Extractor:
     # ── 채널 전체 실행 ───────────────────────────────────────────────────────
     def run(self, force_vid: str = None, limit: int = None,
             progress=None, entries: list = None, pl_map: dict = None,
-            date_range: dict = None) -> dict:
+            date_range: dict = None, rest_state: "BatchRest" = None,
+            origin: dict = None) -> dict:
         """
         채널 증분 추출. 신규 인자가 모두 None이면 기존 CLI 동작과 완전 동일 (FR18.1).
 
@@ -324,6 +393,11 @@ class Extractor:
         entries    : 주어지면 scan_channel() 생략 (대시보드 스캔 캐시 재사용, DQ-13)
         pl_map     : 주어지면(빈 dict 포함) scan_playlists() 생략
         date_range : {"since": "YYYYMMDD"|None, "until": "YYYYMMDD"|None} (DQ-12)
+        rest_state : 배치 휴식 카운터(FR14.2)를 호출 간 공유하고 싶을 때 주입.
+                     None이면 이 run() 전용 BatchRest를 새로 만든다(기존 동작).
+        origin     : 출처 서술자 dict — 한 run = 한 출처이므로 루프의 모든
+                     process_video 호출에 **같은 값**을 넘긴다. None이면 저장 계층이
+                     기존 `origin`을 보존만 한다 (FR39.4ⓒ·FR39.15)
         """
         log.info(f"━━━ 채널: {self.channel} ━━━")
 
@@ -354,10 +428,10 @@ class Extractor:
         # 따라서 extract_info 요청을 1회 소비한 모든 경로(성공·무자막·기간외·
         # 멤버십·429·기타 오류)가 예산을 소비해야 한다 → 시도 직전에 증가시킨다
         processed = 0         # extract_info 요청을 소비한 시도 수 — --limit 기준
-        since_rest = 0        # 마지막 배치 휴식 이후 시도 수 (실패 포함) — 휴식 기준
         done = 0              # 처리 완료 수 (스킵 포함) — 진행률 기준
-        # 배치 크기는 매 배치 재추첨 — 고정 주기는 차단 탐지의 기계 서명 (FR14.2)
-        batch_size = random.randint(*config.BATCH_SIZE_RANGE)
+        # 배치 휴식 상태(시도 수·배치 크기). 주입되면 호출 경계를 넘어 누적된다 —
+        # 대시보드 그룹 추출은 채널마다 run()을 새로 부르므로 공유가 필수다 (FR14.2)
+        rest = rest_state if rest_state is not None else BatchRest()
 
         for i, entry in enumerate(entries, 1):
             if cancelled:
@@ -391,12 +465,8 @@ class Extractor:
                 break
 
             # 배치 휴식 (FR14.2): 랜덤 개수 시도마다 랜덤 시간 쉼
-            if since_rest >= batch_size:
-                rest = random.randint(*config.BATCH_REST_RANGE)
-                log.info(f"  💤 {since_rest}개 처리 → {rest}초 휴식 (차단 예방)")
-                time.sleep(rest)
-                since_rest = 0
-                batch_size = random.randint(*config.BATCH_SIZE_RANGE)
+            if rest.due():
+                rest.take()
 
             # 영상 처리 직전 진행 보고 — False면 우아한 취소 (FR18.2)
             if not self._report(progress, "extracting", done, total,
@@ -404,7 +474,7 @@ class Extractor:
                 cancelled = True
                 break
 
-            since_rest += 1
+            rest.count()                     # 휴식 카운터 소비
             processed += 1                   # 요청 예산 소비 (성공·실패 무관)
             retried_429 = False              # 429 재시도는 영상당 1회 (FR14.3)
             event = None                     # 결과 확정 시 채워짐 (FR26.1)
@@ -414,7 +484,8 @@ class Extractor:
                         vid, action,
                         content_type=entry.get("content_type", "video"),
                         playlists_map=pl_map,
-                        date_range=date_range)
+                        date_range=date_range,
+                        origin=origin)
                     consecutive_429 = 0          # 성공 시 카운터 리셋
                     if result == "ok":
                         stats[action] += 1
@@ -431,8 +502,14 @@ class Extractor:
                         event = self._event(vid, entry, "no_sub", "자막 없음")
                 except Exception as exc:
                     msg = str(exc)
-                    # 멤버십 전용 영상은 오류가 아니라 접근 불가로 분류
-                    if self._is_members_only(msg):
+                    # 멤버십 전용 영상은 오류가 아니라 접근 불가로 분류.
+                    # 1차 신호는 스캔 엔트리의 availability(언어 비의존, DQ-38) —
+                    # 메시지 문구만 보면 lang=ko(DQ-20)에서 한국어로 번역돼 놓친다.
+                    # 단 429는 멤버십 여부와 무관한 일시 차단이므로 **먼저** 판정한다:
+                    # 멤버십으로 오분류하면 _mark_skip으로 영구 스킵된다.
+                    is_429 = self._is_429(msg)
+                    if not is_429 and self._is_members_only(
+                            msg, entry.get("availability")):
                         log.info(f"  🔒 멤버십 전용 (스킵): {vid}")
                         self._log_row([vid, "-", "-", action, "-", "members_only", "-"])
                         self._mark_skip(vid, "members_only")
@@ -440,7 +517,7 @@ class Extractor:
                         consecutive_429 = 0
                         event = self._event(vid, entry, "members_only",
                                             "멤버십 전용 — 접근 불가")
-                    elif self._is_429(msg):
+                    elif is_429:
                         consecutive_429 += 1
                         log.warning(f"  ⏳ 429 차단 ({consecutive_429}/{config.CONSECUTIVE_429_LIMIT}): {vid}")
                         self._log_row([vid, "-", "-", action, "-", "error:429", "-"])
@@ -460,7 +537,7 @@ class Extractor:
                         if not retried_429:
                             retried_429 = True
                             processed += 1
-                            since_rest += 1
+                            rest.count()
                             log.info(f"  🔁 같은 영상 재시도: {vid}")
                             continue
                         stats["error"] += 1      # 재시도도 실패 → 이번 run에서 포기
@@ -507,6 +584,11 @@ class Extractor:
             log.warning("  💡 30분~1시간 후 './yt.sh run' 으로 이어받기 하세요.")
             log.warning("  💡 cookies.txt 를 추가하면 차단이 크게 줄어듭니다.")
             log.warning("━" * 50)
+            # FR37.9 — 호출자가 "여기까지"를 구별할 수 있게 표식을 싣는다.
+            # `_STAT_KEYS` 카운터가 아니라 `cancelled`와 같은 계열의 **불리언**이다
+            # (카운터에 섞으면 job stats 등식(V-D11: 미리보기 수 = 처리 수)이 깨진다).
+            # CLI 로그·동작은 무변경(FR18.1) — 읽는 쪽은 대시보드 그룹 워커다.
+            stats["aborted_429"] = True
         if cancelled:
             stats["cancelled"] = True
         return stats
@@ -534,11 +616,15 @@ class Extractor:
         return False
 
     @staticmethod
-    def _is_members_only(msg: str) -> bool:
-        """멤버십 전용 영상 에러 판별."""
-        keywords = ["members-only", "members only", "channel's members",
-                    "Join this channel", "available to this channel"]
-        return any(k.lower() in msg.lower() for k in keywords)
+    def _is_members_only(msg: str, availability=None) -> bool:
+        """멤버십 전용 영상 판별 — 1차 availability, 2차 메시지 (DQ-38).
+
+        판정 규칙은 `video_access`에 모아 대시보드 스캔(FR17.6)과 공유한다.
+        메시지 단독 판정은 언어 의존이다 — `extractor_args.youtube.lang`(DQ-20)이
+        YouTube가 주는 `reason` 문구까지 번역하기 때문에, 구조화 필드인
+        `availability`가 있으면 그쪽이 1차 신호다.
+        """
+        return video_access.is_members_only(msg, availability)
 
     def _mark_skip(self, vid: str, reason: str):
         """접근 불가 영상을 state에 기록해 다음 실행 시 재시도 방지."""

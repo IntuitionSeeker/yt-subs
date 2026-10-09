@@ -1,5 +1,10 @@
 """공통 설정·경로·상수."""
+import logging as _logging
+import re as _re
+import unicodedata as _unicodedata
 from pathlib import Path
+
+_log = _logging.getLogger("config")
 
 # ─── 경로 ────────────────────────────────────────────────────────────────────
 BASE_DIR      = Path(__file__).parent
@@ -112,9 +117,121 @@ MIN_KO_RATIO       = 0.30
 MAX_SPECIAL_RATIO  = 0.20
 
 
+# ─── 경로 세그먼트 검증 · 폴더(그룹) 해석 (FR35.1~35.5) ──────────────────────
+# DQ-33: 그룹명·채널명은 **치환하지 않고 거부**한다. 치환하면 서로 다른 표시명이
+# 같은 디렉터리로 붕괴해 "yaml의 group 값 = 디렉터리명" 1:1 불변식이 깨진다.
+
+_SEG_MAX_CHARS = 64
+_SEG_MAX_BYTES = 255
+_WIN_RESERVED = ({"CON", "PRN", "AUX", "NUL"}
+                 | {f"COM{i}" for i in range(1, 10)}
+                 | {f"LPT{i}" for i in range(1, 10)})
+_DRIVE_RE = _re.compile(r"^[A-Za-z]:")
+
+
+def validate_path_segment(name: str) -> str:
+    """
+    경로 세그먼트(그룹명·채널명) 검증. FR35.4·FR7.9 (DQ-33)
+
+    **순수 문자열 연산만 한다** — `channel_dir()`가 핫패스라 파일시스템 접근
+    (`resolve()`·`exists()`)을 절대 넣지 않는다.
+    통과: NFC 정규화·트림된 값 반환 / 위반: `ValueError(사유)`.
+    """
+    if not isinstance(name, str):
+        raise ValueError(f"이름이 문자열이 아닙니다: {type(name).__name__}")
+    s = _unicodedata.normalize("NFC", name).strip()
+    if not s:                                                    # ⓐ 빈 값
+        raise ValueError("이름이 비어 있습니다.")
+    if len(s) > _SEG_MAX_CHARS:
+        raise ValueError(f"이름이 너무 깁니다({len(s)}자 > {_SEG_MAX_CHARS}자)")
+    if len(s.encode("utf-8")) >= _SEG_MAX_BYTES:
+        raise ValueError("이름이 너무 깁니다(UTF-8 255바이트 이상)")
+    if "/" in s or "\\" in s:                                    # ⓑ 구분자
+        raise ValueError(f"경로 구분자를 쓸 수 없습니다: {s!r}")
+    for ch in s:
+        if ord(ch) < 0x20 or ord(ch) == 0x7F:                    # ⓑ NUL·제어문자
+            raise ValueError(f"제어문자를 쓸 수 없습니다: {s!r}")
+    if s in (".", ".."):                                         # ⓒ
+        raise ValueError(f"예약된 이름입니다: {s!r}")
+    if s.startswith("."):                                        # ⓓ 숨김 폴더
+        raise ValueError(f"점으로 시작할 수 없습니다: {s!r}")
+    if s.endswith(".") or s[-1].isspace():                       # ⓔ
+        raise ValueError(f"점·공백으로 끝날 수 없습니다: {s!r}")
+    if _DRIVE_RE.match(s):                                       # ⓕ 드라이브 문자
+        raise ValueError(f"드라이브 경로를 쓸 수 없습니다: {s!r}")
+    if s.upper() in _WIN_RESERVED:                               # ⓖ Windows 예약어
+        raise ValueError(f"예약어는 쓸 수 없습니다: {s!r}")
+    return s
+
+
+# 그룹 맵 캐시 — 키는 (yaml 경로, st_mtime_ns, st_size). FR35.3 (DQ-32)
+# 1차 무효화는 이 stat 기반 자동 감지다. CLI 컨테이너와 serve 컨테이너가 별개
+# 프로세스라 한쪽의 명시 무효화가 다른 쪽에 전달되지 않기 때문이다.
+_group_cache_key = None
+_group_cache: dict = {}
+_group_warned: set = set()
+
+
+def invalidate_group_cache():
+    """그룹 맵 캐시 강제 무효화 — `ChannelRegistry._save()`가 호출(2차 안전망). FR35.3"""
+    global _group_cache_key
+    _group_cache_key = None
+
+
+def _group_map() -> dict:
+    """
+    `{NFC 채널명: group}` 읽기 전용 맵. FR35.2~35.3 (DQ-32)
+
+    `channel_registry`를 import하지 않는다(순환). yaml 부재·파싱 실패는 **빈 맵**이며
+    예외를 던지지 않는다. 캐시 히트 시 I/O는 `stat()` 1회.
+    """
+    global _group_cache_key, _group_cache
+    path = CHANNELS_YAML
+    try:
+        st = path.stat()
+        key = (str(path), st.st_mtime_ns, st.st_size)
+    except OSError:
+        key = (str(path), None, None)
+    if key == _group_cache_key:
+        return _group_cache
+    mapping = {}
+    if key[1] is not None:
+        try:
+            import yaml                       # 지연 임포트 (config는 어디서나 import된다)
+            with open(path, encoding="utf-8") as f:
+                data = yaml.safe_load(f) or {}
+            for name, cfg in (data.get("channels") or {}).items():
+                if not isinstance(cfg, dict):
+                    continue
+                group = (cfg.get("group") or "").strip()
+                if group and isinstance(name, str):
+                    mapping[_unicodedata.normalize("NFC", name)] = group
+        except Exception:                      # 파싱 실패 → 빈 맵 (예외 금지)
+            mapping = {}
+    _group_cache_key, _group_cache = key, mapping
+    return mapping
+
+
 def channel_dir(channel: str) -> Path:
-    """채널별 출력 폴더 경로."""
-    return OUTPUT_BASE / channel
+    """
+    채널별 출력 폴더 경로. FR35.1 — `group`이 있으면 `output/<group>/<채널>/`.
+
+    시그니처·호출 형태 무변경(호출부 12곳은 손대지 않는다).
+    채널명 검증 실패는 `ValueError`(폴백할 곳이 없다), 그룹명 검증 실패는
+    **무시하고 평면 경로로 폴백 + 1회 경고**다 — 수동 편집된 yaml 하나로
+    라이브러리 전체가 죽으면 안 된다 (FR35.5·DQ-33).
+    """
+    name = validate_path_segment(channel)
+    group = _group_map().get(name)
+    if group:
+        try:
+            return OUTPUT_BASE / validate_path_segment(group) / name
+        except ValueError as exc:
+            if group not in _group_warned:
+                _group_warned.add(group)
+                _log.warning(f"⚠️ 폴더 이름이 부적합해 무시합니다({exc}) — "
+                             f"채널 '{name}'은 output/ 최상위로 폴백합니다.")
+    return OUTPUT_BASE / name
 
 
 def channel_subdirs(channel: str) -> dict:

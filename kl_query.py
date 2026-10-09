@@ -4,6 +4,7 @@ import json
 import logging
 
 import config
+import corrector
 
 log = logging.getLogger("query")
 
@@ -78,23 +79,28 @@ class KLQuery:
 
     # ── 전체 자막 로드 (FR9.2) ───────────────────────────────────────────────
     def get_full(self, video_id: str = None, basename: str = None) -> str:
-        """영상 전체 자막 텍스트 로드 (RAG 미사용)."""
-        txt_dir = self.dirs["txt"]
+        """영상 전체 자막 텍스트 로드 (RAG 미사용).
+
+        본문은 **교정본이 신선하면 교정본**이다(FR40.13 — 소비 단일 통로
+        `corrector.pick_source`). 요약·하네스가 읽는 분석 입력이므로 인덱싱과 같은
+        본문을 봐야 한다. 교정본이 없거나 stale이면 조용히 원본으로 돌아간다.
+        """
         if basename:
-            path = txt_dir / f"{basename}.txt"
-            return path.read_text(encoding="utf-8") if path.exists() else ""
+            return corrector.read_source(self.channel, basename, kind="txt")
         # video_id로 찾기: meta 역참조
         for meta_file in self.dirs["meta"].glob("*.json"):
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
             if meta.get("id") == video_id:
-                path = txt_dir / f"{meta_file.stem}.txt"
-                return path.read_text(encoding="utf-8") if path.exists() else ""
+                return corrector.read_source(self.channel, meta_file.stem, kind="txt")
         return ""
 
     # ── 영상 목록 (FR11.4) ───────────────────────────────────────────────────
     def list_videos(self, since: str = None, until: str = None) -> list:
         """영상 목록 + 메타 반환 (날짜순)."""
         videos = []
+        # 교정 상태(FR40.16) — 정본은 `fix/state.json`이고 `meta/*.json` 스키마는
+        # 건드리지 않는다(FR40.24ⓔ). 교정본이 없는 채널에서는 빈 맵이라 비용이 0이다.
+        fix_status = corrector.video_status(self.channel)
         for meta_file in sorted(self.dirs["meta"].glob("*.json")):
             meta = json.loads(meta_file.read_text(encoding="utf-8"))
             ud = meta.get("upload_date", "00000000")
@@ -111,6 +117,18 @@ class KLQuery:
                 "playlists": meta.get("playlists", []),
                 "content_type": meta.get("content_type", "video"),
                 "sub_type": meta.get("sub_type"),   # 📝/🤖 뱃지용 (FR20.2)
+                # 영상 길이 (FR20.5) — meta.json에 이미 저장된 값을 그대로 통과시킨다.
+                # 결측은 None/"" — 0으로 채우면 0초 영상과 구분 불가 (FR20.6, DQ-29).
+                "duration": meta.get("duration"),
+                "duration_string": meta.get("duration_string") or "",
+                # 출처 (FR39.8) — meta의 값을 그대로 통과. 키가 없는 과거 meta는
+                # **`[]`**(null이 아니다 — 프론트가 분기 없이 순회한다). 백필 없음.
+                "origin": meta.get("origin") or [],
+                # 교정 배지·토글용 (FR40.16). 교정본이 없으면 corrected=False·0건이고
+                # 프론트는 배지를 그리지 않는다. stale이면 본문은 원본이 쓰인다.
+                "corrected": bool(fix_status.get(meta_file.stem, {}).get("corrected")),
+                "corrections": int(fix_status.get(meta_file.stem, {}).get("corrections", 0)),
+                "correction_stale": bool(fix_status.get(meta_file.stem, {}).get("stale")),
                 "url": meta.get("webpage_url"),
             })
         return sorted(videos, key=lambda v: v["upload_date"], reverse=True)

@@ -6,11 +6,24 @@
 #       ./yt.sh review [--llm]
 #       ./yt.sh index
 #       ./yt.sh ask 채널 "질문" [--multistep]
-#       ./yt.sh serve        (대시보드)
+#       ./yt.sh serve        (대시보드, 포그라운드 — 터미널을 닫으면 종료)
+#       ./yt.sh serve --detach   (상시 운용: -d --restart unless-stopped, FR37.18)
+#       ./yt.sh migrate-groups [--apply [--yes]] [--rollback] [--unlock] [--no-backup]
+#       ./yt.sh backfill-tickers [채널] [--apply]   (기본 dry-run, FR12.2)
+#       ./yt.sh terms [폴더|채널] --from 후보파일 [--min N] [--hold 도메인] [--json]
+#                            (교정 후보 계량 — 읽기 전용·네트워크 0, FR40.18)
+#       ./yt.sh correct [폴더|채널] [--apply] [--status] [--json]
+#                            (자막 용어 교정 — 기본 dry-run, 원본 불변, FR40)
+#       ./yt.sh audit [--json] [--strict] [--check ID] [--baseline "N passed / M skipped"]
+#                            (문서·코드 정합 감사 — 읽기 전용·output/ 불필요, FR38)
+#       ./yt.sh doctor [채널] [--json] [--strict] [--check ID]
+#                            (데이터 건전성 점검 — 읽기 전용 전수, FR38)
+#       종료코드: 0 이상없음 / 1 경고만 / 2 오류 / 3 점검 자체 실패
 # ─────────────────────────────────────────────────────────────
 set -e
 
 IMAGE="youtube-subs"
+CONTAINER="yt-subs-dashboard"      # serve --detach 전용 이름 (FR37.18)
 DIR="$(cd "$(dirname "$0")" && pwd)"
 
 # 이미지 없으면 자동 빌드 (FR8.5)
@@ -28,6 +41,7 @@ if [ ! -f "$DIR/channels.yaml" ]; then
   echo "channels: {}" > "$DIR/channels.yaml"
 fi
 mkdir -p "$DIR/output"
+mkdir -p "$DIR/glossary"      # 없으면 docker가 빈 폴더를 만든다 (channels.yaml 교훈)
 
 # ── Firefox 프로필 마운트 (있을 때만) FR13.6 ──
 # Firefox에 로그인만 해두면 매 실행 최신 쿠키를 직접 읽는다 (내보내기 불필요).
@@ -54,6 +68,25 @@ if [ -f "$DIR/cookies.txt" ]; then
   fi
 fi
 
+# ── migrate-groups --apply: 호스트측 자동 백업 (FR35.11⑦) ──
+# 컨테이너에는 output/·channels.yaml만 마운트돼 내부에서는 형제 경로를 만들 수 없고,
+# output/ 안에 두면 채널 열거·purge rmtree와 섞인다 → 반드시 호스트에서 output/ 바깥에.
+EXTRA_ARGS=()
+if [ "$1" = "migrate-groups" ]; then
+  HAS_APPLY=0; HAS_NOBACKUP=0
+  for a in "$@"; do
+    [ "$a" = "--apply" ] && HAS_APPLY=1
+    [ "$a" = "--no-backup" ] && HAS_NOBACKUP=1
+  done
+  if [ "$HAS_APPLY" = "1" ] && [ "$HAS_NOBACKUP" = "0" ]; then
+    BACKUP="$DIR/output_backup_$(date +%Y%m%d_%H%M%S)"
+    echo "▢ 백업 생성 중: $BACKUP"
+    cp -a "$DIR/output" "$BACKUP"
+    echo "▢ 백업 완료 (자동 삭제하지 않습니다 — 확인 후 직접 지우세요: rm -rf '$BACKUP')"
+    EXTRA_ARGS=(--backup-path "$BACKUP")
+  fi
+fi
+
 # serve 명령은 포트 노출 필요
 PORT_OPT=""
 if [ "$1" = "serve" ]; then
@@ -61,16 +94,37 @@ if [ "$1" = "serve" ]; then
   echo "▢ 대시보드: http://localhost:8800"
 fi
 
+# ── serve --detach: 상시 운용 기동 (FR37.18) ──
+# 주기 자동 추출(FR37)은 serve 프로세스 안에서만 살아 있다. 기본(포그라운드)
+# 동작은 그대로 두고, --detach일 때만 -d + 재시작 정책 + 고정 이름으로 띄운다.
+# 마운트 구성은 아래 docker run 한 곳을 공유하므로 포그라운드와 동일하다.
+DETACH=0
+ARGS=()
+for a in "$@"; do
+  if [ "$1" = "serve" ] && [ "$a" = "--detach" ]; then DETACH=1; continue; fi
+  ARGS+=("$a")
+done
+RUN_OPTS=(--rm -it)
+if [ "$DETACH" = "1" ]; then
+  RUN_OPTS=(-d --restart unless-stopped --name "$CONTAINER")
+  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER"; then
+    echo "▢ 기존 컨테이너 교체: $CONTAINER"
+    docker rm -f "$CONTAINER" >/dev/null
+  fi
+  echo "▢ 백그라운드 기동 (로그: docker logs -f $CONTAINER · 중지: docker stop $CONTAINER)"
+fi
+
 # HuggingFace 캐시를 호스트와 공유 (모델 재다운로드 방지)
 HF_CACHE="$HOME/.cache/huggingface"
 mkdir -p "$HF_CACHE"
 
-docker run --rm -it \
+docker run "${RUN_OPTS[@]}" \
   $PORT_OPT \
   $COOKIE_OPT \
   "${FF_OPT[@]}" \
   -v "$DIR/output:/app/output" \
   -v "$DIR/channels.yaml:/app/channels.yaml" \
+  -v "$DIR/glossary:/app/glossary" \
   -v "$HF_CACHE:/root/.cache/huggingface" \
   -e ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY}" \
-  "$IMAGE" "$@"
+  "$IMAGE" "${ARGS[@]}" "${EXTRA_ARGS[@]}"

@@ -1,0 +1,7 @@
+# ✗ 로드 실패용 픽스처 — 배제·요구 조건이 하나도 없다 (FR40.5·DQ-65·V-U39ⓕ)
+# 이 파일을 `glossary.load`에 넣으면 `ValueError`여야 한다. 실측: `디어` 617건 전량 오탐.
+- canonical: DEER
+  variants:
+    - text: 디어
+  domain: unguarded
+  confidence: high

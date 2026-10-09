@@ -53,7 +53,13 @@ class SummaryRequest(BaseModel):
 
 
 class ScanRequest(BaseModel):
-    url: str
+    """`{url}`(채널·재생목록·검색 URL) 또는 `{q,…}`(검색어). FR17.3·FR24.2·FR34.1"""
+    url: str | None = None
+    q: str | None = None                  # 검색어 — 전용 필드로만 진입 (DQ-27)
+    limit: int | None = None              # ⓐ 개수 상한 (기본 20, 1~50)
+    min_duration: int | None = None       # ⓑ N초 미만 제외 (기본 180, "쇼츠" 아님)
+    period: str | None = None             # ⓒ 기간 프리셋 (all|hour|today|week|month|year)
+    folder: str | None = None             # 신규 등록 채널을 묶을 폴더 (기본 = 검색어)
 
 
 class Filters(BaseModel):
@@ -72,6 +78,13 @@ class ExtractRequest(BaseModel):
     index: bool = True
 
 
+class ScheduleRequest(BaseModel):
+    """주기 자동 추출 설정 부분 갱신. FR37.14ⓑ — 지정한 필드만 바뀐다."""
+    enabled: bool | None = None
+    interval_days: int | None = None
+    max_videos_per_cycle: int | None = None
+
+
 class VideoDeleteRequest(BaseModel):
     channel: str
     basename: str
@@ -85,6 +98,16 @@ class ChannelDeleteRequest(BaseModel):
 class ChannelGroupRequest(BaseModel):
     channel: str
     group: str | None = None      # 트림 후 빈 값이면 폴더 해제 (FR25.2)
+
+
+class ChannelAutoRunRequest(BaseModel):
+    channel: str
+    auto_run: bool                # false면 run·transcribe 전체 순회 제외 (FR34.8)
+
+
+class ChannelNoteRequest(BaseModel):
+    channel: str
+    note: str = ""                # 한 줄 메모, 200자 상한 (FR36.1)
 
 
 class ChannelRenameRequest(BaseModel):
@@ -166,9 +189,19 @@ def summary(req: SummaryRequest):
 # ─── 추출 (FR17·FR18) ────────────────────────────────────────────────────────
 @app.post("/extract/scan")
 def extract_scan(req: ScanRequest):
-    """채널 사전 스캔 → 후보 목록·재생목록 + scan_id (FR17.3)."""
+    """사전 스캔 → 후보 목록 + scan_id. 채널·재생목록(FR17.3·FR24.2) 또는 검색(FR34.1)."""
+    url = (req.url or "").strip()
+    q = (req.q or "").strip()
     try:
-        return MANAGER.scan(req.url)
+        if url and q:
+            raise ValueError("url과 q는 함께 지정할 수 없습니다.")
+        if not url and not q:
+            raise ValueError("url 또는 q 중 하나가 필요합니다.")
+        if q:
+            return MANAGER.scan_search(q, limit=req.limit,
+                                       min_duration=req.min_duration,
+                                       period=req.period, folder=req.folder)
+        return MANAGER.scan(url)
     except JobBusyError as exc:
         return JSONResponse(status_code=409,
                             content={"detail": exc.message, "job": exc.job})
@@ -241,6 +274,9 @@ def channels_stats():
             "lang": ch.get("lang", config.DEFAULT_LANG),
             "added_at": ch.get("added_at", ""),
             "group": ch.get("group", ""),          # 채널 폴더 (FR25.3)
+            "note": ch.get("note", ""),            # 채널 메모 (FR36.3)
+            # 필드 부재 = true (FR34.8·DQ-25) — 기존 yaml 무변경 호환
+            "auto_run": ch.get("auto_run", True) is not False,
             "extracted": extracted,
             "members_only": members_only,
             "no_sub": no_sub,
@@ -257,23 +293,126 @@ def channels_new():
     return rss_monitor.check_new_videos()
 
 
+# ─── 주기 자동 추출 (FR37.14) ────────────────────────────────────────────────
+# 셋 다 `_reject_if_busy()`를 부르지 않는다 — 쓰는 대상이 전용 상태 파일
+# (`output/.scheduler.json`) 하나뿐이라 진행 중 작업·channels.yaml과 경합하지 않는다
+# (FR31.5·FR36.11의 409 사유가 성립하지 않는다).
+@app.get("/schedule")
+def schedule_get():
+    """설정 + 상태(파생값 `next_due_at`·`running` 포함). FR37.14ⓐ"""
+    import scheduler                     # 지연 임포트
+    return scheduler.get_view(MANAGER)
+
+
+@app.post("/schedule")
+def schedule_set(req: ScheduleRequest):
+    """부분 갱신 후 전체 상태 반환. 검증 위반은 400. FR37.14ⓑ"""
+    import scheduler
+    fields = {}
+    for key in ("enabled", "interval_days", "max_videos_per_cycle"):
+        value = getattr(req, key, None)
+        if value is not None:
+            fields[key] = value
+    try:
+        return scheduler.update(**fields)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/schedule/run-now", status_code=202)
+def schedule_run_now():
+    """이번 주기를 지금 도래시킨다 — 별도 실행 경로가 아니다. FR37.15 (DQ-50)"""
+    import scheduler
+    return scheduler.request_now()
+
+
+@app.on_event("startup")
+def _start_scheduler():
+    """스케줄러 스레드 기동 (FR37.1). `SCHEDULER_DISABLED=1`이면 건너뛴다."""
+    import os
+    if os.environ.get("SCHEDULER_DISABLED") == "1":
+        print("⏰ 스케줄러 비활성 (SCHEDULER_DISABLED=1)")
+        return
+    import scheduler
+    scheduler.start(MANAGER)
+
+
 @app.post("/channels/group")
 def channels_group(req: ChannelGroupRequest):
-    """채널 폴더 지정/변경/해제. FR25.2"""
-    reg = ChannelRegistry()
+    """
+    채널 폴더 지정/변경/해제. FR25.2·FR35.8
+
+    v5.6부터 yaml 기록에 더해 충돌 검사(409)·디렉터리 이동(`os.rename`)·보상 롤백을
+    `folder_ops`가 수행한다. 400=이름 검증 실패 / 409=충돌·작업중 / 500=이동 실패.
+    """
+    _reject_if_busy("폴더를 지정할 수 없습니다")            # FR35.10 (마이그레이션 락 포함)
+    _reject_path_traversal(req.channel)
+    import folder_ops
     try:
-        group = reg.set_group(req.channel, req.group)
+        result = folder_ops.set_channel_group(req.channel, req.group)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
-    return {"ok": True, "channel": req.channel, "group": group}
+    except ValueError as exc:                          # 그룹명 검증 실패 (FR35.4)
+        raise HTTPException(status_code=400, detail=str(exc))
+    except folder_ops.ConflictError as exc:            # 이름공간 충돌 (FR35.6)
+        raise HTTPException(status_code=409, detail=str(exc))
+    except folder_ops.MoveError as exc:                # 이동 실패 (롤백 여부를 detail에)
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "channel": req.channel,
+            "group": result.get("group", ""), "moved": bool(result.get("moved"))}
+
+
+@app.post("/channels/auto_run")
+def channels_auto_run(req: ChannelAutoRunRequest):
+    """`run`·`transcribe` 전체 순회 대상 토글. FR34.8"""
+    if MANAGER.is_busy():                  # 추출 중 registry 경합 방지 (FR21.4 준용)
+        raise HTTPException(status_code=409,
+                            detail="추출/스캔 작업 중에는 변경할 수 없습니다.")
+    reg = ChannelRegistry()
+    try:
+        flag = reg.set_auto_run(req.channel, req.auto_run)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
+    return {"ok": True, "channel": req.channel, "auto_run": flag}
+
+
+@app.post("/channels/note")
+def channels_note(req: ChannelNoteRequest):
+    """
+    채널 메모 저장. FR36.4
+
+    작업 중에는 409다 (`_reject_if_busy` — 아래 FR31 섹션에 정의, 마이그레이션 락 포함).
+    이유는 파일 경합이 아니라 **channels.yaml lost update**: `ChannelRegistry`는
+    생성 시 yaml 전체를 읽고 `_save()`가 전체를 덮어쓰는 read-modify-write이고,
+    그룹 추출 워커(`_run_grouped`)는 작업 내내 같은 인스턴스를 들고 `_save()`를
+    반복하므로 작업 중 저장한 메모가 **조용히 되돌아간다** (DQ-42).
+
+    응답의 `note`는 **서버가 정규화한 최종 값**이다 — 프론트는 이 값을 그대로
+    렌더해 표시 불일치를 만들지 않는다.
+    """
+    _reject_if_busy("메모를 저장할 수 없습니다")          # FR36.11 (FR35.10 락 포함)
+    _reject_path_traversal(req.channel)
+    reg = ChannelRegistry()
+    try:
+        note = reg.set_note(req.channel, req.note)
+    except KeyError:
+        raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
+    except ValueError as exc:                          # 200자 초과 (FR36.1)
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True, "channel": req.channel, "note": note}
 
 
 # ─── 이름 변경 (FR31) ────────────────────────────────────────────────────────
-def _reject_if_busy():
-    """추출/스캔 작업 중 이름 변경 금지 — 파일 경합 방지. FR31.5"""
+def _reject_if_busy(action: str = "이름을 변경할 수 없습니다"):
+    """
+    추출/스캔 작업 중 파일 경합 금지. FR31.5
+
+    `MANAGER.is_busy()`는 job 점유에 더해 `output/.migration.lock`을 OR 합산하므로
+    CLI 마이그레이션 중에도 409가 된다 (FR35.10).
+    """
     if MANAGER.is_busy():
         raise HTTPException(status_code=409,
-                            detail="추출/스캔 작업 중에는 이름을 변경할 수 없습니다.")
+                            detail=f"추출/스캔·마이그레이션 작업 중에는 {action}.")
 
 
 @app.post("/channels/rename")
@@ -282,12 +421,22 @@ def channels_rename(req: ChannelRenameRequest):
     _reject_if_busy()
     _reject_path_traversal(req.channel, req.new_name.strip() or req.new_name)
     import renamer
+    import folder_ops
+    try:                                             # 이름 검증 실패 = 400 (FR35.4·FR7.9)
+        config.validate_path_segment(req.new_name)   # 충돌(중복·기존 폴더)은 아래 409
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
     try:
         renamer.rename_channel(req.channel, req.new_name)
     except KeyError:
         raise HTTPException(status_code=404, detail=f"등록되지 않은 채널: {req.channel}")
+    except folder_ops.ConflictError as exc:          # 최상위 이름공간 충돌 (FR35.6ⓒ)
+        raise HTTPException(status_code=409, detail=str(exc))
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc))
+    # 옛 이름이 박힌 스캔 캐시를 버린다 — 남기면 `output/<옛이름>/` 유령 폴더가
+    # 생긴다 (FR36.8·DQ-41). **성공 후에만** 호출한다(400/409면 캐시 무변경).
+    MANAGER.invalidate_scans(channel=req.channel)
     return {"ok": True, "channel": req.new_name.strip()}
 
 
@@ -321,14 +470,20 @@ def categories_rename(req: CategoryRenameRequest):
 
 @app.post("/folders/rename")
 def folders_rename(req: FolderRenameRequest):
-    """폴더(그룹) 이름 변경. FR31.4"""
-    _reject_if_busy()
+    """폴더(그룹) 이름 변경 — 디렉터리 1회 rename + yaml 일괄. FR31.4·FR35.9"""
+    _reject_if_busy("폴더 이름을 변경할 수 없습니다")
     import renamer
+    import folder_ops
+    src_existed = (config.OUTPUT_BASE / (req.old or "").strip()).is_dir()
     try:
         count = renamer.rename_folder(req.old, req.new)
-    except ValueError as exc:
+    except ValueError as exc:                          # 이름 검증 실패 (FR35.4)
         raise HTTPException(status_code=400, detail=str(exc))
-    return {"ok": True, "channels": count}
+    except folder_ops.ConflictError as exc:            # 이름공간 충돌 (FR35.6)
+        raise HTTPException(status_code=409, detail=str(exc))
+    except folder_ops.MoveError as exc:                # 이동 실패
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "channels": count, "moved": src_existed}
 
 
 @app.post("/videos/delete")
@@ -346,6 +501,11 @@ def delete_video(req: VideoDeleteRequest):
 
     for key, ext in (("srt", "srt"), ("txt", "txt"), ("meta", "json"), ("desc", "txt")):
         (dirs[key] / f"{req.basename}.{ext}").unlink(missing_ok=True)
+
+    # 교정 산출물도 함께 지운다 (FR40.17ⓐ) — 빠뜨리면 원본 없는 **고아 교정본**이
+    # 남고, `correct --status`의 고아 보고가 정상 삭제로 오염된다.
+    import corrector
+    corrector.forget_video(req.channel, req.basename)
 
     state = StateManager(req.channel)
     state.remove(video_id)
@@ -371,15 +531,29 @@ def delete_channel(req: ChannelDeleteRequest):
     _reject_path_traversal(req.channel)
 
     reg = ChannelRegistry()
+    # ⚠️ 삭제 경로는 **yaml 항목을 지우기 전에** 잡는다 (FR35.8). `reg.remove()` 후에는
+    #    `group`이 사라져 `channel_dir()`가 평면 경로를 돌려주고, 그룹 안 채널의
+    #    `output/<G>/<C>/`가 지워지지 않은 채 `purged: false`로 조용히 끝난다.
+    #    (`renamer.rename_channel`이 `old_dir`를 rename 전에 잡는 것과 같은 패턴)
+    try:
+        ch_dir = config.channel_dir(req.channel).resolve() if req.purge else None
+    except ValueError as exc:                # 부적합 채널명 (FR35.4) — 검증 실패는 400
+        raise HTTPException(status_code=400, detail=str(exc))
+
     if not reg.remove(req.channel):
         raise HTTPException(status_code=404, detail="채널을 찾을 수 없습니다.")
+    # 삭제된 채널의 옛 scan_id로 추출하면 `_run_channel`의 `reg.add()`가 채널을
+    # **되살린다** — 이름 변경과 같은 계열의 구멍이라 같은 방식으로 닫는다 (FR36.8)
+    MANAGER.invalidate_scans(channel=req.channel)
 
     purged = False
     if req.purge:
-        ch_dir = config.channel_dir(req.channel).resolve()
         if ch_dir.is_relative_to(config.OUTPUT_BASE.resolve()) and ch_dir.exists():
             shutil.rmtree(ch_dir)
             purged = True
+            # 그룹의 마지막 채널이었다면 빈 폴더가 남는다 → **빈 경우만** rmdir (U-3)
+            import folder_ops
+            folder_ops.prune_empty_group_dir(ch_dir.parent)
     return {"deleted": True, "purged": purged}
 
 
@@ -396,30 +570,57 @@ def _load_meta(channel: str, basename: str) -> dict:
         return {}
 
 
-@app.get("/subtitle")
-def subtitle(channel: str, basename: str):
-    """자막 전문(txt) + 챕터·원본 링크 반환. 경로 탈출 2중 검증. FR20.3·FR27.2"""
-    _reject_path_traversal(channel, basename)
+def _txt_source(channel: str, basename: str, variant: str = "fix"):
+    """자막 전문의 소스 선택 — `/subtitle`·`/export/markdown` **공용**. FR40.13·40.16
+
+    기본은 **교정본**이고 `variant=src`면 원본이다. 선택 규칙은 `corrector.pick_source`
+    한 곳에만 있다 — 두 곳에 규칙이 있으면 한쪽이 stale을 쓴다(DQ-68).
+    반환: `(경로, 실제 variant, 교정 건수)`. 경로 탈출은 원본·교정본 양쪽에서 재확인한다.
+    """
+    import corrector
+    base = config.channel_dir(channel).resolve()
     txt_dir = config.channel_subdirs(channel)["txt"].resolve()
-    path = (txt_dir / f"{basename}.txt").resolve()
-    if not path.is_relative_to(txt_dir):                 # resolve 후 재확인
+    orig = (txt_dir / f"{basename}.txt").resolve()
+    if not orig.is_relative_to(txt_dir):                 # resolve 후 재확인
         raise HTTPException(status_code=400, detail="잘못된 경로 파라미터입니다.")
+    if variant == "src":
+        return orig, "src", 0
+    picked = corrector.pick_source(channel, basename, kind="txt").resolve()
+    if not picked.is_relative_to(base):                  # pragma: no cover - 방어
+        raise HTTPException(status_code=400, detail="잘못된 경로 파라미터입니다.")
+    if picked == orig:
+        return orig, "src", 0
+    changes = int((corrector.load_state(channel).get(basename) or {}).get("changes") or 0)
+    return picked, "fix", changes
+
+
+@app.get("/subtitle")
+def subtitle(channel: str, basename: str, variant: str = "fix"):
+    """자막 전문(txt) + 챕터·원본 링크 반환. 경로 탈출 2중 검증. FR20.3·FR27.2·FR40.16
+
+    `variant`는 `fix`(기본 — 신선한 교정본이 있으면 그것) 또는 `src`(원본)다.
+    이 토글은 장식이 아니라 **사람이 오적용을 보는 유일한 창**이다(FR40.16).
+    """
+    _reject_path_traversal(channel, basename)
+    path, used, changes = _txt_source(channel, basename, variant)
     if not path.exists():
         raise HTTPException(status_code=404, detail="자막 파일이 없습니다.")
     meta = _load_meta(channel, basename)
     return {"basename": basename, "text": path.read_text(encoding="utf-8"),
             "chapters": meta.get("chapters") or [],
+            "variant": used, "corrections": changes,
             "url": meta.get("webpage_url")}
 
 
 @app.get("/export/markdown")
-def export_markdown(channel: str, basename: str):
-    """영상 1개를 Markdown 문서로 조립. FR28.1"""
+def export_markdown(channel: str, basename: str, variant: str = "fix"):
+    """영상 1개를 Markdown 문서로 조립. FR28.1
+
+    자막 본문은 `/subtitle`과 **같은 선택 규칙**을 쓴다(FR40.13) — 기본이 교정본이므로
+    내보낸 Markdown·클립보드 복사(FR21.3)도 교정본이다(C5 — 의도한 동작).
+    """
     _reject_path_traversal(channel, basename)
-    txt_dir = config.channel_subdirs(channel)["txt"].resolve()
-    path = (txt_dir / f"{basename}.txt").resolve()
-    if not path.is_relative_to(txt_dir):
-        raise HTTPException(status_code=400, detail="잘못된 경로 파라미터입니다.")
+    path, used, _changes = _txt_source(channel, basename, variant)
     if not path.exists():
         raise HTTPException(status_code=404, detail="자막 파일이 없습니다.")
     meta = _load_meta(channel, basename)

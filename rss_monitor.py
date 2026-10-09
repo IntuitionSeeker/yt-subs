@@ -63,15 +63,22 @@ def fetch_feed(channel_id: str) -> list:
     return out
 
 
-def check_new_videos() -> dict:
+def check_new_videos(names: list = None) -> dict:
     """
-    등록 채널 전체의 RSS를 순차 조회해 state에 없는 새 영상을 채널별로 반환 (FR29.2).
+    등록 채널의 RSS를 순차 조회해 state에 없는 새 영상을 채널별로 반환 (FR29.2).
     반환: {"channels": {채널명: [{id,title,published}]}, "errors": {채널명: 사유}}
     channel_id는 최초 1회 해석 후 channels.yaml에 캐시된다 (FR29.1).
+
+    names : 조회 대상 채널명 목록 (FR37.4 스케줄러용). **None이면 전 채널**로
+            기존 동작과 완전히 동일하다 — `GET /channels/new`는 인자 없이 부른다.
     """
     reg = ChannelRegistry()
+    targets = reg.list()
+    if names is not None:
+        wanted = set(names)
+        targets = {n: c for n, c in targets.items() if n in wanted}
     new_by_channel, errors = {}, {}
-    for name, ch in reg.list().items():
+    for name, ch in targets.items():
         ch = ch or {}
         cid = ch.get("channel_id")
         if not cid:

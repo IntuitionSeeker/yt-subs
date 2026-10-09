@@ -1,0 +1,4 @@
+# 골든 샘플용 매핑 — 이 픽스처 디렉터리를 `glossary.GLOSSARY_DIR`로 쓰면 모든 채널이
+# `ai-test` 사전을 받는다(소비 경로가 계산하는 `rules_sha256`이 교정 시점과 같아야
+# `pick_source`가 교정본을 고른다 — 그 일치를 시험하는 것이 V-U40ⓔ다).
+default: [ai-test]

@@ -1,0 +1,20 @@
+# glossary/profiles.yaml — 도메인 매핑 **한 파일**. FR40.6·DQ-70
+#
+# 해석은 3층이고 **먼저 맞는 것 하나**만 쓴다: `channels[채널]` → `groups[폴더]` → `default`.
+# `channels.yaml`은 건드리지 않는다 — 그 파일은 채널 **디스크 경로의 정본**이고(FR35)
+# read-modify-write lost update·`add()` 덮어쓰기 사고 이력이 있다(FR7.7·DQ-42).
+#
+# 3층인 이유는 실측이다: 후보 규칙이 닿는 영상 57편 중 **38편이 무그룹 채널 23개**에 있어
+# 폴더만 축으로 삼으면 2/3가 사전을 못 받는다.
+
+default: [common]              # 어느 층에도 없는 채널 — 빈 사전이 정상 상태다
+
+groups:
+  AI LLM Wiki: [common, ai-llm]
+  역배열1: [common]            # 후보 0건 — 주식 사전은 만들지 않는다 (FR40.6·40.24ⓒ)
+  jev claude: [common, ai-llm]
+  jev trading: [common]
+
+channels:                      # 폴더보다 **우선**. 무그룹 채널을 여기서 받는다
+  호두감자: [common, ai-llm]
+  gpters: [common, ai-llm]
